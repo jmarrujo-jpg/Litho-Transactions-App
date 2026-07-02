@@ -781,6 +781,26 @@ function completeJob(ticket, sheetsUsed) {
   });
 }
 
+/** Completes several tickets (full skid each) in one call — used by the New Job flow's
+ *  "Send all to WIP" button. Never throws for the batch: each ticket's outcome is captured
+ *  so one bad ticket doesn't block the rest. */
+function completeJobs(tickets) {
+  var seen = {};
+  var out = [];
+  (tickets || []).forEach(function (ticket) {
+    var t = String(ticket || '').trim();
+    if (!t || seen[t]) return;
+    seen[t] = true;
+    try {
+      var res = completeJob(t);
+      out.push({ ticket: t, ok: true, finalLithoCost: res.finalLithoCost, remainderTicket: res.remainderTicket });
+    } catch (e) {
+      out.push({ ticket: t, ok: false, error: (e && e.message) ? e.message : String(e) });
+    }
+  });
+  return sanitizeForClient_(out);
+}
+
 function getTransactionHistory(ticket) {
   var tx = getTransactionsSheet_();
   var last = tx.getLastRow();
