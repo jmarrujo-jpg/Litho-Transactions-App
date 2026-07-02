@@ -384,6 +384,21 @@ function copyRowByHeaderName_(srcSheet, srcRow, destSheet) {
   return destRow;
 }
 
+/** Appends any missing header columns to a sheet (at the end) and returns the refreshed
+ *  header->column map. Used to add managed columns like "Litho Notes" to sheets that were
+ *  created outside the app, without disturbing existing columns. */
+function ensureColumns_(sheet, names) {
+  var map = headerMap_(sheet);
+  names.forEach(function (n) {
+    if (!map[n]) {
+      var col = sheet.getLastColumn() + 1;
+      sheet.getRange(1, col).setValue(n);
+      map[n] = col;
+    }
+  });
+  return map;
+}
+
 /** Writes all PROGRESS_EXTRA_COLS on a Litho In Progress row in a single setValues when the
  *  columns are contiguous (they are, by construction in setupTabs/getInProgressSheet_),
  *  falling back to per-cell writes otherwise. `vals` must contain every extra-col name. */
@@ -701,6 +716,7 @@ function completeJob(ticket, sheetsUsed) {
   var isSplit = (sheetsUsed !== undefined && sheetsUsed !== null && sheetsUsed !== '');
 
   var wip = getSheet_(SHEETS.WIP);
+  ensureColumns_(wip, ['Litho Notes']); // so any Litho Notes on the ticket carry into WIP
   var destRow = copyRowByHeaderName_(ip, ipRow, wip);
   var wipMap = headerMap_(wip);
   if (wipMap['Litho']) wip.getRange(destRow, wipMap['Litho']).setValue(runningTotal);
@@ -727,6 +743,7 @@ function completeJob(ticket, sheetsUsed) {
     if (remainderQty > 0) {
       remainderTicket = generateRemainderTicketId_(ticket);
       var cs = getSheet_(SHEETS.CURRENT_STEEL);
+      ensureColumns_(cs, ['Litho Notes']); // Litho Notes follows the split remainder too
       var csDestRow = copyRowByHeaderName_(ip, ipRow, cs);
       var csMap = headerMap_(cs);
       if (csMap['Ticket']) cs.getRange(csDestRow, csMap['Ticket']).setValue(remainderTicket);
@@ -792,7 +809,7 @@ function getTransactionHistory(ticket) {
  * ratio (original weight / original sheet count) — no one has to weigh a partial skid.
  * Call this once per ticket as tickets are added to the job, one at a time.
  */
-function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, ticket, sheetsRun) {
+function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, ticket, sheetsRun, lithoNote) {
   ticket = String(ticket || '').trim();
   if (!ticket) throw new Error('Enter a ticket number.');
   if (!group || !itemName) throw new Error('Pick a size/group and coating item for this job.');
@@ -868,6 +885,16 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
     }
   }
 
+  // Per-ticket Litho Notes: a managed column that follows the ticket. Written after any
+  // remainder split so the note stays with the portion actually run, not the leftover skid.
+  lithoNote = String(lithoNote || '').trim();
+  if (lithoNote) {
+    var noteMap = ensureColumns_(ip, ['Litho Notes']);
+    var noteCell = ip.getRange(ipRow, noteMap['Litho Notes']);
+    var existingNote = noteCell.getValue();
+    noteCell.setValue((existingNote ? existingNote + ' | ' : '') + lithoNote);
+  }
+
   var detail = logPass(ticket, group, sub, itemName, operatorName, notes, jobName);
 
   return sanitizeForClient_({
@@ -878,6 +905,7 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
     remainderTicket: remainderTicketId,
     remainderSheets: remainderSheets,
     remainderWeight: remainderWeight,
+    lithoNote: lithoNote,
     detail: detail
   });
 }
@@ -961,6 +989,7 @@ function reopenFromWip(ticket, operatorName) {
   var history = getTransactionHistory(ticket);
   var startingPassCount = history.length ? Math.max.apply(null, history.map(function (h) { return Number(h.passNumber) || 0; })) : 0;
 
+  ensureColumns_(ip, ['Litho Notes']); // keep Litho Notes with the ticket when reopened
   var destRow = copyRowByHeaderName_(wip, wipRow, ip);
   var ipMap = headerMap_(ip);
   setProgressFields_(ip, destRow, ipMap, {
