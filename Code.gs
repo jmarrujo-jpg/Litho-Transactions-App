@@ -527,7 +527,8 @@ function getQueue() {
       out.push({
         ticket: obj['Ticket'], supplier: obj['Supplier'], endUse: obj['End Use'],
         width: obj['Width'], length: obj['Length'], weight: obj['Weight'], qty: obj['QTY/LOAD'],
-        status: 'Not Started', passCount: 0, runningTotal: 0
+        bw: obj['BW'], type: obj['TC'], temper: obj['TM'],
+        location: 'queue', status: 'Not Started', passCount: 0, runningTotal: 0
       });
     });
   }
@@ -543,6 +544,7 @@ function getQueue() {
       out.push({
         ticket: obj['Ticket'], supplier: obj['Supplier'], endUse: obj['End Use'],
         width: obj['Width'], length: obj['Length'], weight: obj['Weight'], qty: obj['QTY/LOAD'],
+        bw: obj['BW'], type: obj['TC'], temper: obj['TM'], location: 'queue',
         status: obj['Status'] || 'In Progress',
         passCount: obj['Pass Count'] || 0,
         runningTotal: obj['Running Litho Total'] || 0
@@ -809,7 +811,7 @@ function getTransactionHistory(ticket) {
  * ratio (original weight / original sheet count) — no one has to weigh a partial skid.
  * Call this once per ticket as tickets are added to the job, one at a time.
  */
-function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, ticket, sheetsRun, lithoNote) {
+function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, ticket, sheetsRun, lithoNote, isPartialSkid) {
   ticket = String(ticket || '').trim();
   if (!ticket) throw new Error('Enter a ticket number.');
   if (!group || !itemName) throw new Error('Pick a size/group and coating item for this job.');
@@ -839,7 +841,10 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
   if (isNaN(sheets) || sheets <= 0) throw new Error('Enter a valid number of sheets run for ' + ticket + '.');
   if (originalQty > 0 && sheets > originalQty) throw new Error('Sheets run (' + sheets + ') exceeds sheets available (' + originalQty + ') for ' + ticket + '.');
 
-  var isPartial = originalQty > 0 && sheets < originalQty;
+  // Fewer sheets run than on hand. The leftovers are SCRAP unless the operator explicitly
+  // marks this a partial skid — only then does the remainder go back to Current Steel.
+  var usedFewer = originalQty > 0 && sheets < originalQty;
+  isPartialSkid = usedFewer && !!isPartialSkid;
   var estimatedWeightUsed = weightPerSheet > 0 ? Math.round(sheets * weightPerSheet * 100) / 100 : originalWeight;
 
   if (sourceSheet === cs) {
@@ -849,13 +854,13 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
       'Status': 'In Progress', 'Started By': operatorName || '', 'Started At': new Date(),
       'Pass Count': 0, 'Running Litho Total': 0
     });
-    if (isPartial) {
+    if (usedFewer) { // the ticket now reflects only what actually ran (rest scrapped or split)
       if (ipMap['QTY/LOAD']) ip.getRange(destRow, ipMap['QTY/LOAD']).setValue(sheets);
       if (ipMap['Weight']) ip.getRange(destRow, ipMap['Weight']).setValue(estimatedWeightUsed);
     }
     cs.deleteRow(csRow);
     ipRow = destRow;
-  } else if (isPartial) {
+  } else if (usedFewer) {
     var ipMap2 = headerMap_(ip);
     if (ipMap2['QTY/LOAD']) ip.getRange(ipRow, ipMap2['QTY/LOAD']).setValue(sheets);
     if (ipMap2['Weight']) ip.getRange(ipRow, ipMap2['Weight']).setValue(estimatedWeightUsed);
@@ -863,8 +868,10 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
 
   var remainderTicketId = null;
   var remainderSheets = 0, remainderWeight = 0;
+  var scrapSheets = 0, scrapWeight = 0;
+  var scrapNote = '';
 
-  if (isPartial) {
+  if (usedFewer && isPartialSkid) {
     remainderTicketId = generateRemainderTicketId_(ticket);
     remainderSheets = originalQty - sheets;
     remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
@@ -883,28 +890,38 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
         Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Los_Angeles', 'yyyy-MM-dd')
       );
     }
+  } else if (usedFewer) {
+    // Scrap: leftovers are not returned. Record it for traceability.
+    scrapSheets = originalQty - sheets;
+    scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
+    scrapNote = 'Scrapped ' + scrapSheets + ' sheets (~' + scrapWeight + ' lbs, estimated) of ' + originalQty + ' on hand';
   }
 
   // Per-ticket Litho Notes: a managed column that follows the ticket. Written after any
   // remainder split so the note stays with the portion actually run, not the leftover skid.
   lithoNote = String(lithoNote || '').trim();
-  if (lithoNote) {
+  var lithoNoteFull = [lithoNote, scrapNote].filter(function (s) { return s; }).join(' | ');
+  if (lithoNoteFull) {
     var noteMap = ensureColumns_(ip, ['Litho Notes']);
     var noteCell = ip.getRange(ipRow, noteMap['Litho Notes']);
     var existingNote = noteCell.getValue();
-    noteCell.setValue((existingNote ? existingNote + ' | ' : '') + lithoNote);
+    noteCell.setValue((existingNote ? existingNote + ' | ' : '') + lithoNoteFull);
   }
 
-  var detail = logPass(ticket, group, sub, itemName, operatorName, notes, jobName);
+  // Fold the scrap note into the pass's transaction row too.
+  var passNotes = [notes, scrapNote].filter(function (s) { return s; }).join(' | ');
+  var detail = logPass(ticket, group, sub, itemName, operatorName, passNotes, jobName);
 
   return sanitizeForClient_({
     ticket: ticket,
     sheetsRun: sheets,
     estimatedWeightUsed: estimatedWeightUsed,
-    isPartial: isPartial,
+    isPartial: isPartialSkid,
     remainderTicket: remainderTicketId,
     remainderSheets: remainderSheets,
     remainderWeight: remainderWeight,
+    scrapSheets: scrapSheets,
+    scrapWeight: scrapWeight,
     lithoNote: lithoNote,
     detail: detail
   });
@@ -923,10 +940,18 @@ function getWipList() {
     return {
       ticket: obj['Ticket'], supplier: obj['Supplier'], endUse: obj['End Use'],
       width: obj['Width'], length: obj['Length'], weight: obj['Weight'],
-      qty: obj['QTY/LOAD'], litho: obj['Litho'] || 0
+      qty: obj['QTY/LOAD'], litho: obj['Litho'] || 0,
+      bw: obj['BW'], type: obj['TC'], temper: obj['TM'],
+      location: 'wip', status: 'WIP'
     };
   });
   return sanitizeForClient_(out);
+}
+
+/** Current Steel + Litho In Progress + WIP merged into one list for the combined search view.
+ *  Ticket data is read live (never cached) so every operator sees the same current floor. */
+function getAllTickets() {
+  return getQueue().concat(getWipList());
 }
 
 function getWipDetail(ticket) {
