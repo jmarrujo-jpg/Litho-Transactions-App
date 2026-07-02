@@ -1,0 +1,874 @@
+<style>
+  :root {
+    --ink: #1b1f24;
+    --muted: #6b7280;
+    --line: #e2e5e9;
+    --accent: #1a56db;
+    --accent-dark: #143f9e;
+    --good: #0f7a3d;
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  #app { max-width: 900px; margin: 0 auto; padding: 16px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
+  }
+  header h1 { font-size: 20px; margin: 0; }
+  .header-right { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .header-right a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  header button {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; font-size: 14px; cursor: pointer;
+  }
+  .tabbar { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tabbar button {
+    flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; color: var(--muted);
+  }
+  .tabbar button.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin-bottom: 12px;
+  }
+  .queue-item {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; cursor: pointer;
+  }
+  .queue-item + .queue-item { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .ticket-id { font-weight: 700; font-size: 16px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .badge.notstarted { background: #eef2ff; color: #3730a3; }
+  .badge.inprogress { background: #fff7e6; color: var(--warn); }
+  .badge.wip { background: #eafaf0; color: var(--good); }
+  .btn {
+    background: var(--accent); color: white; border: none; border-radius: 10px;
+    padding: 12px 18px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .btn:hover { background: var(--accent-dark); }
+  .btn.secondary { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
+  .btn.success { background: var(--good); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .field { flex: 1; min-width: 160px; margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .field select, .field input, .field textarea {
+    width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 15px;
+  }
+  .stat { text-align: center; }
+  .stat .num { font-size: 26px; font-weight: 700; }
+  .stat .label { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  .empty { text-align: center; color: var(--muted); padding: 30px 0; }
+  .steel-meta { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; font-size: 13px; }
+  .steel-meta div span { display: block; color: var(--muted); font-size: 11px; }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: white; padding: 10px 18px; border-radius: 8px; font-size: 14px;
+    opacity: 0; transition: opacity .2s;
+  }
+  .toast.show { opacity: 1; }
+  .loading { text-align: center; padding: 40px; color: var(--muted); }
+  .gate { max-width: 380px; margin: 60px auto; text-align: center; }
+  .gate h2 { margin-bottom: 4px; }
+  .gate p { color: var(--muted); font-size: 14px; margin-top: 0; }
+</style>
+
+<div id="app">
+  <header id="appHeader">
+    <h1>Litho Floor App</h1>
+    <div class="header-right">
+      <button id="backBtn" style="display:none">&larr; Back</button>
+    </div>
+  </header>
+  <div class="tabbar" id="tabbar">
+    <button id="tabQueue" class="active">Current Steel</button>
+    <button id="tabWip">WIP</button>
+  </div>
+  <div id="view"></div>
+</div>
+<datalist id="operatorNamesList"></datalist>
+<div class="toast" id="toast"></div>
+
+<script>
+  var state = { view: 'queue', listView: 'queue', ticket: null };
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(function () { t.classList.remove('show'); }, 2200);
+  }
+
+  function esc(s) { return (s === undefined || s === null) ? '' : String(s); }
+  function money(n) { return '$' + (Number(n) || 0).toFixed(2); }
+
+  // Operator name field markup — a text input with a datalist of suggestions.
+  // Fill OPERATOR_NAMES in Code.gs and it shows up here automatically; typing still
+  // works even with an empty list so nobody's blocked in the meantime.
+  function operatorFieldHtml(id, label) {
+    return '<div class="field"><label>' + esc(label || 'Operator name') + '</label>' +
+      '<input id="' + id + '" list="operatorNamesList" placeholder="Select or type a name" autocomplete="off"></div>';
+  }
+
+  function loadOperatorNames() {
+    google.script.run.withSuccessHandler(function (names) {
+      var list = document.getElementById('operatorNamesList');
+      list.innerHTML = '';
+      (names || []).forEach(function (n) {
+        var opt = document.createElement('option');
+        opt.value = n;
+        list.appendChild(opt);
+      });
+    }).getOperatorNames();
+  }
+
+  function boot() {
+    loadOperatorNames();
+    state.view = 'queue'; state.listView = 'queue';
+    setActiveTab('queue');
+    renderQueue();
+  }
+
+  document.getElementById('backBtn').onclick = function () {
+    document.getElementById('backBtn').style.display = 'none';
+    document.getElementById('tabbar').style.display = 'flex';
+    state.view = state.listView; state.ticket = null;
+    if (state.listView === 'wip') renderWipList(); else renderQueue();
+  };
+
+  document.getElementById('tabQueue').onclick = function () { setActiveTab('queue'); state.view = 'queue'; state.listView = 'queue'; renderQueue(); };
+  document.getElementById('tabWip').onclick = function () { setActiveTab('wip'); state.view = 'wip'; state.listView = 'wip'; renderWipList(); };
+
+  function setActiveTab(tab) {
+    document.getElementById('tabQueue').classList.toggle('active', tab === 'queue');
+    document.getElementById('tabWip').classList.toggle('active', tab === 'wip');
+  }
+
+  function enterDetailView() {
+    document.getElementById('tabbar').style.display = 'none';
+    document.getElementById('backBtn').style.display = 'inline-block';
+  }
+
+  // ---------------- Queue view (Current Steel + Litho In Progress) ----------------
+  var queueCache = [];
+
+  function renderQueue() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="loading">Loading queue&hellip;</div>';
+    google.script.run.withSuccessHandler(function (queue) {
+      queueCache = queue;
+      view.innerHTML =
+        '<div class="row" style="margin-bottom:12px">' +
+          '<div class="field" style="margin-bottom:0"><input id="queueSearch" placeholder="Search by ticket number&hellip;"></div>' +
+          '<button class="btn secondary" id="newJobBtn" style="flex:0">+ New Job</button>' +
+        '</div>' +
+        '<div id="queueListContainer"></div>';
+      document.getElementById('newJobBtn').onclick = openCreateJob;
+      var searchInput = document.getElementById('queueSearch');
+      searchInput.oninput = function () { renderQueueList(searchInput.value); };
+      renderQueueList('');
+    }).withFailureHandler(function (err) {
+      view.innerHTML = '<div class="card empty">Error loading queue: ' + esc(err.message) + '</div>';
+    }).getQueue();
+  }
+
+  function renderQueueList(searchTerm) {
+    var container = document.getElementById('queueListContainer');
+    if (!container) return;
+    var term = (searchTerm || '').trim().toLowerCase();
+    var rows = term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache;
+
+    if (!rows.length) {
+      container.innerHTML = '<div class="card empty">' + (term ? 'No tickets match "' + esc(searchTerm) + '".' : 'Nothing in the queue. New tickets appear here from Current Steel.') + '</div>';
+      return;
+    }
+    var html = '<div class="card">';
+    rows.forEach(function (q) {
+      var badgeClass = q.status === 'Not Started' ? 'notstarted' : 'inprogress';
+      html += '<div class="queue-item" data-ticket="' + esc(q.ticket) + '">' +
+        '<div>' +
+          '<div class="ticket-id">' + esc(q.ticket) + '</div>' +
+          '<div class="sub">' + esc(q.supplier) + ' &middot; ' + esc(q.endUse) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right">' +
+          '<span class="badge ' + badgeClass + '">' + esc(q.status) + '</span><br>' +
+          (q.status !== 'Not Started' ? '<span class="sub">' + q.passCount + ' pass(es) &middot; ' + money(q.runningTotal) + '</span>' : '') +
+        '</div>' +
+      '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
+      el.onclick = function () { openTicket(el.getAttribute('data-ticket')); };
+    });
+  }
+
+  function openTicket(ticket) {
+    state.view = 'detail'; state.ticket = ticket;
+    enterDetailView();
+    renderDetail();
+  }
+
+  // ---------------- Ticket detail view (Not Started / In Progress) ----------------
+  function renderDetail() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
+    google.script.run.withSuccessHandler(function (detail) {
+      renderDetailContent(view, detail);
+    }).withFailureHandler(function (err) {
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getTicketDetail(state.ticket);
+  }
+
+  function renderDetailContent(view, detail) {
+    var steel = detail.steel;
+    var html = '';
+
+    html += '<div class="card">';
+    html += '<div class="ticket-id">' + esc(steel['Ticket']) + '</div>';
+    html += '<div class="steel-meta">' +
+      metaBox('Supplier', steel['Supplier']) + metaBox('End Use', steel['End Use']) +
+      metaBox('Width', steel['Width']) + metaBox('Length', steel['Length']) +
+      metaBox('Weight', steel['Weight']) + metaBox('B/C', steel['B/C']) +
+      '</div>';
+
+    html += '<div class="row">' +
+      '<div class="stat"><div class="num">' + detail.passCount + '</div><div class="label">Passes logged</div></div>' +
+      '<div class="stat"><div class="num">' + money(detail.runningTotal) + '</div><div class="label">Running litho cost</div></div>' +
+      '<div class="stat"><div class="num">' + esc(detail.status) + '</div><div class="label">Status</div></div>' +
+      '</div>';
+    html += '</div>';
+
+    if (detail.status === 'Not Started') {
+      html += '<div class="card">' +
+        operatorFieldHtml('startOperator') +
+        '<button class="btn" id="startBtn">Start Job</button>' +
+        '</div>';
+    } else {
+      html += '<div class="card">' +
+        '<div class="row">' +
+          selectField('groupSelect', 'Size / Group', detail.groups, detail.suggestedGroup) +
+          selectField('subSelect', 'Sub-Variant', [], null) +
+          selectField('itemSelect', 'Coating Item', [], null) +
+        '</div>' +
+        '<div class="row">' +
+          operatorFieldHtml('passOperator') +
+          '<div class="field"><label>Notes (optional)</label><input id="passNotes" placeholder="e.g. re-run, color match"></div>' +
+        '</div>' +
+        '<div id="itemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
+        '<button class="btn" id="logPassBtn">Log Pass</button>' +
+        '</div>';
+
+      html += '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">Pass history</h3>' +
+        renderHistoryTable(detail.transactions) +
+        '</div>';
+
+      var origQty = steel['QTY/LOAD'] || 0;
+      var origWeight = steel['Weight'] || 0;
+
+      html += '<div class="card">' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:4px">' +
+          '<input type="checkbox" id="splitToggle" style="width:18px;height:18px"> ' +
+          'Only part of this pallet was used — split the remainder back to Current Steel' +
+        '</label>' +
+        '<div id="splitFields" style="display:none;margin-top:12px">' +
+          '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
+            '<input type="number" id="sheetsUsedInput" value="' + esc(origQty) + '" min="0" max="' + esc(origQty) + '"></div>' +
+          '<div class="sub" id="remainderPreview" style="margin-bottom:10px"></div>' +
+        '</div>' +
+        '<button class="btn success" id="completeBtn"' + (detail.passCount < 1 ? ' disabled' : '') + '>' +
+        'Complete &amp; Send to WIP</button>' +
+        (detail.passCount < 1 ? '<div class="sub" style="margin-top:8px">Log at least one pass first.</div>' : '') +
+        '</div>';
+    }
+
+    view.innerHTML = html;
+    wireDetailEvents(detail);
+  }
+
+  function metaBox(label, val) {
+    return '<div><span>' + label + '</span>' + esc(val) + '</div>';
+  }
+
+  function selectField(id, label, options, preselect) {
+    var html = '<div class="field"><label>' + label + '</label><select id="' + id + '"><option value="">--</option>';
+    options.forEach(function (o) {
+      var val = o || '(single)';
+      var selected = (preselect && o === preselect) ? ' selected' : '';
+      html += '<option value="' + esc(o) + '"' + selected + '>' + esc(val) + '</option>';
+    });
+    html += '</select></div>';
+    return html;
+  }
+
+  function renderHistoryTable(rows) {
+    if (!rows.length) return '<div class="sub">No passes logged yet.</div>';
+    var html = '<table><thead><tr><th>#</th><th>Item</th><th>Group</th><th>Cost</th><th>Operator</th><th>Job</th><th>Running Total</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      html += '<tr><td>' + r.passNumber + '</td><td>' + esc(r.item) + '</td><td>' + esc(r.group) +
+        (r.sub ? ' / ' + esc(r.sub) : '') + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
+        '</td><td>' + esc(r.jobName) + '</td><td>' + money(r.runningTotal) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function wireDetailEvents(detail) {
+    var startBtn = document.getElementById('startBtn');
+    if (startBtn) {
+      var startOperatorInput = document.getElementById('startOperator');
+      startBtn.onclick = function () {
+        var operator = startOperatorInput.value.trim();
+        if (!operator) { toast('Enter an operator name'); return; }
+        startBtn.disabled = true;
+        google.script.run.withSuccessHandler(function () {
+          toast('Job started');
+          renderDetail();
+        }).withFailureHandler(function (err) {
+          toast('Error: ' + err.message);
+          startBtn.disabled = false;
+        }).startJob(state.ticket, operator);
+      };
+    }
+
+    var groupSelect = document.getElementById('groupSelect');
+    var subSelect = document.getElementById('subSelect');
+    var itemSelect = document.getElementById('itemSelect');
+    var costPreview = document.getElementById('itemCostPreview');
+
+    if (groupSelect) {
+      groupSelect.onchange = function () { refreshSubOptions(); };
+      if (groupSelect.value) refreshSubOptions();
+    }
+    if (subSelect) subSelect.onchange = function () { refreshItemOptions(); };
+    if (itemSelect) itemSelect.onchange = function () { refreshCostPreview(); };
+
+    function refreshSubOptions() {
+      var group = groupSelect.value;
+      subSelect.innerHTML = '<option value="">--</option>';
+      itemSelect.innerHTML = '<option value="">--</option>';
+      costPreview.textContent = '';
+      if (!group) return;
+      google.script.run.withSuccessHandler(function (subs) {
+        subs.forEach(function (s) {
+          var opt = document.createElement('option');
+          opt.value = s || '';
+          opt.textContent = s || '(single)';
+          subSelect.appendChild(opt);
+        });
+        if (subs.length === 1) { subSelect.value = subs[0] || ''; refreshItemOptions(); }
+      }).getSubVariants(group);
+    }
+
+    function refreshItemOptions() {
+      var group = groupSelect.value, sub = subSelect.value;
+      itemSelect.innerHTML = '<option value="">--</option>';
+      costPreview.textContent = '';
+      if (!group) return;
+      google.script.run.withSuccessHandler(function (items) {
+        items.forEach(function (it) {
+          var opt = document.createElement('option');
+          opt.value = it.item;
+          opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
+          opt.dataset.cost = it.totalCost;
+          itemSelect.appendChild(opt);
+        });
+      }).getItems(group, sub);
+    }
+
+    function refreshCostPreview() {
+      var opt = itemSelect.options[itemSelect.selectedIndex];
+      if (opt && opt.dataset && opt.dataset.cost) {
+        costPreview.textContent = 'This pass will add ' + money(opt.dataset.cost) + ' to the running total.';
+      } else {
+        costPreview.textContent = '';
+      }
+    }
+
+    var passOperatorInput = document.getElementById('passOperator');
+    var logPassBtn = document.getElementById('logPassBtn');
+    if (logPassBtn) {
+      logPassBtn.onclick = function () {
+        var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
+        var operator = passOperatorInput.value.trim();
+        var notes = document.getElementById('passNotes').value;
+        if (!group || !item) { toast('Pick a group and coating item first'); return; }
+        if (!operator) { toast('Enter an operator name'); return; }
+        logPassBtn.disabled = true;
+        google.script.run.withSuccessHandler(function () {
+          toast('Pass logged');
+          renderDetail();
+        }).withFailureHandler(function (err) {
+          toast('Error: ' + err.message);
+          logPassBtn.disabled = false;
+        }).logPass(state.ticket, group, sub, item, operator, notes);
+      };
+    }
+
+    var splitToggle = document.getElementById('splitToggle');
+    var splitFields = document.getElementById('splitFields');
+    var sheetsUsedInput = document.getElementById('sheetsUsedInput');
+    var remainderPreview = document.getElementById('remainderPreview');
+    var origQtyForSplit = Number(detail.steel['QTY/LOAD']) || 0;
+    var origWeightForSplit = Number(detail.steel['Weight']) || 0;
+    var weightPerSheetForSplit = origQtyForSplit > 0 ? (origWeightForSplit / origQtyForSplit) : 0;
+
+    if (splitToggle) {
+      splitToggle.onchange = function () {
+        splitFields.style.display = splitToggle.checked ? 'block' : 'none';
+        updateRemainderPreview();
+      };
+    }
+    if (sheetsUsedInput) sheetsUsedInput.oninput = updateRemainderPreview;
+
+    function updateRemainderPreview() {
+      if (!remainderPreview) return;
+      var usedSheets = Number(sheetsUsedInput.value) || 0;
+      var usedWeight = Math.round(usedSheets * weightPerSheetForSplit * 100) / 100;
+      var remSheets = origQtyForSplit - usedSheets;
+      var remWeight = Math.round((origWeightForSplit - usedWeight) * 100) / 100;
+      if (remSheets > 0) {
+        remainderPreview.textContent = 'Sent to WIP: ' + usedSheets + ' sheets (~' + usedWeight + ' lbs, estimated). ' +
+          'Remainder returns to Current Steel as a new ticket: ' + remSheets + ' sheets (~' + remWeight + ' lbs, estimated).';
+      } else {
+        remainderPreview.textContent = 'No remainder — this will behave like a normal full completion.';
+      }
+    }
+    updateRemainderPreview();
+
+    var completeBtn = document.getElementById('completeBtn');
+    if (completeBtn) {
+      completeBtn.onclick = function () {
+        var isSplit = splitToggle && splitToggle.checked;
+        var sheetsUsed;
+        if (isSplit) sheetsUsed = sheetsUsedInput.value;
+        var confirmMsg = isSplit
+          ? 'Send the used portion to WIP and return the remainder to Current Steel?'
+          : 'Send this ticket to WIP? This closes out the litho job.';
+        if (!confirm(confirmMsg)) return;
+        completeBtn.disabled = true;
+        google.script.run.withSuccessHandler(function (result) {
+          var msg = 'Sent to WIP at ' + money(result.finalLithoCost);
+          if (result.remainderTicket) msg += ' — remainder returned as ' + result.remainderTicket;
+          toast(msg);
+          document.getElementById('backBtn').click();
+        }).withFailureHandler(function (err) {
+          toast('Error: ' + err.message);
+          completeBtn.disabled = false;
+        }).completeJob(state.ticket, sheetsUsed);
+      };
+    }
+  }
+
+  // ---------------- Create Job (one ticket at a time) ----------------
+  var currentJob = null; // { jobName, group, sub, item, operator, notes }
+  var jobAddedTickets = []; // running list of what's been added so far, for display
+  var jobPickedTicket = null; // ticket currently staged for "sheets run" entry
+
+  function openCreateJob() {
+    currentJob = null;
+    jobAddedTickets = [];
+    jobPickedTicket = null;
+    state.view = 'createJob';
+    enterDetailView();
+    renderCreateJobSetup();
+  }
+
+  // Step 1: describe the job (what's being done) before adding any tickets.
+  function renderCreateJobSetup() {
+    var view = document.getElementById('view');
+    var html = '';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0">New Job</h3>' +
+      '<div class="sub" style="margin-bottom:12px">Describe what\'s being done. Once set, you\'ll add tickets to it one at a time.</div>' +
+      '<div class="field"><label>Job description</label><input id="jobName" placeholder="e.g. White coat run, 7/1 morning"></div>' +
+      '<div class="row">' +
+        '<div class="field" id="jobGroupWrap"></div>' +
+        '<div class="field" id="jobSubWrap"></div>' +
+        '<div class="field" id="jobItemWrap"></div>' +
+      '</div>' +
+      '<div class="row">' +
+        operatorFieldHtml('jobOperator') +
+        '<div class="field"><label>Notes (optional)</label><input id="jobNotes" placeholder="e.g. re-run, color match"></div>' +
+      '</div>' +
+      '<div class="sub" id="jobCostPreview" style="margin-bottom:10px"></div>' +
+      '<button class="btn" id="startJobSetupBtn">Start Adding Tickets</button>' +
+      '</div>';
+
+    view.innerHTML = html;
+
+    document.getElementById('jobGroupWrap').innerHTML = '<label>Size / Group</label><select id="jobGroupSelect"><option value="">--</option></select>';
+    document.getElementById('jobSubWrap').innerHTML = '<label>Sub-Variant</label><select id="jobSubSelect"><option value="">--</option></select>';
+    document.getElementById('jobItemWrap').innerHTML = '<label>Coating Item</label><select id="jobItemSelect"><option value="">--</option></select>';
+
+    var groupSelect = document.getElementById('jobGroupSelect');
+    var subSelect = document.getElementById('jobSubSelect');
+    var itemSelect = document.getElementById('jobItemSelect');
+    var costPreview = document.getElementById('jobCostPreview');
+
+    google.script.run.withSuccessHandler(function (groups) {
+      groups.forEach(function (g) {
+        var opt = document.createElement('option');
+        opt.value = g; opt.textContent = g;
+        groupSelect.appendChild(opt);
+      });
+    }).getGroups();
+
+    groupSelect.onchange = function () {
+      var group = groupSelect.value;
+      subSelect.innerHTML = '<option value="">--</option>';
+      itemSelect.innerHTML = '<option value="">--</option>';
+      costPreview.textContent = '';
+      if (!group) return;
+      google.script.run.withSuccessHandler(function (subs) {
+        subs.forEach(function (s) {
+          var opt = document.createElement('option');
+          opt.value = s || ''; opt.textContent = s || '(single)';
+          subSelect.appendChild(opt);
+        });
+        if (subs.length === 1) { subSelect.value = subs[0] || ''; subSelect.onchange(); }
+      }).getSubVariants(group);
+    };
+
+    subSelect.onchange = function () {
+      var group = groupSelect.value, sub = subSelect.value;
+      itemSelect.innerHTML = '<option value="">--</option>';
+      costPreview.textContent = '';
+      if (!group) return;
+      google.script.run.withSuccessHandler(function (items) {
+        items.forEach(function (it) {
+          var opt = document.createElement('option');
+          opt.value = it.item;
+          opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
+          opt.dataset.cost = it.totalCost;
+          itemSelect.appendChild(opt);
+        });
+      }).getItems(group, sub);
+    };
+
+    itemSelect.onchange = function () {
+      var opt = itemSelect.options[itemSelect.selectedIndex];
+      costPreview.textContent = (opt && opt.dataset && opt.dataset.cost)
+        ? 'This pass adds ' + money(opt.dataset.cost) + ' per ticket added to this job.' : '';
+    };
+
+    document.getElementById('startJobSetupBtn').onclick = function () {
+      var jobName = document.getElementById('jobName').value.trim();
+      var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
+      var operator = document.getElementById('jobOperator').value.trim();
+      var notes = document.getElementById('jobNotes').value;
+
+      if (!group || !item) { toast('Pick a size/group and coating item'); return; }
+      if (!operator) { toast('Enter an operator name'); return; }
+
+      currentJob = { jobName: jobName, group: group, sub: sub, item: item, operator: operator, notes: notes };
+      renderCreateJobAddTickets();
+    };
+  }
+
+  // Step 2: add tickets to the job one at a time, entering sheets run for each.
+  function renderCreateJobAddTickets() {
+    var view = document.getElementById('view');
+    var html = '';
+
+    html += '<div class="card">' +
+      '<div class="sub">Job: <strong>' + esc(currentJob.jobName || '(untitled)') + '</strong> &middot; ' +
+      esc(currentJob.group) + (currentJob.sub ? ' / ' + esc(currentJob.sub) : '') + ' &middot; ' + esc(currentJob.item) + '</div>' +
+      '</div>';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Find a ticket</h3>' +
+      '<input id="jobTicketSearch" placeholder="Search by ticket number&hellip;">' +
+      '<div id="jobQueuePicker" style="margin-top:10px"></div>' +
+      '</div>';
+
+    html += '<div class="card" id="jobPickedTicketCard" style="display:none"></div>';
+
+    html += '<div class="card">' +
+      '<h4 style="margin-bottom:6px;font-size:13px;color:var(--muted)">Tickets added to this job so far (<span id="jobAddedCount">0</span>)</h4>' +
+      '<div id="jobAddedList" class="sub">None yet.</div>' +
+      '</div>';
+
+    html += '<div class="card">' +
+      '<button class="btn secondary" id="finishJobBtn">Done — Back to Current Steel</button>' +
+      '</div>';
+
+    view.innerHTML = html;
+
+    var jobTicketSearch = document.getElementById('jobTicketSearch');
+    jobTicketSearch.oninput = function () { renderJobQueuePicker(jobTicketSearch.value); };
+    if (!queueCache.length) {
+      google.script.run.withSuccessHandler(function (queue) {
+        queueCache = queue;
+        renderJobQueuePicker('');
+      }).getQueue();
+    } else {
+      renderJobQueuePicker('');
+    }
+
+    renderJobAddedList();
+
+    document.getElementById('finishJobBtn').onclick = function () {
+      document.getElementById('backBtn').click();
+    };
+  }
+
+  function renderJobQueuePicker(searchTerm) {
+    var container = document.getElementById('jobQueuePicker');
+    if (!container) return;
+    var term = (searchTerm || '').trim().toLowerCase();
+    var rows = term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache.slice(0, 15);
+
+    if (!rows.length) { container.innerHTML = '<div class="sub">No matches.</div>'; return; }
+    var html = '';
+    rows.forEach(function (q) {
+      html += '<div class="queue-item" data-ticket="' + esc(q.ticket) + '" style="padding:6px 0">' +
+        '<div><span class="ticket-id" style="font-size:14px">' + esc(q.ticket) + '</span> ' +
+        '<span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-pick="' + esc(q.ticket) + '">Select</button>' +
+      '</div>';
+    });
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('[data-pick]'), function (btn) {
+      btn.onclick = function () {
+        var t = btn.getAttribute('data-pick');
+        var entry = queueCache.filter(function (q) { return q.ticket === t; })[0];
+        renderPickedTicketCard(t, entry);
+      };
+    });
+  }
+
+  function renderPickedTicketCard(ticket, entry) {
+    var card = document.getElementById('jobPickedTicketCard');
+    var origQty = entry ? Number(entry.qty) || 0 : 0;
+    var origWeight = entry ? Number(entry.weight) || 0 : 0;
+    var weightPerSheet = origQty > 0 ? (origWeight / origQty) : 0;
+
+    card.style.display = 'block';
+    card.innerHTML =
+      '<div class="ticket-id">' + esc(ticket) + '</div>' +
+      '<div class="sub" style="margin-bottom:10px">' + esc(origQty) + ' sheets on hand &middot; ~' + esc(origWeight) + ' lbs</div>' +
+      '<div class="field"><label>Sheets run</label>' +
+        '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty || '') + '"></div>' +
+      '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>' +
+      '<button class="btn" id="addTicketToJobBtn">Add to Job</button>';
+
+    var sheetsRunInput = document.getElementById('sheetsRunInput');
+    var preview = document.getElementById('sheetsRunPreview');
+
+    function updatePreview() {
+      var sheets = Number(sheetsRunInput.value) || 0;
+      var estWeight = Math.round(sheets * weightPerSheet * 100) / 100;
+      var remSheets = origQty - sheets;
+      if (remSheets > 0) {
+        var remWeight = Math.round((origWeight - estWeight) * 100) / 100;
+        preview.textContent = 'Partial skid: ' + sheets + ' sheets run (~' + estWeight + ' lbs, estimated). ' +
+          remSheets + ' sheets (~' + remWeight + ' lbs) will be returned to Current Steel as a new ticket.';
+      } else {
+        preview.textContent = 'Full skid: ' + sheets + ' sheets (~' + estWeight + ' lbs, estimated).';
+      }
+    }
+    sheetsRunInput.oninput = updatePreview;
+    updatePreview();
+
+    document.getElementById('addTicketToJobBtn').onclick = function () {
+      var sheetsRun = sheetsRunInput.value;
+      var btn = document.getElementById('addTicketToJobBtn');
+      btn.disabled = true; btn.textContent = 'Adding&hellip;';
+      google.script.run.withSuccessHandler(function (result) {
+        jobAddedTickets.push(result);
+        toast(result.isPartial
+          ? 'Added ' + result.ticket + ' — remainder returned as ' + result.remainderTicket
+          : 'Added ' + result.ticket + ' to job');
+        card.style.display = 'none';
+        document.getElementById('jobTicketSearch').value = '';
+        renderJobQueuePicker('');
+        renderJobAddedList();
+        // Refresh queue cache in the background so qty/status reflect the change next pick
+        google.script.run.withSuccessHandler(function (queue) { queueCache = queue; }).getQueue();
+      }).withFailureHandler(function (err) {
+        toast('Error: ' + err.message);
+        btn.disabled = false; btn.textContent = 'Add to Job';
+      }).addTicketToJob(currentJob.jobName, currentJob.group, currentJob.sub, currentJob.item,
+        currentJob.operator, currentJob.notes, ticket, sheetsRun);
+    };
+  }
+
+  function renderJobAddedList() {
+    var container = document.getElementById('jobAddedList');
+    var countEl = document.getElementById('jobAddedCount');
+    if (countEl) countEl.textContent = jobAddedTickets.length;
+    if (!container) return;
+    if (!jobAddedTickets.length) { container.innerHTML = 'None yet.'; return; }
+    var html = '<table><thead><tr><th>Ticket</th><th>Sheets Run</th><th>Est. Weight</th><th>Remainder</th></tr></thead><tbody>';
+    jobAddedTickets.forEach(function (r) {
+      html += '<tr><td>' + esc(r.ticket) + '</td><td>' + esc(r.sheetsRun) + '</td><td>' + esc(r.estimatedWeightUsed) + ' lbs</td>' +
+        '<td>' + (r.remainderTicket ? esc(r.remainderTicket) + ' (' + esc(r.remainderSheets) + ' sheets)' : '&mdash;') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  // ---------------- WIP list view ----------------
+  // ---------------- WIP list view ----------------
+  var wipCache = [];
+
+  function renderWipList() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="loading">Loading WIP&hellip;</div>';
+    google.script.run.withSuccessHandler(function (rows) {
+      wipCache = rows;
+      view.innerHTML =
+        '<div class="field"><input id="wipSearch" placeholder="Search by ticket number&hellip;"></div>' +
+        '<div id="wipListContainer"></div>';
+      var searchInput = document.getElementById('wipSearch');
+      searchInput.oninput = function () { renderWipListRows(searchInput.value); };
+      renderWipListRows('');
+    }).withFailureHandler(function (err) {
+      view.innerHTML = '<div class="card empty">Error loading WIP: ' + esc(err.message) + '</div>';
+    }).getWipList();
+  }
+
+  function renderWipListRows(searchTerm) {
+    var container = document.getElementById('wipListContainer');
+    if (!container) return;
+    var term = (searchTerm || '').trim().toLowerCase();
+    var rows = term ? wipCache.filter(function (r) { return String(r.ticket).toLowerCase().indexOf(term) !== -1; }) : wipCache;
+
+    if (!rows.length) {
+      container.innerHTML = '<div class="card empty">' + (term ? 'No tickets match "' + esc(searchTerm) + '".' : 'Nothing in WIP yet.') + '</div>';
+      return;
+    }
+    var html = '<div class="card">';
+    rows.forEach(function (r) {
+      html += '<div class="queue-item" data-ticket="' + esc(r.ticket) + '">' +
+        '<div>' +
+          '<div class="ticket-id">' + esc(r.ticket) + '</div>' +
+          '<div class="sub">' + esc(r.supplier) + ' &middot; ' + esc(r.endUse) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right">' +
+          '<span class="badge wip">WIP</span><br>' +
+          '<span class="sub">Litho: ' + money(r.litho) + '</span>' +
+        '</div>' +
+      '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
+      el.onclick = function () { openWipTicket(el.getAttribute('data-ticket')); };
+    });
+  }
+
+  function openWipTicket(ticket) {
+    state.view = 'wipDetail'; state.ticket = ticket; state.listView = 'wip';
+    enterDetailView();
+    renderWipDetail();
+  }
+
+  // ---------------- WIP detail view ----------------
+  function renderWipDetail() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
+    google.script.run.withSuccessHandler(function (detail) {
+      renderWipDetailContent(view, detail);
+    }).withFailureHandler(function (err) {
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getWipDetail(state.ticket);
+  }
+
+  function renderWipDetailContent(view, detail) {
+    var steel = detail.steel;
+    var html = '';
+
+    html += '<div class="card">';
+    html += '<div class="ticket-id">' + esc(steel['Ticket']) + ' <span class="badge wip">WIP</span></div>';
+    html += '<div class="steel-meta">' +
+      metaBox('Supplier', steel['Supplier']) + metaBox('End Use', steel['End Use']) +
+      metaBox('Width', steel['Width']) + metaBox('Length', steel['Length']) +
+      metaBox('Weight', steel['Weight']) + metaBox('QTY/LOAD', steel['QTY/LOAD']) +
+      '</div>';
+    html += '</div>';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Litho cost</h3>' +
+      '<div class="row">' +
+        '<div class="field"><label>Current litho cost</label><input type="number" id="wipCostInput" value="' + esc(detail.litho) + '"></div>' +
+        operatorFieldHtml('wipCostOperator') +
+      '</div>' +
+      '<div class="field"><label>Reason for change (optional)</label><input id="wipCostNotes" placeholder="e.g. correcting a typo"></div>' +
+      '<button class="btn secondary" id="saveWipCostBtn">Save Litho Cost</button>' +
+      '</div>';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Pass history</h3>' +
+      renderHistoryTable(detail.transactions) +
+      '</div>';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Add more coating</h3>' +
+      '<div class="sub" style="margin-bottom:10px">Pulls this ticket back out of WIP into the Litho Queue so you can log another pass. Its current litho cost carries over as the starting point.</div>' +
+      operatorFieldHtml('reopenOperator') +
+      '<button class="btn" id="reopenBtn">Reopen to Add Coating</button>' +
+      '</div>';
+
+    view.innerHTML = html;
+    wireWipDetailEvents(detail);
+  }
+
+  function wireWipDetailEvents(detail) {
+    var saveWipCostBtn = document.getElementById('saveWipCostBtn');
+    if (saveWipCostBtn) {
+      saveWipCostBtn.onclick = function () {
+        var newCost = document.getElementById('wipCostInput').value;
+        var operator = document.getElementById('wipCostOperator').value.trim();
+        var notes = document.getElementById('wipCostNotes').value;
+        if (!operator) { toast('Enter an operator name'); return; }
+        saveWipCostBtn.disabled = true;
+        google.script.run.withSuccessHandler(function () {
+          toast('Litho cost updated');
+          renderWipDetail();
+        }).withFailureHandler(function (err) {
+          toast('Error: ' + err.message);
+          saveWipCostBtn.disabled = false;
+        }).updateWipLithoCost(state.ticket, newCost, operator, notes);
+      };
+    }
+
+    var reopenBtn = document.getElementById('reopenBtn');
+    if (reopenBtn) {
+      reopenBtn.onclick = function () {
+        var operator = document.getElementById('reopenOperator').value.trim();
+        if (!operator) { toast('Enter an operator name'); return; }
+        if (!confirm('Pull this ticket back into the Litho Queue to add another pass?')) return;
+        reopenBtn.disabled = true;
+        google.script.run.withSuccessHandler(function () {
+          toast('Ticket reopened');
+          state.view = 'detail'; state.listView = 'queue';
+          renderDetail();
+        }).withFailureHandler(function (err) {
+          toast('Error: ' + err.message);
+          reopenBtn.disabled = false;
+        }).reopenFromWip(state.ticket, operator);
+      };
+    }
+  }
+
+  // boot
+  boot();
+</script>
