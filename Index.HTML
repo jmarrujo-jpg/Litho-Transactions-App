@@ -106,6 +106,30 @@
 <script>
   var state = { view: 'queue', listView: 'queue', ticket: null };
 
+  // Rate/pricing data is fetched once and cached in the browser so the Group -> Sub -> Item
+  // dropdowns resolve instantly with no per-selection server round trip. Ticket data is
+  // never cached here — it's always fetched fresh so operators see each other's changes.
+  var rateData = { groups: [], tree: {} };
+
+  function loadRateData() {
+    google.script.run.withSuccessHandler(function (data) {
+      if (data && data.groups) rateData = data;
+    }).getRateTree();
+  }
+
+  // Runs cb once rate data is available (fetches it first if the boot load hasn't landed yet).
+  function ensureRateData(cb) {
+    if (rateData.groups && rateData.groups.length) { cb(); return; }
+    google.script.run.withSuccessHandler(function (data) {
+      if (data && data.groups) rateData = data;
+      cb();
+    }).withFailureHandler(function () { cb(); }).getRateTree();
+  }
+
+  function rateGroups() { return rateData.groups || []; }
+  function rateSubs(group) { var n = rateData.tree[group]; return n ? n.subs : []; }
+  function rateItems(group, sub) { var n = rateData.tree[group]; return n ? (n.items[sub || ''] || []) : []; }
+
   function toast(msg) {
     var t = document.getElementById('toast');
     t.textContent = msg;
@@ -138,6 +162,7 @@
 
   function boot() {
     loadOperatorNames();
+    loadRateData();
     state.view = 'queue'; state.listView = 'queue';
     setActiveTab('queue');
     renderQueue();
@@ -193,7 +218,27 @@
     var rows = term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache;
 
     if (!rows.length) {
-      container.innerHTML = '<div class="card empty">' + (term ? 'No tickets match "' + esc(searchTerm) + '".' : 'Nothing in the queue. New tickets appear here from Current Steel.') + '</div>';
+      if (term) {
+        var t = searchTerm.trim();
+        container.innerHTML = '<div class="card empty">No tickets match "' + esc(searchTerm) + '".' +
+          '<div style="margin-top:14px"><button class="btn" id="manualAddBtn">Start ticket "' + esc(t) + '" manually</button>' +
+          '<div class="sub" style="margin-top:8px">Use this only if the ticket is on the floor but missing from Current Steel.</div></div></div>';
+        var manualBtn = document.getElementById('manualAddBtn');
+        manualBtn.onclick = function () {
+          if (!t) return;
+          manualBtn.disabled = true;
+          google.script.run.withSuccessHandler(function () {
+            toast('Started ticket ' + t + ' manually');
+            google.script.run.withSuccessHandler(function (queue) { queueCache = queue; }).getQueue();
+            openTicket(t);
+          }).withFailureHandler(function (err) {
+            toast('Error: ' + err.message);
+            manualBtn.disabled = false;
+          }).createManualTicket(t, '');
+        };
+      } else {
+        container.innerHTML = '<div class="card empty">Nothing in the queue. New tickets appear here from Current Steel.</div>';
+      }
       return;
     }
     var html = '<div class="card">';
@@ -228,7 +273,7 @@
     var view = document.getElementById('view');
     view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
     google.script.run.withSuccessHandler(function (detail) {
-      renderDetailContent(view, detail);
+      ensureRateData(function () { renderDetailContent(view, detail); });
     }).withFailureHandler(function (err) {
       view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
     }).getTicketDetail(state.ticket);
@@ -261,7 +306,7 @@
     } else {
       html += '<div class="card">' +
         '<div class="row">' +
-          selectField('groupSelect', 'Size / Group', detail.groups, detail.suggestedGroup) +
+          selectField('groupSelect', 'Size / Group', rateGroups(), detail.suggestedGroup) +
           selectField('subSelect', 'Sub-Variant', [], null) +
           selectField('itemSelect', 'Coating Item', [], null) +
         '</div>' +
@@ -364,15 +409,14 @@
       itemSelect.innerHTML = '<option value="">--</option>';
       costPreview.textContent = '';
       if (!group) return;
-      google.script.run.withSuccessHandler(function (subs) {
-        subs.forEach(function (s) {
-          var opt = document.createElement('option');
-          opt.value = s || '';
-          opt.textContent = s || '(single)';
-          subSelect.appendChild(opt);
-        });
-        if (subs.length === 1) { subSelect.value = subs[0] || ''; refreshItemOptions(); }
-      }).getSubVariants(group);
+      var subs = rateSubs(group);
+      subs.forEach(function (s) {
+        var opt = document.createElement('option');
+        opt.value = s || '';
+        opt.textContent = s || '(single)';
+        subSelect.appendChild(opt);
+      });
+      if (subs.length === 1) { subSelect.value = subs[0] || ''; refreshItemOptions(); }
     }
 
     function refreshItemOptions() {
@@ -380,15 +424,13 @@
       itemSelect.innerHTML = '<option value="">--</option>';
       costPreview.textContent = '';
       if (!group) return;
-      google.script.run.withSuccessHandler(function (items) {
-        items.forEach(function (it) {
-          var opt = document.createElement('option');
-          opt.value = it.item;
-          opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
-          opt.dataset.cost = it.totalCost;
-          itemSelect.appendChild(opt);
-        });
-      }).getItems(group, sub);
+      rateItems(group, sub).forEach(function (it) {
+        var opt = document.createElement('option');
+        opt.value = it.item;
+        opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
+        opt.dataset.cost = it.totalCost;
+        itemSelect.appendChild(opt);
+      });
     }
 
     function refreshCostPreview() {
@@ -522,13 +564,13 @@
     var itemSelect = document.getElementById('jobItemSelect');
     var costPreview = document.getElementById('jobCostPreview');
 
-    google.script.run.withSuccessHandler(function (groups) {
-      groups.forEach(function (g) {
+    ensureRateData(function () {
+      rateGroups().forEach(function (g) {
         var opt = document.createElement('option');
         opt.value = g; opt.textContent = g;
         groupSelect.appendChild(opt);
       });
-    }).getGroups();
+    });
 
     groupSelect.onchange = function () {
       var group = groupSelect.value;
@@ -536,14 +578,13 @@
       itemSelect.innerHTML = '<option value="">--</option>';
       costPreview.textContent = '';
       if (!group) return;
-      google.script.run.withSuccessHandler(function (subs) {
-        subs.forEach(function (s) {
-          var opt = document.createElement('option');
-          opt.value = s || ''; opt.textContent = s || '(single)';
-          subSelect.appendChild(opt);
-        });
-        if (subs.length === 1) { subSelect.value = subs[0] || ''; subSelect.onchange(); }
-      }).getSubVariants(group);
+      var subs = rateSubs(group);
+      subs.forEach(function (s) {
+        var opt = document.createElement('option');
+        opt.value = s || ''; opt.textContent = s || '(single)';
+        subSelect.appendChild(opt);
+      });
+      if (subs.length === 1) { subSelect.value = subs[0] || ''; subSelect.onchange(); }
     };
 
     subSelect.onchange = function () {
@@ -551,15 +592,13 @@
       itemSelect.innerHTML = '<option value="">--</option>';
       costPreview.textContent = '';
       if (!group) return;
-      google.script.run.withSuccessHandler(function (items) {
-        items.forEach(function (it) {
-          var opt = document.createElement('option');
-          opt.value = it.item;
-          opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
-          opt.dataset.cost = it.totalCost;
-          itemSelect.appendChild(opt);
-        });
-      }).getItems(group, sub);
+      rateItems(group, sub).forEach(function (it) {
+        var opt = document.createElement('option');
+        opt.value = it.item;
+        opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
+        opt.dataset.cost = it.totalCost;
+        itemSelect.appendChild(opt);
+      });
     };
 
     itemSelect.onchange = function () {

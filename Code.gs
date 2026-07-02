@@ -215,6 +215,7 @@ function seedRateTable() {
   sh.getRange(2, 1, RATE_DATA.length, RATE_TABLE_COLS.length).setValues(RATE_DATA);
   sh.setFrozenRows(1);
   sh.autoResizeColumns(1, RATE_TABLE_COLS.length);
+  CacheService.getScriptCache().remove(RATE_CACHE_KEY); // rates changed -> drop stale cache
 }
 
 /** Run this once to create the Litho In Progress and Litho Transactions headers. */
@@ -383,19 +384,73 @@ function copyRowByHeaderName_(srcSheet, srcRow, destSheet) {
   return destRow;
 }
 
+/** Writes all PROGRESS_EXTRA_COLS on a Litho In Progress row in a single setValues when the
+ *  columns are contiguous (they are, by construction in setupTabs/getInProgressSheet_),
+ *  falling back to per-cell writes otherwise. `vals` must contain every extra-col name. */
+function setProgressFields_(ip, row, ipMap, vals) {
+  var cols = PROGRESS_EXTRA_COLS.map(function (name) { return ipMap[name]; });
+  var ordered = PROGRESS_EXTRA_COLS.map(function (name) { return vals[name]; });
+  var contiguous = cols.every(function (c, i) { return c && (i === 0 || c === cols[i - 1] + 1); });
+  if (contiguous) {
+    ip.getRange(row, cols[0], 1, cols.length).setValues([ordered]);
+  } else {
+    cols.forEach(function (c, i) { if (c) ip.getRange(row, c).setValue(ordered[i]); });
+  }
+}
+
 // ---------------- rate table access ----------------
 
+// Rate/pricing data almost never changes, so it's cached script-wide (shared across all
+// operators). Ticket data — queue, in-progress, WIP, history — is deliberately NOT cached
+// and is always read live, so operators always see each other's changes immediately.
+var RATE_CACHE_KEY = 'rateTableJson';
+var RATE_CACHE_TTL_SECONDS = 600; // 10 min safety net for hand-edits; seedRateTable clears it
+
 function getRateTable_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(RATE_CACHE_KEY);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) { /* fall through and rebuild */ }
+  }
+
   var sh = getRateTableSheet_();
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return [];
   var values = sh.getRange(2, 1, lastRow - 1, RATE_TABLE_COLS.length).getValues();
-  return values.map(function (r) {
+  var rows = values.map(function (r) {
     return {
       group: r[0], sub: r[1], bbph: r[2], item: r[3],
       chemCode: r[4], appCost: r[5], lineCost: r[6], totalCost: r[7]
     };
   }).filter(function (r) { return r.group; });
+
+  try { cache.put(RATE_CACHE_KEY, JSON.stringify(rows), RATE_CACHE_TTL_SECONDS); } catch (e) {}
+  return rows;
+}
+
+/** Whole rate structure in one payload so the client can drive the Group -> Sub -> Item
+ *  dropdowns entirely in-browser, with no per-selection server round trip. */
+function getRateTree() {
+  var rt = getRateTable_();
+  var groups = [];
+  var tree = {};
+  rt.forEach(function (r) {
+    if (!tree[r.group]) {
+      tree[r.group] = { subs: [], items: {} };
+      groups.push(r.group);
+    }
+    var node = tree[r.group];
+    var subKey = r.sub || '';
+    if (!node.items[subKey]) {
+      node.items[subKey] = [];
+      node.subs.push(r.sub);
+    }
+    node.items[subKey].push({
+      item: r.item, chemCode: r.chemCode, appCost: r.appCost,
+      lineCost: r.lineCost, totalCost: r.totalCost
+    });
+  });
+  return sanitizeForClient_({ groups: groups, tree: tree });
 }
 
 function getGroups() {
@@ -512,7 +567,6 @@ function getTicketDetail(ticket) {
     passCount: passCount,
     runningTotal: runningTotal,
     suggestedGroup: guessGroupForEndUse_(steel['End Use']),
-    groups: getGroups(),
     transactions: getTransactionHistory(ticket)
   });
 }
@@ -527,13 +581,54 @@ function startJob(ticket, operatorName) {
 
   var destRow = copyRowByHeaderName_(cs, csRow, ip);
   var ipMap = headerMap_(ip);
-  ip.getRange(destRow, ipMap['Status']).setValue('In Progress');
-  ip.getRange(destRow, ipMap['Started By']).setValue(operatorName || '');
-  ip.getRange(destRow, ipMap['Started At']).setValue(new Date());
-  ip.getRange(destRow, ipMap['Pass Count']).setValue(0);
-  ip.getRange(destRow, ipMap['Running Litho Total']).setValue(0);
+  setProgressFields_(ip, destRow, ipMap, {
+    'Status': 'In Progress', 'Started By': operatorName || '', 'Started At': new Date(),
+    'Pass Count': 0, 'Running Litho Total': 0
+  });
 
   cs.deleteRow(csRow);
+
+  return getTicketDetail(ticket);
+}
+
+/** Creates a Litho In Progress row for a ticket that isn't in any sheet — the recovery path
+ *  when a Current Steel row was accidentally deleted (or never entered) but the skid is on
+ *  the floor. Only the ticket number is required; steel fields stay blank. If the ticket
+ *  already lives somewhere, route to the sensible action instead of creating a duplicate. */
+function createManualTicket(ticket, operatorName) {
+  ticket = String(ticket || '').trim();
+  if (!ticket) throw new Error('Enter a ticket number.');
+
+  var ip = getInProgressSheet_();
+  if (findRowByTicket_(ip, ticket) > -1) return getTicketDetail(ticket); // already in progress
+
+  var cs = getSheet_(SHEETS.CURRENT_STEEL);
+  if (findRowByTicket_(cs, ticket) > -1) return startJob(ticket, operatorName); // in queue -> start it
+
+  var wip = getSheet_(SHEETS.WIP);
+  if (findRowByTicket_(wip, ticket) > -1) {
+    throw new Error('Ticket ' + ticket + ' is already in WIP. Open it there and use "Reopen to Add Coating".');
+  }
+
+  var ipMap = headerMap_(ip);
+  var lastCol = ip.getLastColumn();
+  var rowArr = new Array(lastCol).fill('');
+  if (ipMap['Ticket']) rowArr[ipMap['Ticket'] - 1] = ticket;
+  if (ipMap['Status']) rowArr[ipMap['Status'] - 1] = 'Manual Entry';
+  if (ipMap['Started By']) rowArr[ipMap['Started By'] - 1] = operatorName || '';
+  if (ipMap['Started At']) rowArr[ipMap['Started At'] - 1] = new Date();
+  if (ipMap['Pass Count']) rowArr[ipMap['Pass Count'] - 1] = 0;
+  if (ipMap['Running Litho Total']) rowArr[ipMap['Running Litho Total'] - 1] = 0;
+
+  var destRow = ip.getLastRow() + 1;
+  ip.getRange(destRow, 1, 1, lastCol).setValues([rowArr]);
+
+  var tx = getTransactionsSheet_();
+  var txRow = tx.getLastRow() + 1;
+  tx.getRange(txRow, 1, 1, TRANSACTION_COLS.length).setValues([[
+    new Date(), ticket, 0, operatorName || '', '', '', 'MANUAL TICKET CREATED', '',
+    0, 0, 0, 0, 'Ticket manually created in app (not found in Current Steel)', ''
+  ]]);
 
   return getTicketDetail(ticket);
 }
@@ -548,14 +643,28 @@ function logPass(ticket, group, sub, itemName, operatorName, notes, jobName) {
   if (!match) throw new Error('Could not find rate for item: ' + itemName);
 
   var ipMap = headerMap_(ip);
-  var currentPassCount = ip.getRange(ipRow, ipMap['Pass Count']).getValue() || 0;
-  var currentTotal = ip.getRange(ipRow, ipMap['Running Litho Total']).getValue() || 0;
+  var pcCol = ipMap['Pass Count'], rtCol = ipMap['Running Litho Total'];
+  var adjacent = rtCol === pcCol + 1; // true by construction; guard just in case
+
+  var currentPassCount, currentTotal;
+  if (adjacent) {
+    var cur = ip.getRange(ipRow, pcCol, 1, 2).getValues()[0];
+    currentPassCount = cur[0] || 0;
+    currentTotal = cur[1] || 0;
+  } else {
+    currentPassCount = ip.getRange(ipRow, pcCol).getValue() || 0;
+    currentTotal = ip.getRange(ipRow, rtCol).getValue() || 0;
+  }
 
   var newPassCount = currentPassCount + 1;
   var newTotal = currentTotal + match.totalCost;
 
-  ip.getRange(ipRow, ipMap['Pass Count']).setValue(newPassCount);
-  ip.getRange(ipRow, ipMap['Running Litho Total']).setValue(newTotal);
+  if (adjacent) {
+    ip.getRange(ipRow, pcCol, 1, 2).setValues([[newPassCount, newTotal]]);
+  } else {
+    ip.getRange(ipRow, pcCol).setValue(newPassCount);
+    ip.getRange(ipRow, rtCol).setValue(newTotal);
+  }
 
   var tx = getTransactionsSheet_();
   var txRow = tx.getLastRow() + 1;
@@ -719,11 +828,10 @@ function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, tick
   if (sourceSheet === cs) {
     var destRow = copyRowByHeaderName_(cs, csRow, ip);
     var ipMap = headerMap_(ip);
-    ip.getRange(destRow, ipMap['Status']).setValue('In Progress');
-    ip.getRange(destRow, ipMap['Started By']).setValue(operatorName || '');
-    ip.getRange(destRow, ipMap['Started At']).setValue(new Date());
-    ip.getRange(destRow, ipMap['Pass Count']).setValue(0);
-    ip.getRange(destRow, ipMap['Running Litho Total']).setValue(0);
+    setProgressFields_(ip, destRow, ipMap, {
+      'Status': 'In Progress', 'Started By': operatorName || '', 'Started At': new Date(),
+      'Pass Count': 0, 'Running Litho Total': 0
+    });
     if (isPartial) {
       if (ipMap['QTY/LOAD']) ip.getRange(destRow, ipMap['QTY/LOAD']).setValue(sheets);
       if (ipMap['Weight']) ip.getRange(destRow, ipMap['Weight']).setValue(estimatedWeightUsed);
@@ -855,11 +963,10 @@ function reopenFromWip(ticket, operatorName) {
 
   var destRow = copyRowByHeaderName_(wip, wipRow, ip);
   var ipMap = headerMap_(ip);
-  ip.getRange(destRow, ipMap['Status']).setValue('Re-Opened');
-  ip.getRange(destRow, ipMap['Started By']).setValue(operatorName || '');
-  ip.getRange(destRow, ipMap['Started At']).setValue(new Date());
-  ip.getRange(destRow, ipMap['Pass Count']).setValue(startingPassCount);
-  ip.getRange(destRow, ipMap['Running Litho Total']).setValue(startingTotal);
+  setProgressFields_(ip, destRow, ipMap, {
+    'Status': 'Re-Opened', 'Started By': operatorName || '', 'Started At': new Date(),
+    'Pass Count': startingPassCount, 'Running Litho Total': startingTotal
+  });
 
   wip.deleteRow(wipRow);
 
