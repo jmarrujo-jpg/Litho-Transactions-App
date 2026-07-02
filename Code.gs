@@ -540,9 +540,10 @@ function guessGroupForEndUse_(endUse) {
 
 // ---------------- queue / ticket ops ----------------
 
+// Current Steel = raw steel with no litho applied yet. Once the first coating is logged the
+// ticket moves straight to WIP (there is no separate "In Progress" stage anymore).
 function getQueue() {
   var out = [];
-
   var cs = getSheet_(SHEETS.CURRENT_STEEL);
   var csHeaders = getHeaders_(cs);
   var csLast = cs.getLastRow();
@@ -559,113 +560,50 @@ function getQueue() {
       });
     });
   }
-
-  var ip = getInProgressSheet_();
-  var ipHeaders = getHeaders_(ip);
-  var ipLast = ip.getLastRow();
-  if (ipLast > 1) {
-    var ipValues = ip.getRange(2, 1, ipLast - 1, ipHeaders.length).getValues();
-    ipValues.forEach(function (row) {
-      if (!row[0]) return;
-      var obj = rowToObject_(ipHeaders, row);
-      out.push({
-        ticket: obj['Ticket'], supplier: obj['Supplier'], endUse: obj['End Use'],
-        width: obj['Width'], length: obj['Length'], weight: obj['Weight'], qty: obj['QTY/LOAD'],
-        bw: obj['BW'], type: obj['TC'], temper: obj['TM'], location: 'queue',
-        status: obj['Status'] || 'In Progress',
-        passCount: obj['Pass Count'] || 0,
-        runningTotal: obj['Running Litho Total'] || 0
-      });
-    });
-  }
-
   return sanitizeForClient_(out);
 }
 
+/** Detail for a Current Steel ticket (no litho applied yet). Once a coating is logged the
+ *  ticket lives in WIP — use getWipDetail for those. */
 function getTicketDetail(ticket) {
-  var ip = getInProgressSheet_();
-  var ipRow = findRowByTicket_(ip, ticket);
-  var steel, status, passCount, runningTotal;
-
-  if (ipRow > -1) {
-    var ipHeaders = getHeaders_(ip);
-    var obj = rowToObject_(ipHeaders, ip.getRange(ipRow, 1, 1, ipHeaders.length).getValues()[0]);
-    steel = obj;
-    status = obj['Status'] || 'In Progress';
-    passCount = obj['Pass Count'] || 0;
-    runningTotal = obj['Running Litho Total'] || 0;
-  } else {
-    var cs = getSheet_(SHEETS.CURRENT_STEEL);
-    var csRow = findRowByTicket_(cs, ticket);
-    if (csRow === -1) throw new Error('Ticket not found in Current Steel or Litho In Progress: ' + ticket);
-    var csHeaders = getHeaders_(cs);
-    steel = rowToObject_(csHeaders, cs.getRange(csRow, 1, 1, csHeaders.length).getValues()[0]);
-    status = 'Not Started';
-    passCount = 0;
-    runningTotal = 0;
-  }
+  var cs = getSheet_(SHEETS.CURRENT_STEEL);
+  var csRow = findRowByTicket_(cs, ticket);
+  if (csRow === -1) throw new Error('Ticket not found in Current Steel: ' + ticket);
+  var csHeaders = getHeaders_(cs);
+  var steel = rowToObject_(csHeaders, cs.getRange(csRow, 1, 1, csHeaders.length).getValues()[0]);
 
   return sanitizeForClient_({
     steel: steel,
-    status: status,
-    passCount: passCount,
-    runningTotal: runningTotal,
+    status: 'Not Started',
+    passCount: 0,
+    runningTotal: 0,
     suggestedGroup: guessGroupForEndUse_(steel['End Use']),
     transactions: getTransactionHistory(ticket)
   });
 }
-
-function startJob(ticket, operatorName) {
-  var ip = getInProgressSheet_();
-  if (findRowByTicket_(ip, ticket) > -1) return getTicketDetail(ticket); // already started
-
-  var cs = getSheet_(SHEETS.CURRENT_STEEL);
-  var csRow = findRowByTicket_(cs, ticket);
-  if (csRow === -1) throw new Error('Ticket not found in Current Steel: ' + ticket);
-
-  var destRow = copyRowByHeaderName_(cs, csRow, ip);
-  var ipMap = headerMap_(ip);
-  setProgressFields_(ip, destRow, ipMap, {
-    'Status': 'In Progress', 'Started By': operatorName || '', 'Started At': new Date(),
-    'Pass Count': 0, 'Running Litho Total': 0
-  });
-
-  cs.deleteRow(csRow);
-
-  return getTicketDetail(ticket);
-}
-
-/** Creates a Litho In Progress row for a ticket that isn't in any sheet — the recovery path
- *  when a Current Steel row was accidentally deleted (or never entered) but the skid is on
- *  the floor. Only the ticket number is required; steel fields stay blank. If the ticket
- *  already lives somewhere, route to the sensible action instead of creating a duplicate. */
+/** Creates a Current Steel row for a ticket that isn't in any sheet — the recovery path when
+ *  a Current Steel row was accidentally deleted (or never entered) but the skid is on the
+ *  floor. Only the ticket number is required; steel fields stay blank. The operator then logs
+ *  a coating like any other ticket, which moves it to WIP. */
 function createManualTicket(ticket, operatorName) {
   ticket = String(ticket || '').trim();
   if (!ticket) throw new Error('Enter a ticket number.');
 
-  var ip = getInProgressSheet_();
-  if (findRowByTicket_(ip, ticket) > -1) return getTicketDetail(ticket); // already in progress
-
   var cs = getSheet_(SHEETS.CURRENT_STEEL);
-  if (findRowByTicket_(cs, ticket) > -1) return startJob(ticket, operatorName); // in queue -> start it
+  if (findRowByTicket_(cs, ticket) > -1) return getTicketDetail(ticket); // already in the queue
 
   var wip = getSheet_(SHEETS.WIP);
   if (findRowByTicket_(wip, ticket) > -1) {
-    throw new Error('Ticket ' + ticket + ' is already in WIP. Open it there and use "Reopen to Add Coating".');
+    throw new Error('Ticket ' + ticket + ' is already in WIP. Open it there to add another coating.');
   }
 
-  var ipMap = headerMap_(ip);
-  var lastCol = ip.getLastColumn();
+  var csMap = headerMap_(cs);
+  var lastCol = Math.max(cs.getLastColumn(), Object.keys(csMap).length, 1);
   var rowArr = new Array(lastCol).fill('');
-  if (ipMap['Ticket']) rowArr[ipMap['Ticket'] - 1] = ticket;
-  if (ipMap['Status']) rowArr[ipMap['Status'] - 1] = 'Manual Entry';
-  if (ipMap['Started By']) rowArr[ipMap['Started By'] - 1] = operatorName || '';
-  if (ipMap['Started At']) rowArr[ipMap['Started At'] - 1] = new Date();
-  if (ipMap['Pass Count']) rowArr[ipMap['Pass Count'] - 1] = 0;
-  if (ipMap['Running Litho Total']) rowArr[ipMap['Running Litho Total'] - 1] = 0;
-
-  var destRow = ip.getLastRow() + 1;
-  ip.getRange(destRow, 1, 1, lastCol).setValues([rowArr]);
+  if (csMap['Ticket']) rowArr[csMap['Ticket'] - 1] = ticket;
+  else rowArr[0] = ticket;
+  var destRow = cs.getLastRow() + 1;
+  cs.getRange(destRow, 1, 1, rowArr.length).setValues([rowArr]);
 
   var tx = getTransactionsSheet_();
   var txRow = tx.getLastRow() + 1;
@@ -677,156 +615,151 @@ function createManualTicket(ticket, operatorName) {
   return getTicketDetail(ticket);
 }
 
-function logPass(ticket, group, sub, itemName, operatorName, notes, jobName) {
-  var ip = getInProgressSheet_();
-  var ipRow = findRowByTicket_(ip, ticket);
-  if (ipRow === -1) throw new Error('Ticket is not in Litho In Progress. Start the job first: ' + ticket);
-
-  var match = findRate_(group, sub, itemName);
-  if (!match) throw new Error('Could not find rate for item: ' + itemName);
-
-  var ipMap = headerMap_(ip);
-  var pcCol = ipMap['Pass Count'], rtCol = ipMap['Running Litho Total'];
-  var adjacent = rtCol === pcCol + 1; // true by construction; guard just in case
-
-  var currentPassCount, currentTotal;
-  if (adjacent) {
-    var cur = ip.getRange(ipRow, pcCol, 1, 2).getValues()[0];
-    currentPassCount = cur[0] || 0;
-    currentTotal = cur[1] || 0;
-  } else {
-    currentPassCount = ip.getRange(ipRow, pcCol).getValue() || 0;
-    currentTotal = ip.getRange(ipRow, rtCol).getValue() || 0;
-  }
-
-  var newPassCount = currentPassCount + 1;
-  var newTotal = currentTotal + match.totalCost;
-
-  if (adjacent) {
-    ip.getRange(ipRow, pcCol, 1, 2).setValues([[newPassCount, newTotal]]);
-  } else {
-    ip.getRange(ipRow, pcCol).setValue(newPassCount);
-    ip.getRange(ipRow, rtCol).setValue(newTotal);
-  }
-
+/** Writes one coating pass to the Litho Transactions log. */
+function logCoatingTx_(ticket, passNumber, operatorName, group, sub, itemName, match, runningTotal, notes, jobName) {
   var tx = getTransactionsSheet_();
   var txRow = tx.getLastRow() + 1;
   tx.getRange(txRow, 1, 1, TRANSACTION_COLS.length).setValues([[
-    new Date(), ticket, newPassCount, operatorName || '', group, sub || '',
-    itemName, match.chemCode || '', match.appCost, match.lineCost, match.totalCost, newTotal, notes || '', jobName || ''
+    new Date(), ticket, passNumber, operatorName || '', group || '', sub || '', itemName,
+    match.chemCode || '', match.appCost, match.lineCost, match.totalCost, runningTotal, notes || '', jobName || ''
   ]]);
-
-  return getTicketDetail(ticket);
 }
 
 /**
- * Completes a litho job.
- * - Full completion (default): whole ticket moves to WIP with the running litho cost.
- * - Partial completion: pass sheetsUsed for the portion that actually ran. Weight for
- *   both the used portion and the remainder is estimated automatically from the
- *   ticket's original weight-per-sheet ratio — nobody needs to weigh a partial skid.
- *   The remainder goes back to Current Steel as a new ticket, ready to be picked up again.
+ * Applies one coating pass to a ticket. This is the single mutation for the new lifecycle:
+ *  - Ticket in Current Steel (first coating): it moves to WIP with Litho = this pass's cost.
+ *    On a partial run, sheetsRun sets what actually ran; leftovers return to Current Steel
+ *    only if isPartialSkid is true, otherwise they're scrapped (and recorded).
+ *  - Ticket already in WIP (another coat): its Litho cost is increased by this pass's cost.
+ * Every pass is recorded in Litho Transactions, so the full history is always tracked; the
+ * only live number kept on the WIP row is the running Litho cost.
  */
-function completeJob(ticket, sheetsUsed) {
-  var ip = getInProgressSheet_();
-  var ipRow = findRowByTicket_(ip, ticket);
-  if (ipRow === -1) throw new Error('Ticket is not in Litho In Progress: ' + ticket);
-
-  var ipHeaders = getHeaders_(ip);
-  var ipMap = headerMap_(ip);
-  var rowValues = ip.getRange(ipRow, 1, 1, ipHeaders.length).getValues()[0];
-  var steelObj = rowToObject_(ipHeaders, rowValues);
-
-  var runningTotal = steelObj['Running Litho Total'] || 0;
-  var passCount = steelObj['Pass Count'] || 0;
-  if (passCount < 1) throw new Error('Log at least one pass before completing this ticket.');
-
-  var isSplit = (sheetsUsed !== undefined && sheetsUsed !== null && sheetsUsed !== '');
+function applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName) {
+  ticket = String(ticket || '').trim();
+  if (!ticket) throw new Error('Enter a ticket number.');
+  if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
+  var match = findRate_(group, sub, itemName);
+  if (!match) throw new Error('Could not find rate for item: ' + itemName);
 
   var wip = getSheet_(SHEETS.WIP);
-  ensureColumns_(wip, ['Litho Notes']); // so any Litho Notes on the ticket carry into WIP
-  var destRow = copyRowByHeaderName_(ip, ipRow, wip);
-  var wipMap = headerMap_(wip);
-  if (wipMap['Litho']) wip.getRange(destRow, wipMap['Litho']).setValue(runningTotal);
+  var cs = getSheet_(SHEETS.CURRENT_STEEL);
+  var lithoNoteClean = String(lithoNote || '').trim();
 
-  var remainderTicket = null;
+  var history = getTransactionHistory(ticket);
+  var nextPass = history.length
+    ? Math.max.apply(null, history.map(function (h) { return Number(h.passNumber) || 0; })) + 1 : 1;
 
-  if (isSplit) {
-    var originalQty = Number(steelObj['QTY/LOAD']) || 0;
-    var originalWeight = Number(steelObj['Weight']) || 0;
-    var weightPerSheet = originalQty > 0 ? (originalWeight / originalQty) : 0;
-    var usedQty = Number(sheetsUsed);
+  var result = { ticket: ticket, sheetsRun: null, estimatedWeightUsed: null, isPartial: false,
+    remainderTicket: null, remainderSheets: 0, remainderWeight: 0, scrapSheets: 0, scrapWeight: 0 };
 
-    if (isNaN(usedQty) || usedQty < 0) throw new Error('Enter a valid sheet count.');
-    if (originalQty > 0 && usedQty > originalQty) throw new Error('Sheets used (' + usedQty + ') exceeds the ticket total (' + originalQty + ').');
-
-    var usedWeight = weightPerSheet > 0 ? Math.round(usedQty * weightPerSheet * 100) / 100 : originalWeight;
-
-    if (wipMap['QTY/LOAD']) wip.getRange(destRow, wipMap['QTY/LOAD']).setValue(usedQty);
-    if (wipMap['Weight']) wip.getRange(destRow, wipMap['Weight']).setValue(usedWeight);
-
-    var remainderQty = originalQty - usedQty;
-    var remainderWeight = Math.round((originalWeight - usedWeight) * 100) / 100;
-
-    if (remainderQty > 0) {
-      remainderTicket = generateRemainderTicketId_(ticket);
-      var cs = getSheet_(SHEETS.CURRENT_STEEL);
-      ensureColumns_(cs, ['Litho Notes']); // Litho Notes follows the split remainder too
-      var csDestRow = copyRowByHeaderName_(ip, ipRow, cs);
-      var csMap = headerMap_(cs);
-      if (csMap['Ticket']) cs.getRange(csDestRow, csMap['Ticket']).setValue(remainderTicket);
-      if (csMap['QTY/LOAD']) cs.getRange(csDestRow, csMap['QTY/LOAD']).setValue(remainderQty);
-      if (csMap['Weight']) cs.getRange(csDestRow, csMap['Weight']).setValue(remainderWeight);
-      if (csMap['Litho']) cs.getRange(csDestRow, csMap['Litho']).setValue('');
-      if (csMap['Comments']) {
-        var existingComment = steelObj['Comments'] || '';
-        cs.getRange(csDestRow, csMap['Comments']).setValue(
-          (existingComment ? existingComment + ' | ' : '') + 'Split remainder from ' + ticket + ' on ' +
-          Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Los_Angeles', 'yyyy-MM-dd')
-        );
-      }
-
-      var tx = getTransactionsSheet_();
-      var txRow = tx.getLastRow() + 1;
-      tx.getRange(txRow, 1, 1, TRANSACTION_COLS.length).setValues([[
-        new Date(), ticket, passCount, '', '', '', 'SPLIT / PARTIAL COMPLETE', '', 0, 0, 0, runningTotal,
-        'Used ' + usedQty + ' sheets (~' + usedWeight + ' lbs, estimated) sent to WIP. Remainder ' + remainderQty +
-        ' sheets (~' + remainderWeight + ' lbs, estimated) returned to Current Steel as ' + remainderTicket, ''
-      ]]);
+  // ----- Additional coating on a ticket already in WIP: just add cost -----
+  var wipRow = findRowByTicket_(wip, ticket);
+  if (wipRow > -1) {
+    var wm = headerMap_(wip);
+    var currentLitho = Number(wip.getRange(wipRow, wm['Litho']).getValue()) || 0;
+    var newTotal = Math.round((currentLitho + match.totalCost) * 100) / 100;
+    wip.getRange(wipRow, wm['Litho']).setValue(newTotal);
+    if (lithoNoteClean) {
+      var nm = ensureColumns_(wip, ['Litho Notes']);
+      var cell = wip.getRange(wipRow, nm['Litho Notes']); var ex = cell.getValue();
+      cell.setValue((ex ? ex + ' | ' : '') + lithoNoteClean);
     }
+    logCoatingTx_(ticket, nextPass, operatorName, group, sub, itemName, match, newTotal, notes, jobName);
+    result.litho = newTotal;
+    result.detail = getWipDetail(ticket);
+    return sanitizeForClient_(result);
   }
 
-  ip.deleteRow(ipRow);
+  // ----- First coating: ticket must be in Current Steel; move it to WIP -----
+  var csRow = findRowByTicket_(cs, ticket);
+  if (csRow === -1) throw new Error('Ticket not found in Current Steel or WIP: ' + ticket);
+  var csHeaders = getHeaders_(cs);
+  var sourceObj = rowToObject_(csHeaders, cs.getRange(csRow, 1, 1, csHeaders.length).getValues()[0]);
 
-  return sanitizeForClient_({
-    ticket: ticket,
-    movedToWip: true,
-    finalLithoCost: runningTotal,
-    passCount: passCount,
-    remainderTicket: remainderTicket
-  });
-}
+  var originalQty = Number(sourceObj['QTY/LOAD']) || 0;
+  var originalWeight = Number(sourceObj['Weight']) || 0;
+  var weightPerSheet = originalQty > 0 ? (originalWeight / originalQty) : 0;
+  var sheets = (sheetsRun === undefined || sheetsRun === null || sheetsRun === '') ? originalQty : Number(sheetsRun);
+  if (isNaN(sheets) || sheets <= 0) throw new Error('Enter a valid number of sheets run for ' + ticket + '.');
+  if (originalQty > 0 && sheets > originalQty) throw new Error('Sheets run (' + sheets + ') exceeds sheets available (' + originalQty + ') for ' + ticket + '.');
+  var usedFewer = originalQty > 0 && sheets < originalQty;
+  isPartialSkid = usedFewer && !!isPartialSkid;
+  var estimatedWeightUsed = weightPerSheet > 0 ? Math.round(sheets * weightPerSheet * 100) / 100 : originalWeight;
 
-/** Completes several tickets (full skid each) in one call — used by the New Job flow's
- *  "Send all to WIP" button. Never throws for the batch: each ticket's outcome is captured
- *  so one bad ticket doesn't block the rest. */
-function completeJobs(tickets) {
-  var seen = {};
-  var out = [];
-  (tickets || []).forEach(function (ticket) {
-    var t = String(ticket || '').trim();
-    if (!t || seen[t]) return;
-    seen[t] = true;
-    try {
-      var res = completeJob(t);
-      out.push({ ticket: t, ok: true, finalLithoCost: res.finalLithoCost, remainderTicket: res.remainderTicket });
-    } catch (e) {
-      out.push({ ticket: t, ok: false, error: (e && e.message) ? e.message : String(e) });
+  ensureColumns_(wip, ['Litho Notes']);
+  var destRow = copyRowByHeaderName_(cs, csRow, wip);
+  var wipMap = headerMap_(wip);
+  if (wipMap['Litho']) wip.getRange(destRow, wipMap['Litho']).setValue(match.totalCost);
+  if (usedFewer) {
+    if (wipMap['QTY/LOAD']) wip.getRange(destRow, wipMap['QTY/LOAD']).setValue(sheets);
+    if (wipMap['Weight']) wip.getRange(destRow, wipMap['Weight']).setValue(estimatedWeightUsed);
+  }
+
+  var scrapNote = '';
+  if (usedFewer && isPartialSkid) {
+    result.remainderTicket = generateRemainderTicketId_(ticket);
+    result.remainderSheets = originalQty - sheets;
+    result.remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
+    var csDestRow = copyRowByHeaderName_(cs, csRow, cs);
+    var csMap = headerMap_(cs);
+    if (csMap['Ticket']) cs.getRange(csDestRow, csMap['Ticket']).setValue(result.remainderTicket);
+    if (csMap['QTY/LOAD']) cs.getRange(csDestRow, csMap['QTY/LOAD']).setValue(result.remainderSheets);
+    if (csMap['Weight']) cs.getRange(csDestRow, csMap['Weight']).setValue(result.remainderWeight);
+    if (csMap['Litho']) cs.getRange(csDestRow, csMap['Litho']).setValue('');
+    if (csMap['Comments']) {
+      var existingComment = sourceObj['Comments'] || '';
+      cs.getRange(csDestRow, csMap['Comments']).setValue(
+        (existingComment ? existingComment + ' | ' : '') + 'Split remainder from ' + ticket + ' (partial skid, ' +
+        sheets + ' of ' + originalQty + ' sheets run) on ' +
+        Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Los_Angeles', 'yyyy-MM-dd'));
     }
-  });
-  return sanitizeForClient_(out);
+  } else if (usedFewer) {
+    result.scrapSheets = originalQty - sheets;
+    result.scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
+    scrapNote = 'Scrapped ' + result.scrapSheets + ' sheets (~' + result.scrapWeight + ' lbs, estimated) of ' + originalQty + ' on hand';
+  }
+
+  var noteFull = [lithoNoteClean, scrapNote].filter(function (s) { return s; }).join(' | ');
+  if (noteFull && wipMap['Litho Notes']) {
+    var c2 = wip.getRange(destRow, wipMap['Litho Notes']); var e2 = c2.getValue();
+    c2.setValue((e2 ? e2 + ' | ' : '') + noteFull);
+  }
+
+  cs.deleteRow(csRow);
+
+  logCoatingTx_(ticket, nextPass, operatorName, group, sub, itemName, match, match.totalCost,
+    [notes, scrapNote].filter(function (s) { return s; }).join(' | '), jobName);
+
+  result.sheetsRun = sheets;
+  result.estimatedWeightUsed = estimatedWeightUsed;
+  result.isPartial = isPartialSkid;
+  result.litho = match.totalCost;
+  result.detail = getWipDetail(ticket);
+  return sanitizeForClient_(result);
 }
 
+/** One-time migration: move any tickets still sitting in the old Litho In Progress sheet into
+ *  WIP, carrying their running litho cost. Safe to run repeatedly / when empty. */
+function migrateInProgressToWip() {
+  var ip = getInProgressSheet_();
+  var last = ip.getLastRow();
+  if (last < 2) return { moved: 0 };
+  var wip = getSheet_(SHEETS.WIP);
+  ensureColumns_(wip, ['Litho Notes']);
+  var moved = 0;
+  // Walk bottom-up so row deletions don't shift the rows we haven't processed yet.
+  for (var row = last; row >= 2; row--) {
+    var ipHeaders = getHeaders_(ip);
+    var obj = rowToObject_(ipHeaders, ip.getRange(row, 1, 1, ipHeaders.length).getValues()[0]);
+    if (!obj['Ticket']) continue;
+    var destRow = copyRowByHeaderName_(ip, row, wip);
+    var wipMap = headerMap_(wip);
+    if (wipMap['Litho']) wip.getRange(destRow, wipMap['Litho']).setValue(Number(obj['Running Litho Total']) || 0);
+    ip.deleteRow(row);
+    moved++;
+  }
+  return { moved: moved };
+}
 function getTransactionHistory(ticket) {
   var tx = getTransactionsSheet_();
   var last = tx.getLastRow();
@@ -851,126 +784,13 @@ function getTransactionHistory(ticket) {
  * together so you can see everything that went through together in one run.
  */
 /**
- * Adds ONE ticket to a job: starts it if needed, splits off a remainder if only part
- * of the skid is being run, and logs the pass. Weight for both the used portion and
- * any remainder is estimated automatically from the ticket's own weight-per-sheet
- * ratio (original weight / original sheet count) — no one has to weigh a partial skid.
+ * Adds ONE ticket to a job: applies the job's coating pass to the ticket, which moves it from
+ * Current Steel straight to WIP (or adds another coat if it's already in WIP). Partial-skid /
+ * scrap handling and per-ticket Litho Notes are all done by applyCoating.
  * Call this once per ticket as tickets are added to the job, one at a time.
  */
 function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, ticket, sheetsRun, lithoNote, isPartialSkid) {
-  ticket = String(ticket || '').trim();
-  if (!ticket) throw new Error('Enter a ticket number.');
-  if (!group || !itemName) throw new Error('Pick a size/group and coating item for this job.');
-
-  var ip = getInProgressSheet_();
-  var cs = getSheet_(SHEETS.CURRENT_STEEL);
-  var ipRow = findRowByTicket_(ip, ticket);
-  var csRow = -1;
-  var sourceSheet, sourceRow;
-
-  if (ipRow > -1) {
-    sourceSheet = ip; sourceRow = ipRow;
-  } else {
-    csRow = findRowByTicket_(cs, ticket);
-    if (csRow === -1) throw new Error('Ticket not found in Current Steel or Litho In Progress: ' + ticket);
-    sourceSheet = cs; sourceRow = csRow;
-  }
-
-  var sourceHeaders = getHeaders_(sourceSheet);
-  var sourceObj = rowToObject_(sourceHeaders, sourceSheet.getRange(sourceRow, 1, 1, sourceHeaders.length).getValues()[0]);
-
-  var originalQty = Number(sourceObj['QTY/LOAD']) || 0;
-  var originalWeight = Number(sourceObj['Weight']) || 0;
-  var weightPerSheet = originalQty > 0 ? (originalWeight / originalQty) : 0;
-
-  var sheets = (sheetsRun === undefined || sheetsRun === null || sheetsRun === '') ? originalQty : Number(sheetsRun);
-  if (isNaN(sheets) || sheets <= 0) throw new Error('Enter a valid number of sheets run for ' + ticket + '.');
-  if (originalQty > 0 && sheets > originalQty) throw new Error('Sheets run (' + sheets + ') exceeds sheets available (' + originalQty + ') for ' + ticket + '.');
-
-  // Fewer sheets run than on hand. The leftovers are SCRAP unless the operator explicitly
-  // marks this a partial skid — only then does the remainder go back to Current Steel.
-  var usedFewer = originalQty > 0 && sheets < originalQty;
-  isPartialSkid = usedFewer && !!isPartialSkid;
-  var estimatedWeightUsed = weightPerSheet > 0 ? Math.round(sheets * weightPerSheet * 100) / 100 : originalWeight;
-
-  if (sourceSheet === cs) {
-    var destRow = copyRowByHeaderName_(cs, csRow, ip);
-    var ipMap = headerMap_(ip);
-    setProgressFields_(ip, destRow, ipMap, {
-      'Status': 'In Progress', 'Started By': operatorName || '', 'Started At': new Date(),
-      'Pass Count': 0, 'Running Litho Total': 0
-    });
-    if (usedFewer) { // the ticket now reflects only what actually ran (rest scrapped or split)
-      if (ipMap['QTY/LOAD']) ip.getRange(destRow, ipMap['QTY/LOAD']).setValue(sheets);
-      if (ipMap['Weight']) ip.getRange(destRow, ipMap['Weight']).setValue(estimatedWeightUsed);
-    }
-    cs.deleteRow(csRow);
-    ipRow = destRow;
-  } else if (usedFewer) {
-    var ipMap2 = headerMap_(ip);
-    if (ipMap2['QTY/LOAD']) ip.getRange(ipRow, ipMap2['QTY/LOAD']).setValue(sheets);
-    if (ipMap2['Weight']) ip.getRange(ipRow, ipMap2['Weight']).setValue(estimatedWeightUsed);
-  }
-
-  var remainderTicketId = null;
-  var remainderSheets = 0, remainderWeight = 0;
-  var scrapSheets = 0, scrapWeight = 0;
-  var scrapNote = '';
-
-  if (usedFewer && isPartialSkid) {
-    remainderTicketId = generateRemainderTicketId_(ticket);
-    remainderSheets = originalQty - sheets;
-    remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
-
-    var csDestRow = copyRowByHeaderName_(ip, ipRow, cs);
-    var csMap = headerMap_(cs);
-    if (csMap['Ticket']) cs.getRange(csDestRow, csMap['Ticket']).setValue(remainderTicketId);
-    if (csMap['QTY/LOAD']) cs.getRange(csDestRow, csMap['QTY/LOAD']).setValue(remainderSheets);
-    if (csMap['Weight']) cs.getRange(csDestRow, csMap['Weight']).setValue(remainderWeight);
-    if (csMap['Litho']) cs.getRange(csDestRow, csMap['Litho']).setValue('');
-    if (csMap['Comments']) {
-      var existingComment = sourceObj['Comments'] || '';
-      cs.getRange(csDestRow, csMap['Comments']).setValue(
-        (existingComment ? existingComment + ' | ' : '') + 'Split remainder from ' + ticket + ' (partial skid, ' +
-        sheets + ' of ' + originalQty + ' sheets run) on ' +
-        Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Los_Angeles', 'yyyy-MM-dd')
-      );
-    }
-  } else if (usedFewer) {
-    // Scrap: leftovers are not returned. Record it for traceability.
-    scrapSheets = originalQty - sheets;
-    scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
-    scrapNote = 'Scrapped ' + scrapSheets + ' sheets (~' + scrapWeight + ' lbs, estimated) of ' + originalQty + ' on hand';
-  }
-
-  // Per-ticket Litho Notes: a managed column that follows the ticket. Written after any
-  // remainder split so the note stays with the portion actually run, not the leftover skid.
-  lithoNote = String(lithoNote || '').trim();
-  var lithoNoteFull = [lithoNote, scrapNote].filter(function (s) { return s; }).join(' | ');
-  if (lithoNoteFull) {
-    var noteMap = ensureColumns_(ip, ['Litho Notes']);
-    var noteCell = ip.getRange(ipRow, noteMap['Litho Notes']);
-    var existingNote = noteCell.getValue();
-    noteCell.setValue((existingNote ? existingNote + ' | ' : '') + lithoNoteFull);
-  }
-
-  // Fold the scrap note into the pass's transaction row too.
-  var passNotes = [notes, scrapNote].filter(function (s) { return s; }).join(' | ');
-  var detail = logPass(ticket, group, sub, itemName, operatorName, passNotes, jobName);
-
-  return sanitizeForClient_({
-    ticket: ticket,
-    sheetsRun: sheets,
-    estimatedWeightUsed: estimatedWeightUsed,
-    isPartial: isPartialSkid,
-    remainderTicket: remainderTicketId,
-    remainderSheets: remainderSheets,
-    remainderWeight: remainderWeight,
-    scrapSheets: scrapSheets,
-    scrapWeight: scrapWeight,
-    lithoNote: lithoNote,
-    detail: detail
-  });
+  return applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName);
 }
 
 // ---------------- WIP browsing / manual cost edit / reopen ----------------
@@ -994,8 +814,8 @@ function getWipList() {
   return sanitizeForClient_(out);
 }
 
-/** Current Steel + Litho In Progress + WIP merged into one list for the combined search view.
- *  Ticket data is read live (never cached) so every operator sees the same current floor. */
+/** Current Steel + WIP merged into one list for the combined search view. Ticket data is read
+ *  live (never cached) so every operator sees the same current floor. */
 function getAllTickets() {
   return getQueue().concat(getWipList());
 }
@@ -1006,10 +826,12 @@ function getWipDetail(ticket) {
   if (wipRow === -1) throw new Error('Ticket not found in WIP: ' + ticket);
   var headers = getHeaders_(wip);
   var steel = rowToObject_(headers, wip.getRange(wipRow, 1, 1, headers.length).getValues()[0]);
+  var history = getTransactionHistory(ticket);
   return sanitizeForClient_({
     steel: steel,
     litho: steel['Litho'] || 0,
-    transactions: getTransactionHistory(ticket)
+    passCount: history.filter(function (h) { return Number(h.passTotal) > 0; }).length,
+    transactions: history
   });
 }
 
@@ -1040,42 +862,4 @@ function updateWipLithoCost(ticket, newCost, operatorName, notes) {
   ]]);
 
   return sanitizeForClient_(getWipDetail(ticket));
-}
-
-/** Pulls a ticket back out of WIP into Litho In Progress so another coat/pass can be added.
- *  Picks up where it left off: starting running total = current WIP Litho cost,
- *  starting pass count = highest pass number already logged for this ticket. */
-function reopenFromWip(ticket, operatorName) {
-  var wip = getSheet_(SHEETS.WIP);
-  var wipRow = findRowByTicket_(wip, ticket);
-  if (wipRow === -1) throw new Error('Ticket not found in WIP: ' + ticket);
-
-  var ip = getInProgressSheet_();
-  if (findRowByTicket_(ip, ticket) > -1) throw new Error('Ticket is already in Litho In Progress: ' + ticket);
-
-  var wipHeaders = getHeaders_(wip);
-  var wipObj = rowToObject_(wipHeaders, wip.getRange(wipRow, 1, 1, wipHeaders.length).getValues()[0]);
-  var startingTotal = wipObj['Litho'] || 0;
-
-  var history = getTransactionHistory(ticket);
-  var startingPassCount = history.length ? Math.max.apply(null, history.map(function (h) { return Number(h.passNumber) || 0; })) : 0;
-
-  ensureColumns_(ip, ['Litho Notes']); // keep Litho Notes with the ticket when reopened
-  var destRow = copyRowByHeaderName_(wip, wipRow, ip);
-  var ipMap = headerMap_(ip);
-  setProgressFields_(ip, destRow, ipMap, {
-    'Status': 'Re-Opened', 'Started By': operatorName || '', 'Started At': new Date(),
-    'Pass Count': startingPassCount, 'Running Litho Total': startingTotal
-  });
-
-  wip.deleteRow(wipRow);
-
-  var tx = getTransactionsSheet_();
-  var txRow = tx.getLastRow() + 1;
-  tx.getRange(txRow, 1, 1, TRANSACTION_COLS.length).setValues([[
-    new Date(), ticket, startingPassCount, operatorName || '', '', '', 'REOPENED FROM WIP', '',
-    0, 0, 0, startingTotal, 'Ticket pulled back from WIP to add another coat/pass', ''
-  ]]);
-
-  return getTicketDetail(ticket);
 }

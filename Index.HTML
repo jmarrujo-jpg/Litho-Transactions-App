@@ -263,6 +263,30 @@
     }
   }
 
+  // Wires a Group -> Sub -> Item(+Chem) cascade for a coating form (used in the ticket detail
+  // and WIP "add another coating" form). Populates subs on group change and items on sub change.
+  function wireCoatingCascade(groupSelect, subSelect, itemSelect, chemSelect, costPreview, costMsgFn) {
+    if (!groupSelect) return;
+    if (itemSelect) wireItemChem(itemSelect, chemSelect, costPreview, costMsgFn);
+    function refreshSubs() {
+      var group = groupSelect.value;
+      subSelect.innerHTML = '<option value="">--</option>';
+      if (itemSelect) itemSelect.innerHTML = '<option value="">--</option>';
+      if (chemSelect) chemSelect.innerHTML = '<option value="">--</option>';
+      if (costPreview) costPreview.textContent = '';
+      if (!group) return;
+      rateSubs(group).forEach(function (s) {
+        var o = document.createElement('option'); o.value = s || ''; o.textContent = s || '(single)';
+        subSelect.appendChild(o);
+      });
+      var subs = rateSubs(group);
+      if (subs.length === 1) { subSelect.value = subs[0] || ''; fillItemChem(group, subSelect.value, itemSelect, chemSelect, costPreview); }
+    }
+    groupSelect.onchange = refreshSubs;
+    subSelect.onchange = function () { fillItemChem(groupSelect.value, subSelect.value, itemSelect, chemSelect, costPreview); };
+    if (groupSelect.value) refreshSubs();
+  }
+
   // ----- Can Fitting Size -> Size/Group (derived from the rate-table group names) -----
   // Group names encode diameter x heights, e.g. "603X408,409,410,700,812" (dia 603, heights
   // 408/409/410/700/812) or "401/404 X 700" (dia 401 or 404, height 700). "211 Diameter" is
@@ -539,58 +563,41 @@
       metaBox('Width', steel['Width']) + metaBox('End Use', steel['End Use']) +
       '</div>';
     if (steel['Litho Notes']) {
-      html += '<div class="sub" style="margin-bottom:12px">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
+      html += '<div class="sub" style="margin-bottom:8px">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
     }
-
-    html += '<div class="row">' +
-      '<div class="stat"><div class="num">' + detail.passCount + '</div><div class="label">Passes logged</div></div>' +
-      '<div class="stat"><div class="num">' + money(detail.runningTotal) + '</div><div class="label">Running litho cost</div></div>' +
-      '<div class="stat"><div class="num">' + esc(detail.status) + '</div><div class="label">Status</div></div>' +
-      '</div>';
+    html += '<div class="sub">In Current Steel — no litho applied yet. Logging a coating sends it to WIP.</div>';
     html += '</div>';
 
-    if (detail.status === 'Not Started') {
-      html += '<div class="card">' +
-        operatorFieldHtml('startOperator') +
-        '<button class="btn" id="startBtn">Start Job</button>' +
-        '</div>';
-    } else {
-      html += '<div class="card">' +
-        '<div class="row">' +
-          selectField('groupSelect', 'Size / Group', rateGroups(), detail.suggestedGroup) +
-          selectField('subSelect', 'Sub-Variant', [], null) +
-          selectField('itemSelect', 'Coating Item', [], null) +
-          selectField('chemSelect', 'Chem Code', [], null) +
-        '</div>' +
-        '<div class="row">' +
-          operatorFieldHtml('passOperator') +
-          '<div class="field"><label>Notes (optional)</label><input id="passNotes" placeholder="e.g. re-run, color match"></div>' +
-        '</div>' +
-        '<div id="itemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
-        '<button class="btn" id="logPassBtn">Log Pass</button>' +
-        '</div>';
+    var origQty = steel['QTY/LOAD'] || 0;
 
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Log a coating</h3>' +
+      '<div class="row">' +
+        selectField('groupSelect', 'Size / Group', rateGroups(), detail.suggestedGroup) +
+        selectField('subSelect', 'Sub-Variant', [], null) +
+        selectField('itemSelect', 'Coating Item', [], null) +
+        selectField('chemSelect', 'Chem Code', [], null) +
+      '</div>' +
+      '<div class="row">' +
+        operatorFieldHtml('passOperator') +
+        '<div class="field"><label>Notes (optional)</label><input id="passNotes" placeholder="e.g. re-run, color match"></div>' +
+      '</div>' +
+      '<div id="itemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
+      '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
+        '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty || '') + '"></div>' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
+        '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
+        'This is a partial skid — return leftovers to Current Steel' +
+      '</label>' +
+      '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>' +
+      '<div class="field"><label>Litho Notes (optional)</label><input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
+      '<button class="btn success" id="logCoatingBtn">Log Coating &amp; Send to WIP</button>' +
+      '</div>';
+
+    if (detail.transactions && detail.transactions.length) {
       html += '<div class="card">' +
-        '<h3 style="margin-top:0;font-size:15px">Pass history</h3>' +
+        '<h3 style="margin-top:0;font-size:15px">History</h3>' +
         renderHistoryTable(detail.transactions) +
-        '</div>';
-
-      var origQty = steel['QTY/LOAD'] || 0;
-      var origWeight = steel['Weight'] || 0;
-
-      html += '<div class="card">' +
-        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:4px">' +
-          '<input type="checkbox" id="splitToggle" style="width:18px;height:18px"> ' +
-          'Only part of this pallet was used — split the remainder back to Current Steel' +
-        '</label>' +
-        '<div id="splitFields" style="display:none;margin-top:12px">' +
-          '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
-            '<input type="number" id="sheetsUsedInput" value="' + esc(origQty) + '" min="0" max="' + esc(origQty) + '"></div>' +
-          '<div class="sub" id="remainderPreview" style="margin-bottom:10px"></div>' +
-        '</div>' +
-        '<button class="btn success" id="completeBtn"' + (detail.passCount < 1 ? ' disabled' : '') + '>' +
-        'Complete &amp; Send to WIP</button>' +
-        (detail.passCount < 1 ? '<div class="sub" style="margin-top:8px">Log at least one pass first.</div>' : '') +
         '</div>';
     }
 
@@ -626,129 +633,65 @@
   }
 
   function wireDetailEvents(detail) {
-    var startBtn = document.getElementById('startBtn');
-    if (startBtn) {
-      var startOperatorInput = document.getElementById('startOperator');
-      startBtn.onclick = function () {
-        var operator = startOperatorInput.value.trim();
-        if (!operator) { toast('Enter an operator name'); return; }
-        startBtn.disabled = true;
-        google.script.run.withSuccessHandler(function () {
-          toast('Job started');
-          renderDetail();
-        }).withFailureHandler(function (err) {
-          toast('Error: ' + err.message);
-          startBtn.disabled = false;
-        }).startJob(state.ticket, operator);
-      };
-    }
-
     var groupSelect = document.getElementById('groupSelect');
     var subSelect = document.getElementById('subSelect');
     var itemSelect = document.getElementById('itemSelect');
     var chemSelect = document.getElementById('chemSelect');
     var costPreview = document.getElementById('itemCostPreview');
 
-    if (itemSelect) wireItemChem(itemSelect, chemSelect, costPreview, function (c) {
-      return 'This pass will add ' + money(c) + ' to the running total.';
+    wireCoatingCascade(groupSelect, subSelect, itemSelect, chemSelect, costPreview, function (c) {
+      return 'This coating adds ' + money(c) + ' to the litho cost.';
     });
 
-    if (groupSelect) {
-      groupSelect.onchange = function () { refreshSubOptions(); };
-      if (groupSelect.value) refreshSubOptions();
-    }
-    if (subSelect) subSelect.onchange = function () {
-      fillItemChem(groupSelect.value, subSelect.value, itemSelect, chemSelect, costPreview);
-    };
-
-    function refreshSubOptions() {
-      var group = groupSelect.value;
-      subSelect.innerHTML = '<option value="">--</option>';
-      if (itemSelect) itemSelect.innerHTML = '<option value="">--</option>';
-      if (chemSelect) chemSelect.innerHTML = '<option value="">--</option>';
-      costPreview.textContent = '';
-      if (!group) return;
-      var subs = rateSubs(group);
-      subs.forEach(function (s) {
-        var opt = document.createElement('option');
-        opt.value = s || '';
-        opt.textContent = s || '(single)';
-        subSelect.appendChild(opt);
-      });
-      if (subs.length === 1) { subSelect.value = subs[0] || ''; fillItemChem(group, subSelect.value, itemSelect, chemSelect, costPreview); }
-    }
-
     var passOperatorInput = document.getElementById('passOperator');
-    var logPassBtn = document.getElementById('logPassBtn');
-    if (logPassBtn) {
-      logPassBtn.onclick = function () {
+    var sheetsRunInput = document.getElementById('sheetsRunInput');
+    var partialToggle = document.getElementById('partialSkidToggle');
+    var preview = document.getElementById('sheetsRunPreview');
+    var origQty = Number(detail.steel['QTY/LOAD']) || 0;
+    var origWeight = Number(detail.steel['Weight']) || 0;
+    var weightPerSheet = origQty > 0 ? (origWeight / origQty) : 0;
+
+    function updatePreview() {
+      if (!preview) return;
+      if (!origQty) { preview.textContent = ''; return; }
+      var sheets = Number(sheetsRunInput.value) || 0;
+      var estWeight = Math.round(sheets * weightPerSheet * 100) / 100;
+      var rem = origQty - sheets;
+      if (rem <= 0) {
+        preview.textContent = 'Full skid: ' + sheets + ' sheets (~' + estWeight + ' lbs, estimated).';
+      } else if (partialToggle.checked) {
+        var remWeight = Math.round((origWeight - estWeight) * 100) / 100;
+        preview.textContent = sheets + ' sheets run (~' + estWeight + ' lbs). Remainder ' + rem +
+          ' sheets (~' + remWeight + ' lbs) returns to Current Steel as a new ticket.';
+      } else {
+        preview.textContent = sheets + ' sheets run. ' + rem + ' leftover sheets will be scrapped (not returned).';
+      }
+    }
+    if (sheetsRunInput) sheetsRunInput.oninput = updatePreview;
+    if (partialToggle) partialToggle.onchange = updatePreview;
+    updatePreview();
+
+    var logCoatingBtn = document.getElementById('logCoatingBtn');
+    if (logCoatingBtn) {
+      logCoatingBtn.onclick = function () {
         var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
         var operator = passOperatorInput.value.trim();
         var notes = document.getElementById('passNotes').value;
+        var lithoNote = document.getElementById('lithoNoteInput').value;
+        var isPartialSkid = partialToggle && partialToggle.checked;
+        var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
         if (!group || !item) { toast('Pick a group and coating item first'); return; }
         if (!operator) { toast('Enter an operator name'); return; }
-        logPassBtn.disabled = true;
-        google.script.run.withSuccessHandler(function () {
-          toast('Pass logged');
-          renderDetail();
+        logCoatingBtn.disabled = true;
+        google.script.run.withSuccessHandler(function (result) {
+          var msg = 'Ticket ' + state.ticket + ' moved to WIP. Litho cost so far: ' + money(result.litho) + '.';
+          if (result.remainderTicket) msg += ' Remainder returned to Current Steel as ' + result.remainderTicket + '.';
+          else if (result.scrapSheets) msg += ' ' + result.scrapSheets + ' sheets scrapped.';
+          showInfo('Sent to WIP', msg, function () { openWipTicket(state.ticket); });
         }).withFailureHandler(function (err) {
-          toast('Error: ' + err.message);
-          logPassBtn.disabled = false;
-        }).logPass(state.ticket, group, sub, item, operator, notes);
-      };
-    }
-
-    var splitToggle = document.getElementById('splitToggle');
-    var splitFields = document.getElementById('splitFields');
-    var sheetsUsedInput = document.getElementById('sheetsUsedInput');
-    var remainderPreview = document.getElementById('remainderPreview');
-    var origQtyForSplit = Number(detail.steel['QTY/LOAD']) || 0;
-    var origWeightForSplit = Number(detail.steel['Weight']) || 0;
-    var weightPerSheetForSplit = origQtyForSplit > 0 ? (origWeightForSplit / origQtyForSplit) : 0;
-
-    if (splitToggle) {
-      splitToggle.onchange = function () {
-        splitFields.style.display = splitToggle.checked ? 'block' : 'none';
-        updateRemainderPreview();
-      };
-    }
-    if (sheetsUsedInput) sheetsUsedInput.oninput = updateRemainderPreview;
-
-    function updateRemainderPreview() {
-      if (!remainderPreview) return;
-      var usedSheets = Number(sheetsUsedInput.value) || 0;
-      var usedWeight = Math.round(usedSheets * weightPerSheetForSplit * 100) / 100;
-      var remSheets = origQtyForSplit - usedSheets;
-      var remWeight = Math.round((origWeightForSplit - usedWeight) * 100) / 100;
-      if (remSheets > 0) {
-        remainderPreview.textContent = 'Sent to WIP: ' + usedSheets + ' sheets (~' + usedWeight + ' lbs, estimated). ' +
-          'Remainder returns to Current Steel as a new ticket: ' + remSheets + ' sheets (~' + remWeight + ' lbs, estimated).';
-      } else {
-        remainderPreview.textContent = 'No remainder — this will behave like a normal full completion.';
-      }
-    }
-    updateRemainderPreview();
-
-    var completeBtn = document.getElementById('completeBtn');
-    if (completeBtn) {
-      completeBtn.onclick = function () {
-        var isSplit = splitToggle && splitToggle.checked;
-        var sheetsUsed;
-        if (isSplit) sheetsUsed = sheetsUsedInput.value;
-        var confirmMsg = isSplit
-          ? 'Send the used portion of ' + state.ticket + ' to WIP and return the remainder to Current Steel?'
-          : 'Send ticket ' + state.ticket + ' to WIP? This closes out the litho job.';
-        showConfirm('Send to WIP', confirmMsg, function () {
-          completeBtn.disabled = true;
-          google.script.run.withSuccessHandler(function (result) {
-            var msg = 'Ticket ' + state.ticket + ' moved to WIP at a final litho cost of ' + money(result.finalLithoCost) + '.';
-            if (result.remainderTicket) msg += ' The remainder was returned to Current Steel as ' + result.remainderTicket + '.';
-            showInfo('Sent to WIP', msg, function () { document.getElementById('backBtn').click(); });
-          }).withFailureHandler(function (err) {
-            showModal({ title: 'Could not send to WIP', message: err.message, confirmText: 'OK' });
-            completeBtn.disabled = false;
-          }).completeJob(state.ticket, sheetsUsed);
-        }, 'Send to WIP');
+          showModal({ title: 'Could not log coating', message: err.message, confirmText: 'OK' });
+          logCoatingBtn.disabled = false;
+        }).applyCoating(state.ticket, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '');
       };
     }
   }
@@ -887,9 +830,8 @@
       '</div>';
 
     html += '<div class="card">' +
-      '<button class="btn success" id="sendJobWipBtn" style="width:100%;margin-bottom:10px">Send all added tickets to WIP</button>' +
-      '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — leave in progress (add more coats later)</button>' +
-      '<div class="sub" style="margin-top:8px">Send to WIP closes out the litho job. Leave in progress if these tickets still need more passes.</div>' +
+      '<div class="sub" style="margin-bottom:10px">Each ticket you add is coated and sent to WIP right away. Add more coats later by opening the ticket in WIP.</div>' +
+      '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — Back to Tickets</button>' +
       '</div>';
 
     view.innerHTML = html;
@@ -909,27 +851,6 @@
 
     document.getElementById('finishJobBtn').onclick = function () {
       document.getElementById('backBtn').click();
-    };
-
-    document.getElementById('sendJobWipBtn').onclick = function () {
-      var tickets = jobAddedTickets.map(function (r) { return r.ticket; });
-      if (!tickets.length) { toast('Add at least one ticket first'); return; }
-      showConfirm('Send job to WIP',
-        'Send ' + tickets.length + ' ticket(s) to WIP? This closes out their litho jobs.',
-        function () {
-          var btn = document.getElementById('sendJobWipBtn');
-          btn.disabled = true; btn.textContent = 'Sending…';
-          google.script.run.withSuccessHandler(function (res) {
-            var okList = (res || []).filter(function (r) { return r.ok; });
-            var failed = (res || []).filter(function (r) { return !r.ok; });
-            var msg = okList.length + ' of ' + (res || []).length + ' ticket(s) sent to WIP.';
-            if (failed.length) msg += ' ' + failed.length + ' could not be sent: ' + failed.map(function (f) { return f.ticket; }).join(', ') + '.';
-            showInfo('Job sent to WIP', msg, function () { document.getElementById('backBtn').click(); });
-          }).withFailureHandler(function (err) {
-            showModal({ title: 'Could not send to WIP', message: err.message, confirmText: 'OK' });
-            btn.disabled = false; btn.textContent = 'Send all added tickets to WIP';
-          }).completeJobs(tickets);
-        }, 'Send to WIP');
     };
   }
 
@@ -1088,6 +1009,10 @@
     if (steel['Litho Notes']) {
       html += '<div class="sub">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
     }
+    html += '<div class="row" style="margin-top:6px">' +
+      '<div class="stat"><div class="num">' + (detail.passCount || 0) + '</div><div class="label">Coatings</div></div>' +
+      '<div class="stat"><div class="num">' + money(detail.litho) + '</div><div class="label">Litho cost</div></div>' +
+      '</div>';
     html += '</div>';
 
     html += '<div class="card">' +
@@ -1101,15 +1026,26 @@
       '</div>';
 
     html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Pass history</h3>' +
-      renderHistoryTable(detail.transactions) +
+      '<h3 style="margin-top:0;font-size:15px">Add another coating</h3>' +
+      '<div class="sub" style="margin-bottom:10px">Logs another pass and adds its cost to this ticket\'s litho total.</div>' +
+      '<div class="row">' +
+        selectField('wipGroupSelect', 'Size / Group', rateGroups(), null) +
+        selectField('wipSubSelect', 'Sub-Variant', [], null) +
+        selectField('wipItemSelect', 'Coating Item', [], null) +
+        selectField('wipChemSelect', 'Chem Code', [], null) +
+      '</div>' +
+      '<div class="row">' +
+        operatorFieldHtml('wipCoatOperator') +
+        '<div class="field"><label>Notes (optional)</label><input id="wipCoatNotes" placeholder="e.g. second coat"></div>' +
+      '</div>' +
+      '<div id="wipItemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
+      '<div class="field"><label>Litho Notes (optional)</label><input id="wipLithoNoteInput" placeholder="Note kept with this ticket"></div>' +
+      '<button class="btn" id="addCoatingBtn">Add Coating</button>' +
       '</div>';
 
     html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Add more coating</h3>' +
-      '<div class="sub" style="margin-bottom:10px">Pulls this ticket back out of WIP into the Litho Queue so you can log another pass. Its current litho cost carries over as the starting point.</div>' +
-      operatorFieldHtml('reopenOperator') +
-      '<button class="btn" id="reopenBtn">Reopen to Add Coating</button>' +
+      '<h3 style="margin-top:0;font-size:15px">History</h3>' +
+      renderHistoryTable(detail.transactions) +
       '</div>';
 
     view.innerHTML = html;
@@ -1135,24 +1071,32 @@
       };
     }
 
-    var reopenBtn = document.getElementById('reopenBtn');
-    if (reopenBtn) {
-      reopenBtn.onclick = function () {
-        var operator = document.getElementById('reopenOperator').value.trim();
+    var wipGroupSelect = document.getElementById('wipGroupSelect');
+    var wipSubSelect = document.getElementById('wipSubSelect');
+    var wipItemSelect = document.getElementById('wipItemSelect');
+    var wipChemSelect = document.getElementById('wipChemSelect');
+    var wipCostPreview = document.getElementById('wipItemCostPreview');
+    wireCoatingCascade(wipGroupSelect, wipSubSelect, wipItemSelect, wipChemSelect, wipCostPreview, function (c) {
+      return 'This coating adds ' + money(c) + ' to the litho cost.';
+    });
+
+    var addCoatingBtn = document.getElementById('addCoatingBtn');
+    if (addCoatingBtn) {
+      addCoatingBtn.onclick = function () {
+        var group = wipGroupSelect.value, sub = wipSubSelect.value, item = wipItemSelect.value;
+        var operator = document.getElementById('wipCoatOperator').value.trim();
+        var notes = document.getElementById('wipCoatNotes').value;
+        var lithoNote = document.getElementById('wipLithoNoteInput').value;
+        if (!group || !item) { toast('Pick a group and coating item first'); return; }
         if (!operator) { toast('Enter an operator name'); return; }
-        showConfirm('Reopen ticket',
-          'Pull ' + state.ticket + ' back into the Litho Queue to add another pass?',
-          function () {
-            reopenBtn.disabled = true;
-            google.script.run.withSuccessHandler(function () {
-              toast('Ticket reopened');
-              state.view = 'detail'; state.listView = 'all';
-              renderDetail();
-            }).withFailureHandler(function (err) {
-              showModal({ title: 'Could not reopen', message: err.message, confirmText: 'OK' });
-              reopenBtn.disabled = false;
-            }).reopenFromWip(state.ticket, operator);
-          }, 'Reopen', 'secondary');
+        addCoatingBtn.disabled = true;
+        google.script.run.withSuccessHandler(function (result) {
+          showInfo('Coating added', 'Added to ' + state.ticket + '. Litho cost is now ' + money(result.litho) + '.',
+            function () { renderWipDetail(); });
+        }).withFailureHandler(function (err) {
+          showModal({ title: 'Could not add coating', message: err.message, confirmText: 'OK' });
+          addCoatingBtn.disabled = false;
+        }).applyCoating(state.ticket, group, sub, item, operator, notes, '', false, lithoNote, '');
       };
     }
   }
