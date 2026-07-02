@@ -103,6 +103,21 @@
   .gate { max-width: 380px; margin: 60px auto; text-align: center; }
   .gate h2 { margin-bottom: 4px; }
   .gate p { color: var(--muted); font-size: 14px; margin-top: 0; }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(19, 27, 46, .55);
+    display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 1000;
+  }
+  .modal {
+    background: var(--card); border-radius: 16px; max-width: 440px; width: 100%;
+    padding: 24px; box-shadow: 0 16px 48px rgba(10, 24, 54, .35);
+  }
+  .modal .modal-icon {
+    width: 46px; height: 46px; border-radius: 50%; background: #eafaf0; color: var(--good);
+    display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 12px;
+  }
+  .modal h3 { margin: 0 0 8px; color: var(--ink); font-size: 19px; }
+  .modal p { color: var(--muted); font-size: 15px; margin: 0 0 20px; line-height: 1.5; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 </style>
 
 <div id="app">
@@ -124,6 +139,7 @@
 </div>
 <datalist id="operatorNamesList"></datalist>
 <div class="toast" id="toast"></div>
+<div id="modalRoot"></div>
 
 <script>
   var state = { view: 'queue', listView: 'queue', ticket: null };
@@ -131,7 +147,7 @@
   // Rate/pricing data is fetched once and cached in the browser so the Group -> Sub -> Item
   // dropdowns resolve instantly with no per-selection server round trip. Ticket data is
   // never cached here — it's always fetched fresh so operators see each other's changes.
-  var rateData = { groups: [], tree: {} };
+  var rateData = { groups: [], tree: {}, addonGroup: '', addons: [] };
 
   function loadRateData() {
     google.script.run.withSuccessHandler(function (data) {
@@ -157,16 +173,26 @@
   // (auto-selecting when only one item matches). Blank codes show as "(no chem code)".
   var CHEM_NONE = '__NONE__'; // sentinel value for the blank-chem-code option
 
+  function makeItemOption(it) {
+    var opt = document.createElement('option');
+    opt.value = it.item;
+    opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
+    opt.dataset.cost = it.totalCost;
+    opt.dataset.chem = it.chemCode || '';
+    return opt;
+  }
+
   function populateItemOptions(itemSelect, items) {
     itemSelect.innerHTML = '<option value="">--</option>';
-    items.forEach(function (it) {
-      var opt = document.createElement('option');
-      opt.value = it.item;
-      opt.textContent = it.item + ' (' + money(it.totalCost) + ')';
-      opt.dataset.cost = it.totalCost;
-      opt.dataset.chem = it.chemCode || '';
-      itemSelect.appendChild(opt);
-    });
+    var base = items.filter(function (it) { return !it._addon; });
+    var addons = items.filter(function (it) { return it._addon; });
+    base.forEach(function (it) { itemSelect.appendChild(makeItemOption(it)); });
+    if (addons.length) {
+      var og = document.createElement('optgroup');
+      og.label = 'Add-Ons (any size)';
+      addons.forEach(function (it) { og.appendChild(makeItemOption(it)); });
+      itemSelect.appendChild(og);
+    }
   }
 
   function populateChemOptions(chemSelect, items) {
@@ -190,8 +216,15 @@
   }
 
   // Populates both dropdowns for a group/sub and stashes the full item list for re-expansion.
+  // Universal add-ons (coatings/prints that apply to any size) are appended for every group.
   function fillItemChem(group, sub, itemSelect, chemSelect, costPreview) {
-    var items = rateItems(group, sub);
+    var items = rateItems(group, sub).slice();
+    if (rateData.addonGroup && group !== rateData.addonGroup) {
+      (rateData.addons || []).forEach(function (it) {
+        items.push({ item: it.item, chemCode: it.chemCode, appCost: it.appCost,
+          lineCost: it.lineCost, totalCost: it.totalCost, _addon: true });
+      });
+    }
     itemSelect._allItems = items;
     populateItemOptions(itemSelect, items);
     populateChemOptions(chemSelect, items);
@@ -289,6 +322,37 @@
 
   function esc(s) { return (s === undefined || s === null) ? '' : String(s); }
   function money(n) { return '$' + (Number(n) || 0).toFixed(2); }
+
+  // In-app modal (replaces native confirm()/alert popups).
+  // opts: { title, message(html-safe text), icon, confirmText, cancelText, variant, onConfirm }
+  function showModal(opts) {
+    var root = document.getElementById('modalRoot');
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    var iconHtml = opts.icon ? '<div class="modal-icon">' + esc(opts.icon) + '</div>' : '';
+    var cancelHtml = opts.cancelText ? '<button class="btn secondary" id="modalCancel">' + esc(opts.cancelText) + '</button>' : '';
+    overlay.innerHTML = '<div class="modal">' + iconHtml +
+      '<h3>' + esc(opts.title || '') + '</h3>' +
+      '<p>' + esc(opts.message || '') + '</p>' +
+      '<div class="modal-actions">' + cancelHtml +
+        '<button class="btn ' + (opts.variant || '') + '" id="modalOk">' + esc(opts.confirmText || 'OK') + '</button>' +
+      '</div></div>';
+    root.appendChild(overlay);
+    function close() { if (overlay.parentNode) root.removeChild(overlay); }
+    overlay.querySelector('#modalOk').onclick = function () { close(); if (opts.onConfirm) opts.onConfirm(); };
+    var c = overlay.querySelector('#modalCancel');
+    if (c) c.onclick = close;
+    overlay.onclick = function (e) { if (e.target === overlay && opts.cancelText) close(); };
+  }
+
+  function showConfirm(title, message, onConfirm, confirmText, variant) {
+    showModal({ title: title, message: message, onConfirm: onConfirm,
+      confirmText: confirmText || 'Confirm', cancelText: 'Cancel', variant: variant || 'success' });
+  }
+
+  function showInfo(title, message, onClose) {
+    showModal({ title: title, message: message, icon: '✓', confirmText: 'OK', onConfirm: onClose });
+  }
 
   // Operator name field markup — a text input with a datalist of suggestions.
   // Fill OPERATOR_NAMES in Code.gs and it shows up here automatically; typing still
@@ -672,19 +736,19 @@
         var sheetsUsed;
         if (isSplit) sheetsUsed = sheetsUsedInput.value;
         var confirmMsg = isSplit
-          ? 'Send the used portion to WIP and return the remainder to Current Steel?'
-          : 'Send this ticket to WIP? This closes out the litho job.';
-        if (!confirm(confirmMsg)) return;
-        completeBtn.disabled = true;
-        google.script.run.withSuccessHandler(function (result) {
-          var msg = 'Sent to WIP at ' + money(result.finalLithoCost);
-          if (result.remainderTicket) msg += ' — remainder returned as ' + result.remainderTicket;
-          toast(msg);
-          document.getElementById('backBtn').click();
-        }).withFailureHandler(function (err) {
-          toast('Error: ' + err.message);
-          completeBtn.disabled = false;
-        }).completeJob(state.ticket, sheetsUsed);
+          ? 'Send the used portion of ' + state.ticket + ' to WIP and return the remainder to Current Steel?'
+          : 'Send ticket ' + state.ticket + ' to WIP? This closes out the litho job.';
+        showConfirm('Send to WIP', confirmMsg, function () {
+          completeBtn.disabled = true;
+          google.script.run.withSuccessHandler(function (result) {
+            var msg = 'Ticket ' + state.ticket + ' moved to WIP at a final litho cost of ' + money(result.finalLithoCost) + '.';
+            if (result.remainderTicket) msg += ' The remainder was returned to Current Steel as ' + result.remainderTicket + '.';
+            showInfo('Sent to WIP', msg, function () { document.getElementById('backBtn').click(); });
+          }).withFailureHandler(function (err) {
+            showModal({ title: 'Could not send to WIP', message: err.message, confirmText: 'OK' });
+            completeBtn.disabled = false;
+          }).completeJob(state.ticket, sheetsUsed);
+        }, 'Send to WIP');
       };
     }
   }
@@ -850,20 +914,22 @@
     document.getElementById('sendJobWipBtn').onclick = function () {
       var tickets = jobAddedTickets.map(function (r) { return r.ticket; });
       if (!tickets.length) { toast('Add at least one ticket first'); return; }
-      if (!confirm('Send ' + tickets.length + ' ticket(s) to WIP? This closes out their litho jobs.')) return;
-      var btn = document.getElementById('sendJobWipBtn');
-      btn.disabled = true; btn.textContent = 'Sending&hellip;';
-      google.script.run.withSuccessHandler(function (res) {
-        var ok = (res || []).filter(function (r) { return r.ok; }).length;
-        var failed = (res || []).filter(function (r) { return !r.ok; });
-        var msg = ok + ' ticket(s) sent to WIP';
-        if (failed.length) msg += ' — ' + failed.length + ' failed (' + failed.map(function (f) { return f.ticket; }).join(', ') + ')';
-        toast(msg);
-        document.getElementById('backBtn').click();
-      }).withFailureHandler(function (err) {
-        toast('Error: ' + err.message);
-        btn.disabled = false; btn.textContent = 'Send all added tickets to WIP';
-      }).completeJobs(tickets);
+      showConfirm('Send job to WIP',
+        'Send ' + tickets.length + ' ticket(s) to WIP? This closes out their litho jobs.',
+        function () {
+          var btn = document.getElementById('sendJobWipBtn');
+          btn.disabled = true; btn.textContent = 'Sending…';
+          google.script.run.withSuccessHandler(function (res) {
+            var okList = (res || []).filter(function (r) { return r.ok; });
+            var failed = (res || []).filter(function (r) { return !r.ok; });
+            var msg = okList.length + ' of ' + (res || []).length + ' ticket(s) sent to WIP.';
+            if (failed.length) msg += ' ' + failed.length + ' could not be sent: ' + failed.map(function (f) { return f.ticket; }).join(', ') + '.';
+            showInfo('Job sent to WIP', msg, function () { document.getElementById('backBtn').click(); });
+          }).withFailureHandler(function (err) {
+            showModal({ title: 'Could not send to WIP', message: err.message, confirmText: 'OK' });
+            btn.disabled = false; btn.textContent = 'Send all added tickets to WIP';
+          }).completeJobs(tickets);
+        }, 'Send to WIP');
     };
   }
 
@@ -1074,16 +1140,19 @@
       reopenBtn.onclick = function () {
         var operator = document.getElementById('reopenOperator').value.trim();
         if (!operator) { toast('Enter an operator name'); return; }
-        if (!confirm('Pull this ticket back into the Litho Queue to add another pass?')) return;
-        reopenBtn.disabled = true;
-        google.script.run.withSuccessHandler(function () {
-          toast('Ticket reopened');
-          state.view = 'detail'; state.listView = 'queue';
-          renderDetail();
-        }).withFailureHandler(function (err) {
-          toast('Error: ' + err.message);
-          reopenBtn.disabled = false;
-        }).reopenFromWip(state.ticket, operator);
+        showConfirm('Reopen ticket',
+          'Pull ' + state.ticket + ' back into the Litho Queue to add another pass?',
+          function () {
+            reopenBtn.disabled = true;
+            google.script.run.withSuccessHandler(function () {
+              toast('Ticket reopened');
+              state.view = 'detail'; state.listView = 'all';
+              renderDetail();
+            }).withFailureHandler(function (err) {
+              showModal({ title: 'Could not reopen', message: err.message, confirmText: 'OK' });
+              reopenBtn.disabled = false;
+            }).reopenFromWip(state.ticket, operator);
+          }, 'Reopen', 'secondary');
       };
     }
   }

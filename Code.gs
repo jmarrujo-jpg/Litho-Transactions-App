@@ -465,7 +465,7 @@ function getRateTree() {
       lineCost: r.lineCost, totalCost: r.totalCost
     });
   });
-  return sanitizeForClient_({ groups: groups, tree: tree });
+  return sanitizeForClient_({ groups: groups, tree: tree, addonGroup: ADDON_SOURCE_GROUP, addons: getAddonItems_() });
 }
 
 function getGroups() {
@@ -494,6 +494,33 @@ function getItems(group, sub) {
   return rt.map(function (r) {
     return { item: r.item, chemCode: r.chemCode, appCost: r.appCost, lineCost: r.lineCost, totalCost: r.totalCost };
   });
+}
+
+// Coatings/prints that can be applied to ANY size (not tied to a can group). They already
+// live in the rate table under the group below; these are surfaced as universal add-ons on
+// every ticket. Setup / small-quantity charges from that group are intentionally excluded.
+var ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
+var ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
+  'VARNISH WET-STANDARD', 'VARNISH WET-PEBBLE', 'VARNISH DRY-STANDARD', 'VARNISH DRY-PEBBLE',
+  'WAX ONLY',
+  'LITHO PRINT SINGLE COLOR - ONE', 'LITHO PRINT SINGLE COLOR - TWO', 'LITHO PRINT SINGLE COLOR - THREE',
+  'LITHO PRINT SINGLE COLOR - FOUR', 'LITHO PRINT SINGLE COLOR - FIVE', 'LITHO PRINT SINGLE COLOR - SIX',
+  'LITHO PRINT TWO COLOR - ONE', 'LITHO PRINT TWO COLOR - TWO', 'LITHO PRINT TWO COLOR - THREE',
+  'LITHO PRINT TWO COLOR - FOUR', 'LITHO PRINT TWO COLOR - FIVE', 'LITHO PRINT TWO COLOR - SIX'];
+
+/** The universal add-on items, read live from the rate table (so price edits still apply). */
+function getAddonItems_() {
+  var names = {};
+  ADDON_ITEM_NAMES.forEach(function (n) { names[n] = true; });
+  return getItems(ADDON_SOURCE_GROUP, '').filter(function (it) { return names[it.item]; });
+}
+
+/** Finds an item's rate within its group, falling back to the universal add-ons so an add-on
+ *  coating can be logged against a ticket of any size/group. */
+function findRate_(group, sub, itemName) {
+  var m = getItems(group, sub).filter(function (i) { return i.item === itemName; })[0];
+  if (m) return m;
+  return getAddonItems_().filter(function (i) { return i.item === itemName; })[0];
 }
 
 /** Best-effort guess at which rate-table Group a ticket's "End Use" text belongs to. Operator can override. */
@@ -655,8 +682,7 @@ function logPass(ticket, group, sub, itemName, operatorName, notes, jobName) {
   var ipRow = findRowByTicket_(ip, ticket);
   if (ipRow === -1) throw new Error('Ticket is not in Litho In Progress. Start the job first: ' + ticket);
 
-  var items = getItems(group, sub);
-  var match = items.filter(function (i) { return i.item === itemName; })[0];
+  var match = findRate_(group, sub, itemName);
   if (!match) throw new Error('Could not find rate for item: ' + itemName);
 
   var ipMap = headerMap_(ip);
