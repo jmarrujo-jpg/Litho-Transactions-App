@@ -70,6 +70,8 @@
   .badge.notstarted { background: #eef2ff; color: #3730a3; }
   .badge.inprogress { background: #fff7e6; color: var(--warn); }
   .badge.wip { background: #eafaf0; color: var(--good); }
+  .badge.production { background: #e8edf8; color: #1e3a8a; }
+  .badge.used { background: #edeff2; color: #4b5563; }
   .btn {
     background: var(--accent); color: white; border: none; border-radius: 10px;
     padding: 12px 18px; font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap;
@@ -132,8 +134,10 @@
   </header>
   <div class="tabbar" id="tabbar">
     <button id="filterAll" class="active" data-filter="all">All</button>
-    <button id="filterQueue" data-filter="queue">Current Steel</button>
+    <button id="filterCurrent" data-filter="current">Current Steel</button>
     <button id="filterWip" data-filter="wip">WIP</button>
+    <button id="filterProduction" data-filter="production">Production</button>
+    <button id="filterUsed" data-filter="used">Used</button>
   </div>
   <div id="view"></div>
 </div>
@@ -142,7 +146,7 @@
 <div id="modalRoot"></div>
 
 <script>
-  var state = { view: 'queue', listView: 'queue', ticket: null };
+  var state = { view: 'all', listView: 'all', skid: null };
 
   // Rate/pricing data is fetched once and cached in the browser so the Group -> Sub -> Item
   // dropdowns resolve instantly with no per-selection server round trip. Ticket data is
@@ -373,6 +377,31 @@
     showModal({ title: title, message: message, icon: '✓', confirmText: 'OK', onConfirm: onClose });
   }
 
+  function showConfirm(title, message, onConfirm, confirmText, variant) {
+    showModal({ title: title, message: message, onConfirm: onConfirm,
+      confirmText: confirmText || 'Confirm', cancelText: 'Cancel', variant: variant || 'success' });
+  }
+
+  // ---- retry-safe server mutations (for weak Wi-Fi) ----
+  // Every user action gets a unique opId. If a response is lost and we retry, the server
+  // recognizes the opId and reports a duplicate instead of doing the work twice.
+  function newOpId() {
+    return 'op-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function runMutation(fnName, args, onSuccess, onFailure) {
+    var attempts = 0;
+    function attempt() {
+      attempts++;
+      var runner = google.script.run.withSuccessHandler(onSuccess).withFailureHandler(function (err) {
+        if (attempts < 3) { setTimeout(attempt, attempts * 1500); return; }
+        onFailure(err);
+      });
+      runner[fnName].apply(runner, args);
+    }
+    attempt();
+  }
+
   // Operator name field markup — a text input with a datalist of suggestions.
   // Fill OPERATOR_NAMES in Code.gs and it shows up here automatically; typing still
   // works even with an empty list so nobody's blocked in the meantime.
@@ -403,7 +432,7 @@
   document.getElementById('backBtn').onclick = function () {
     document.getElementById('backBtn').style.display = 'none';
     document.getElementById('tabbar').style.display = 'flex';
-    state.view = 'all'; state.listView = 'all'; state.ticket = null;
+    state.view = 'all'; state.listView = 'all'; state.skid = null;
     renderAll();
   };
 
@@ -428,9 +457,9 @@
     document.getElementById('backBtn').style.display = 'inline-block';
   }
 
-  // ---------------- Combined list: Current Steel + Litho In Progress + WIP ----------------
+  // ---------------- Combined ticket list (every status, from Steel Tickets) ----------------
   var allCache = [];
-  var queueCache = []; // queue-only (Not Started / In Progress) subset, for the New Job picker
+  var queueCache = []; // Current-only subset, for the New Job picker
 
   function searchBarHtml(id) {
     return '<div class="searchwrap">' +
@@ -438,12 +467,24 @@
       '<input id="' + id + '" placeholder="Search by ticket number&hellip;" autocomplete="off"></div>';
   }
 
+  function setCaches(all) {
+    allCache = all || [];
+    queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
+  }
+
+  function badgeClassFor(status) {
+    if (status === 'Current') return 'notstarted';
+    if (status === 'WIP') return 'wip';
+    if (status === 'In Production') return 'production';
+    if (status === 'Used') return 'used';
+    return 'notstarted';
+  }
+
   function renderAll() {
     var view = document.getElementById('view');
     view.innerHTML = '<div class="loading">Loading tickets&hellip;</div>';
     google.script.run.withSuccessHandler(function (all) {
-      allCache = all || [];
-      queueCache = allCache.filter(function (t) { return t.location === 'queue'; });
+      setCaches(all);
       view.innerHTML =
         '<div class="searchrow">' +
           searchBarHtml('mainSearch') +
@@ -461,10 +502,7 @@
   }
 
   function ticketRowHtml(t) {
-    var badgeClass = t.status === 'Not Started' ? 'notstarted' : (t.status === 'WIP' ? 'wip' : 'inprogress');
-    var right = t.status === 'WIP'
-      ? '<span class="sub">Litho: ' + money(t.litho) + '</span>'
-      : (t.status !== 'Not Started' ? '<span class="sub">' + (t.passCount || 0) + ' pass(es) &middot; ' + money(t.runningTotal) + '</span>' : '');
+    var right = t.status === 'Current' ? '' : '<span class="sub">Litho: ' + money(t.litho) + '</span>';
     var specs = '<div class="specs">' +
       '<span><b>BW</b> ' + esc(t.bw) + '</span>' +
       '<span><b>Type</b> ' + esc(t.type) + '</span>' +
@@ -473,12 +511,12 @@
       '<span><b>W</b> ' + esc(t.width) + '</span>' +
       '<span><b>End Use</b> ' + esc(t.endUse) + '</span>' +
       '</div>';
-    return '<div class="queue-item" data-ticket="' + esc(t.ticket) + '" data-loc="' + esc(t.location) + '">' +
+    return '<div class="queue-item" data-skid="' + esc(t.skidId) + '">' +
       '<div style="min-width:0">' +
-        '<div class="ticket-id">' + esc(t.ticket) + '</div>' + specs +
+        '<div class="ticket-id">' + esc(t.ticket) + ' <span class="sub" style="font-weight:400">' + esc(t.skidId) + '</span></div>' + specs +
       '</div>' +
       '<div style="text-align:right;white-space:nowrap">' +
-        '<span class="badge ' + badgeClass + '">' + esc(t.status) + '</span><br>' + right +
+        '<span class="badge ' + badgeClassFor(t.status) + '">' + esc(t.status) + '</span><br>' + right +
       '</div>' +
     '</div>';
   }
@@ -488,9 +526,17 @@
     if (!container) return;
     var term = (searchTerm || '').trim().toLowerCase();
     var rows = allCache.filter(function (t) {
-      if (activeFilter === 'queue' && t.location !== 'queue') return false;
-      if (activeFilter === 'wip' && t.location !== 'wip') return false;
-      if (term && String(t.ticket).toLowerCase().indexOf(term) === -1) return false;
+      if (term) {
+        var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
+                  String(t.skidId).toLowerCase().indexOf(term) !== -1;
+        if (!hit) return false;
+        if (activeFilter === 'all') return true; // searching under All also finds Used skids
+      }
+      if (activeFilter === 'all') return t.status !== 'Used';
+      if (activeFilter === 'current') return t.status === 'Current';
+      if (activeFilter === 'wip') return t.status === 'WIP';
+      if (activeFilter === 'production') return t.status === 'In Production';
+      if (activeFilter === 'used') return t.status === 'Used';
       return true;
     });
 
@@ -499,18 +545,22 @@
         var t = searchTerm.trim();
         container.innerHTML = '<div class="card empty">No tickets match "' + esc(searchTerm) + '".' +
           '<div style="margin-top:14px"><button class="btn" id="manualAddBtn">Start ticket "' + esc(t) + '" manually</button>' +
-          '<div class="sub" style="margin-top:8px">Use this only if the ticket is on the floor but missing from Current Steel.</div></div></div>';
+          '<div class="sub" style="margin-top:8px">Use this only if the skid is on the floor but missing from Steel Tickets.</div></div></div>';
         var manualBtn = document.getElementById('manualAddBtn');
         manualBtn.onclick = function () {
           if (!t) return;
           manualBtn.disabled = true;
-          google.script.run.withSuccessHandler(function () {
-            toast('Started ticket ' + t + ' manually');
-            openTicket(t);
-          }).withFailureHandler(function (err) {
+          runMutation('createManualTicket', [t, '', newOpId()], function (result) {
+            if (result && result.skidId) {
+              toast('Started ticket ' + t + ' manually');
+              openCard(result.skidId);
+            } else {
+              renderAll();
+            }
+          }, function (err) {
             toast('Error: ' + err.message);
             manualBtn.disabled = false;
-          }).createManualTicket(t, '');
+          });
         };
       } else {
         container.innerHTML = '<div class="card empty">No tickets here yet.</div>';
@@ -522,39 +572,41 @@
     html += '</div>';
     container.innerHTML = html;
     Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
-      el.onclick = function () {
-        var tk = el.getAttribute('data-ticket');
-        if (el.getAttribute('data-loc') === 'wip') openWipTicket(tk); else openTicket(tk);
-      };
+      el.onclick = function () { openCard(el.getAttribute('data-skid')); };
     });
   }
 
-  function openTicket(ticket) {
-    state.view = 'detail'; state.listView = 'all'; state.ticket = ticket;
+  // ---------------- Ticket card (one detail view for every status) ----------------
+  function openCard(skidId) {
+    state.view = 'card'; state.listView = 'all'; state.skid = skidId;
     enterDetailView();
-    renderDetail();
+    renderCard();
   }
 
-  // ---------------- Ticket detail view (Not Started / In Progress) ----------------
-  function renderDetail() {
+  function renderCard() {
     var view = document.getElementById('view');
     view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
-    google.script.run.withSuccessHandler(function (detail) {
-      ensureRateData(function () { renderDetailContent(view, detail); });
+    google.script.run.withSuccessHandler(function (card) {
+      ensureRateData(function () { renderCardContent(view, card); });
     }).withFailureHandler(function (err) {
-      // Another operator may have coated this ticket while the list was open — it now lives
-      // in WIP, so route there instead of showing a "not found" error.
-      if (String(err.message).indexOf('not found in Current Steel') !== -1) { openWipTicket(state.ticket); return; }
       view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
-    }).getTicketDetail(state.ticket);
+    }).getTicketCard(state.skid);
   }
 
-  function renderDetailContent(view, detail) {
-    var steel = detail.steel;
+  function fmtStamp(at, by) {
+    if (!at) return '';
+    return esc(at) + (by ? ' by ' + esc(by) : '');
+  }
+
+  function renderCardContent(view, card) {
+    var steel = card.steel;
+    var status = card.status;
     var html = '';
 
     html += '<div class="card">';
-    html += '<div class="ticket-id">' + esc(steel['Ticket']) + '</div>';
+    html += '<div class="ticket-id">' + esc(card.ticket) +
+      ' <span class="badge ' + badgeClassFor(status) + '">' + esc(status) + '</span>' +
+      ' <span class="sub" style="font-weight:400">' + esc(card.skidId) + '</span></div>';
     html += '<div class="steel-meta">' +
       metaBox('Basis Weight', steel['BW']) + metaBox('Type', steel['TC']) +
       metaBox('Temper', steel['TM']) + metaBox('Length', steel['Length']) +
@@ -563,15 +615,47 @@
     if (steel['Litho Notes']) {
       html += '<div class="sub" style="margin-bottom:8px">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
     }
-    html += '<div class="sub">In Current Steel — no litho applied yet. Logging a coating sends it to WIP.</div>';
+    var stamps = [];
+    if (steel['First Coated At']) stamps.push('First coated ' + fmtStamp(steel['First Coated At'], steel['First Coated By']));
+    if (steel['In Production At']) stamps.push('To production ' + fmtStamp(steel['In Production At'], steel['In Production By']));
+    if (steel['Used At']) stamps.push('Used ' + fmtStamp(steel['Used At'], steel['Used By']));
+    if (stamps.length) html += '<div class="sub" style="margin-bottom:6px">' + stamps.join(' &middot; ') + '</div>';
+    if (status === 'Current') {
+      html += '<div class="sub">In Current Steel — no litho applied yet. Logging a coating sends it to WIP.</div>';
+    } else {
+      html += '<div class="row" style="margin-top:6px">' +
+        '<div class="stat"><div class="num">' + (card.passCount || 0) + '</div><div class="label">Coatings</div></div>' +
+        '<div class="stat"><div class="num">' + money(card.litho) + '</div><div class="label">Litho cost</div></div>' +
+        '</div>';
+    }
     html += '</div>';
 
-    var origQty = steel['QTY/LOAD'] || 0;
+    if (status === 'Current') html += currentActionsHtml(card);
+    if (status === 'WIP') html += wipActionsHtml(card);
+    if (status === 'In Production') html += productionActionsHtml();
+    if (status === 'Used') {
+      html += '<div class="card"><div class="sub">This pallet has been used in production. ' +
+        'The record is read-only; the history below is its full traceability trail.</div></div>';
+    }
 
-    html += '<div class="card">' +
+    if (card.transactions && card.transactions.length) {
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">History</h3>' +
+        renderHistoryTable(card.transactions) + '</div>';
+    }
+
+    view.innerHTML = html;
+    if (status === 'Current') wireCurrentActions(card);
+    if (status === 'WIP') wireWipActions(card);
+    if (status === 'In Production') wireProductionActions(card);
+  }
+
+  // ----- Current: log the first coating (moves the skid to WIP) -----
+  function currentActionsHtml(card) {
+    var origQty = card.steel['QTY/LOAD'] || 0;
+    return '<div class="card">' +
       '<h3 style="margin-top:0;font-size:15px">Log a coating</h3>' +
       '<div class="row">' +
-        selectField('groupSelect', 'Size / Group', rateGroups(), detail.suggestedGroup) +
+        selectField('groupSelect', 'Size / Group', rateGroups(), card.suggestedGroup) +
         selectField('subSelect', 'Sub-Variant', [], null) +
         selectField('itemSelect', 'Coating Item', [], null) +
         selectField('chemSelect', 'Chem Code', [], null) +
@@ -593,67 +677,27 @@
       '<div class="field"><label>Litho Notes (optional)</label><input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
       '<button class="btn success" id="logCoatingBtn">Log Coating &amp; Send to WIP</button>' +
       '</div>';
-
-    if (detail.transactions && detail.transactions.length) {
-      html += '<div class="card">' +
-        '<h3 style="margin-top:0;font-size:15px">History</h3>' +
-        renderHistoryTable(detail.transactions) +
-        '</div>';
-    }
-
-    view.innerHTML = html;
-    wireDetailEvents(detail);
   }
 
-  function metaBox(label, val) {
-    return '<div><span>' + label + '</span>' + esc(val) + '</div>';
-  }
-
-  function selectField(id, label, options, preselect) {
-    var html = '<div class="field"><label>' + label + '</label><select id="' + id + '"><option value="">--</option>';
-    options.forEach(function (o) {
-      var val = o || '(single)';
-      var selected = (preselect && o === preselect) ? ' selected' : '';
-      html += '<option value="' + esc(o) + '"' + selected + '>' + esc(val) + '</option>';
-    });
-    html += '</select></div>';
-    return html;
-  }
-
-  function renderHistoryTable(rows) {
-    if (!rows.length) return '<div class="sub">No passes logged yet.</div>';
-    var html = '<table><thead><tr><th>#</th><th>Item</th><th>Group</th><th>Cost</th><th>Operator</th><th>Job</th><th>Running Total</th></tr></thead><tbody>';
-    rows.forEach(function (r) {
-      html += '<tr><td>' + r.passNumber + '</td><td>' + esc(r.item) + '</td><td>' + esc(r.group) +
-        (r.sub ? ' / ' + esc(r.sub) : '') + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
-        '</td><td>' + esc(r.jobName) + '</td><td>' + money(r.runningTotal) + '</td></tr>';
-    });
-    html += '</tbody></table>';
-    return html;
-  }
-
-  function wireDetailEvents(detail) {
+  function wireCurrentActions(card) {
     var groupSelect = document.getElementById('groupSelect');
     var subSelect = document.getElementById('subSelect');
     var itemSelect = document.getElementById('itemSelect');
     var chemSelect = document.getElementById('chemSelect');
     var costPreview = document.getElementById('itemCostPreview');
-
     wireCoatingCascade(groupSelect, subSelect, itemSelect, chemSelect, costPreview, function (c) {
       return 'This coating adds ' + money(c) + ' to the litho cost.';
     });
 
-    var passOperatorInput = document.getElementById('passOperator');
     var sheetsRunInput = document.getElementById('sheetsRunInput');
     var partialToggle = document.getElementById('partialSkidToggle');
     var preview = document.getElementById('sheetsRunPreview');
-    var origQty = Number(detail.steel['QTY/LOAD']) || 0;
-    var origWeight = Number(detail.steel['Weight']) || 0;
+    var origQty = Number(card.steel['QTY/LOAD']) || 0;
+    var origWeight = Number(card.steel['Weight']) || 0;
     var weightPerSheet = origQty > 0 ? (origWeight / origQty) : 0;
 
     function updatePreview() {
-      if (!preview) return;
-      if (!origQty) { preview.textContent = ''; return; }
+      if (!preview || !sheetsRunInput) return;
       var sheets = Number(sheetsRunInput.value) || 0;
       var estWeight = Math.round(sheets * weightPerSheet * 100) / 100;
       var rem = origQty - sheets;
@@ -672,28 +716,163 @@
     updatePreview();
 
     var logCoatingBtn = document.getElementById('logCoatingBtn');
-    if (logCoatingBtn) {
-      logCoatingBtn.onclick = function () {
-        var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
-        var operator = passOperatorInput.value.trim();
-        var notes = document.getElementById('passNotes').value;
-        var lithoNote = document.getElementById('lithoNoteInput').value;
-        var isPartialSkid = partialToggle && partialToggle.checked;
-        var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
-        if (!group || !item) { toast('Pick a group and coating item first'); return; }
-        if (!operator) { toast('Enter an operator name'); return; }
-        logCoatingBtn.disabled = true;
-        google.script.run.withSuccessHandler(function (result) {
-          var msg = 'Ticket ' + state.ticket + ' moved to WIP. Litho cost so far: ' + money(result.litho) + '.';
+    logCoatingBtn.onclick = function () {
+      var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
+      var operator = document.getElementById('passOperator').value.trim();
+      var notes = document.getElementById('passNotes').value;
+      var lithoNote = document.getElementById('lithoNoteInput').value;
+      var isPartialSkid = !!(partialToggle && partialToggle.checked);
+      var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
+      if (!group || !item) { toast('Pick a group and coating item first'); return; }
+      if (!operator) { toast('Enter an operator name'); return; }
+      logCoatingBtn.disabled = true;
+      runMutation('applyCoating',
+        [state.skid, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '', newOpId()],
+        function (result) {
+          if (result && result.duplicate) { toast('Already recorded'); renderCard(); return; }
+          var msg = 'Ticket ' + result.ticket + ' moved to WIP. Litho cost so far: ' + money(result.litho) + '.';
           if (result.remainderTicket) msg += ' Remainder returned to Current Steel as ' + result.remainderTicket + '.';
           else if (result.scrapSheets) msg += ' ' + result.scrapSheets + ' sheets scrapped.';
-          showInfo('Sent to WIP', msg, function () { openWipTicket(state.ticket); });
-        }).withFailureHandler(function (err) {
+          showInfo('Sent to WIP', msg, function () { renderCard(); });
+        },
+        function (err) {
           showModal({ title: 'Could not log coating', message: err.message, confirmText: 'OK' });
           logCoatingBtn.disabled = false;
-        }).applyCoating(state.ticket, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '');
-      };
-    }
+        });
+    };
+  }
+
+  // ----- WIP: adjust cost, add coats, send to production -----
+  function wipActionsHtml(card) {
+    return '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Litho cost</h3>' +
+      '<div class="row">' +
+        '<div class="field"><label>Current litho cost</label><input type="number" id="wipCostInput" value="' + esc(card.litho) + '"></div>' +
+        operatorFieldHtml('wipCostOperator') +
+      '</div>' +
+      '<div class="field"><label>Reason for change (optional)</label><input id="wipCostNotes" placeholder="e.g. correcting a typo"></div>' +
+      '<button class="btn secondary" id="saveWipCostBtn">Save Litho Cost</button>' +
+      '</div>' +
+
+      '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Add another coating</h3>' +
+      '<div class="sub" style="margin-bottom:10px">Logs another pass and adds its cost to this ticket\'s litho total.</div>' +
+      '<div class="row">' +
+        selectField('wipGroupSelect', 'Size / Group', rateGroups(), null) +
+        selectField('wipSubSelect', 'Sub-Variant', [], null) +
+        selectField('wipItemSelect', 'Coating Item', [], null) +
+        selectField('wipChemSelect', 'Chem Code', [], null) +
+      '</div>' +
+      '<div class="row">' +
+        operatorFieldHtml('wipCoatOperator') +
+        '<div class="field"><label>Notes (optional)</label><input id="wipCoatNotes" placeholder="e.g. second coat"></div>' +
+      '</div>' +
+      '<div id="wipItemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
+      '<div class="field"><label>Litho Notes (optional)</label><input id="wipLithoNoteInput" placeholder="Note kept with this ticket"></div>' +
+      '<button class="btn" id="addCoatingBtn">Add Coating</button>' +
+      '</div>' +
+
+      '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Send to production</h3>' +
+      '<div class="sub" style="margin-bottom:10px">Marks this skid as on a production line and stamps who moved it and when.</div>' +
+      operatorFieldHtml('prodOperator') +
+      '<button class="btn success" id="moveProdBtn">Move to Production</button>' +
+      '</div>';
+  }
+
+  function wireWipActions(card) {
+    var saveWipCostBtn = document.getElementById('saveWipCostBtn');
+    saveWipCostBtn.onclick = function () {
+      var newCost = document.getElementById('wipCostInput').value;
+      var operator = document.getElementById('wipCostOperator').value.trim();
+      var notes = document.getElementById('wipCostNotes').value;
+      if (!operator) { toast('Enter an operator name'); return; }
+      saveWipCostBtn.disabled = true;
+      runMutation('updateWipLithoCost', [state.skid, newCost, operator, notes, newOpId()],
+        function () { toast('Litho cost updated'); renderCard(); },
+        function (err) {
+          showModal({ title: 'Could not update cost', message: err.message, confirmText: 'OK' });
+          saveWipCostBtn.disabled = false;
+        });
+    };
+
+    var wipGroupSelect = document.getElementById('wipGroupSelect');
+    var wipSubSelect = document.getElementById('wipSubSelect');
+    var wipItemSelect = document.getElementById('wipItemSelect');
+    var wipChemSelect = document.getElementById('wipChemSelect');
+    var wipCostPreview = document.getElementById('wipItemCostPreview');
+    wireCoatingCascade(wipGroupSelect, wipSubSelect, wipItemSelect, wipChemSelect, wipCostPreview, function (c) {
+      return 'This coating adds ' + money(c) + ' to the litho cost.';
+    });
+
+    var addCoatingBtn = document.getElementById('addCoatingBtn');
+    addCoatingBtn.onclick = function () {
+      var group = wipGroupSelect.value, sub = wipSubSelect.value, item = wipItemSelect.value;
+      var operator = document.getElementById('wipCoatOperator').value.trim();
+      var notes = document.getElementById('wipCoatNotes').value;
+      var lithoNote = document.getElementById('wipLithoNoteInput').value;
+      if (!group || !item) { toast('Pick a group and coating item first'); return; }
+      if (!operator) { toast('Enter an operator name'); return; }
+      addCoatingBtn.disabled = true;
+      runMutation('applyCoating',
+        [state.skid, group, sub, item, operator, notes, '', false, lithoNote, '', newOpId()],
+        function (result) {
+          if (result && result.duplicate) { toast('Already recorded'); renderCard(); return; }
+          showInfo('Coating added', 'Litho cost is now ' + money(result.litho) + '.', function () { renderCard(); });
+        },
+        function (err) {
+          showModal({ title: 'Could not add coating', message: err.message, confirmText: 'OK' });
+          addCoatingBtn.disabled = false;
+        });
+    };
+
+    var moveProdBtn = document.getElementById('moveProdBtn');
+    moveProdBtn.onclick = function () {
+      var operator = document.getElementById('prodOperator').value.trim();
+      if (!operator) { toast('Enter an operator name'); return; }
+      showConfirm('Move to production',
+        'Mark ticket ' + card.ticket + ' as on a production line? Litho work is finished at that point.',
+        function () {
+          moveProdBtn.disabled = true;
+          runMutation('markInProduction', [state.skid, operator, newOpId()],
+            function () { showInfo('Moved to production', 'Ticket ' + card.ticket + ' is now marked In Production.', function () { renderCard(); }); },
+            function (err) {
+              showModal({ title: 'Could not move to production', message: err.message, confirmText: 'OK' });
+              moveProdBtn.disabled = false;
+            });
+        }, 'Move');
+    };
+  }
+
+  // ----- In Production: mark the pallet used when exhausted -----
+  function productionActionsHtml() {
+    return '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">On the production line</h3>' +
+      '<div class="sub" style="margin-bottom:10px">When the pallet is exhausted, mark it Used. The record is kept forever as the traceability trail.</div>' +
+      operatorFieldHtml('usedOperator') +
+      '<div class="field"><label>Note (optional)</label><input id="usedNotes" placeholder="e.g. line 2, finished goods lot #"></div>' +
+      '<button class="btn success" id="markUsedBtn">Mark Used — pallet exhausted</button>' +
+      '</div>';
+  }
+
+  function wireProductionActions(card) {
+    var markUsedBtn = document.getElementById('markUsedBtn');
+    markUsedBtn.onclick = function () {
+      var operator = document.getElementById('usedOperator').value.trim();
+      var notes = document.getElementById('usedNotes').value;
+      if (!operator) { toast('Enter an operator name'); return; }
+      showConfirm('Mark pallet used',
+        'Mark ticket ' + card.ticket + ' as Used? This closes out the skid for good.',
+        function () {
+          markUsedBtn.disabled = true;
+          runMutation('markUsed', [state.skid, operator, notes, newOpId()],
+            function () { showInfo('Pallet marked used', 'Ticket ' + card.ticket + ' is now recorded as Used in production.', function () { renderCard(); }); },
+            function (err) {
+              showModal({ title: 'Could not mark used', message: err.message, confirmText: 'OK' });
+              markUsedBtn.disabled = false;
+            });
+        }, 'Mark Used');
+    };
   }
 
   // ---------------- Create Job (one ticket at a time) ----------------
@@ -837,10 +1016,10 @@
     var jobTicketSearch = document.getElementById('jobTicketSearch');
     jobTicketSearch.oninput = function () { renderJobQueuePicker(jobTicketSearch.value); };
     if (!queueCache.length) {
-      google.script.run.withSuccessHandler(function (queue) {
-        queueCache = queue;
+      google.script.run.withSuccessHandler(function (all) {
+        setCaches(all);
         renderJobQueuePicker('');
-      }).getQueue();
+      }).getAllTickets();
     } else {
       renderJobQueuePicker('');
     }
@@ -866,20 +1045,20 @@
         '<span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span>' +
         '<div class="specs"><span><b>BW</b> ' + esc(q.bw) + '</span><span><b>Type</b> ' + esc(q.type) +
         '</span><span><b>Temper</b> ' + esc(q.temper) + '</span></div></div>' +
-        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-pick="' + esc(q.ticket) + '">Select</button>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-pick="' + esc(q.skidId) + '">Select</button>' +
       '</div>';
     });
     container.innerHTML = html;
     Array.prototype.forEach.call(container.querySelectorAll('[data-pick]'), function (btn) {
       btn.onclick = function () {
-        var t = btn.getAttribute('data-pick');
-        var entry = queueCache.filter(function (q) { return q.ticket === t; })[0];
-        renderPickedTicketCard(t, entry);
+        var sk = btn.getAttribute('data-pick');
+        var entry = queueCache.filter(function (q) { return q.skidId === sk; })[0];
+        renderPickedTicketCard(sk, entry);
       };
     });
   }
 
-  function renderPickedTicketCard(ticket, entry) {
+  function renderPickedTicketCard(skidId, entry) {
     var card = document.getElementById('jobPickedTicketCard');
     var origQty = entry ? Number(entry.qty) || 0 : 0;
     var origWeight = entry ? Number(entry.weight) || 0 : 0;
@@ -891,7 +1070,7 @@
       '<span><b>Temper</b> ' + esc(entry.temper) + '</span><span><b>L</b> ' + esc(entry.length) + '</span>' +
       '<span><b>W</b> ' + esc(entry.width) + '</span><span><b>End Use</b> ' + esc(entry.endUse) + '</span></div>') : '';
     card.innerHTML =
-      '<div class="ticket-id">' + esc(ticket) + '</div>' +
+      '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) + '</div>' +
       '<div class="sub" style="margin-bottom:6px">' + esc(origQty) + ' sheets on hand &middot; ~' + esc(origWeight) + ' lbs</div>' +
       specsHtml +
       (origQty > 0
@@ -939,24 +1118,28 @@
       var isPartialSkid = !!(partialToggle && partialToggle.checked);
       var btn = document.getElementById('addTicketToJobBtn');
       btn.disabled = true; btn.textContent = 'Adding&hellip;';
-      google.script.run.withSuccessHandler(function (result) {
-        jobAddedTickets.push(result);
-        var msg = 'Added ' + result.ticket;
-        if (result.isPartial && result.remainderTicket) msg += ' — remainder returned as ' + result.remainderTicket;
-        else if (result.scrapSheets) msg += ' — ' + result.scrapSheets + ' sheets scrapped';
-        else msg += ' to job';
-        toast(msg);
-        card.style.display = 'none';
-        document.getElementById('jobTicketSearch').value = '';
-        renderJobQueuePicker('');
-        renderJobAddedList();
-        // Refresh queue cache in the background so qty/status reflect the change next pick
-        google.script.run.withSuccessHandler(function (queue) { queueCache = queue; }).getQueue();
-      }).withFailureHandler(function (err) {
-        toast('Error: ' + err.message);
-        btn.disabled = false; btn.textContent = 'Add to Job';
-      }).addTicketToJob(currentJob.jobName, currentJob.group, currentJob.sub, currentJob.item,
-        currentJob.operator, currentJob.notes, ticket, sheetsRun, lithoNote, isPartialSkid);
+      runMutation('addTicketToJob',
+        [currentJob.jobName, currentJob.group, currentJob.sub, currentJob.item,
+         currentJob.operator, currentJob.notes, skidId, sheetsRun, lithoNote, isPartialSkid, newOpId()],
+        function (result) {
+          if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
+          jobAddedTickets.push(result);
+          var msg = 'Added ' + result.ticket;
+          if (result.isPartial && result.remainderTicket) msg += ' — remainder returned as ' + result.remainderTicket;
+          else if (result.scrapSheets) msg += ' — ' + result.scrapSheets + ' sheets scrapped';
+          else msg += ' to job';
+          toast(msg);
+          card.style.display = 'none';
+          document.getElementById('jobTicketSearch').value = '';
+          renderJobQueuePicker('');
+          renderJobAddedList();
+          // Refresh caches in the background so qty/status reflect the change next pick
+          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+        },
+        function (err) {
+          toast('Error: ' + err.message);
+          btn.disabled = false; btn.textContent = 'Add to Job';
+        });
     };
   }
 
@@ -976,130 +1159,6 @@
     });
     html += '</tbody></table>';
     container.innerHTML = html;
-  }
-
-  // ---------------- WIP ticket (opened from the combined list) ----------------
-  function openWipTicket(ticket) {
-    state.view = 'wipDetail'; state.ticket = ticket; state.listView = 'all';
-    enterDetailView();
-    renderWipDetail();
-  }
-
-  // ---------------- WIP detail view ----------------
-  function renderWipDetail() {
-    var view = document.getElementById('view');
-    view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
-    google.script.run.withSuccessHandler(function (detail) {
-      renderWipDetailContent(view, detail);
-    }).withFailureHandler(function (err) {
-      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
-    }).getWipDetail(state.ticket);
-  }
-
-  function renderWipDetailContent(view, detail) {
-    var steel = detail.steel;
-    var html = '';
-
-    html += '<div class="card">';
-    html += '<div class="ticket-id">' + esc(steel['Ticket']) + ' <span class="badge wip">WIP</span></div>';
-    html += '<div class="steel-meta">' +
-      metaBox('Basis Weight', steel['BW']) + metaBox('Type', steel['TC']) +
-      metaBox('Temper', steel['TM']) + metaBox('Length', steel['Length']) +
-      metaBox('Width', steel['Width']) + metaBox('End Use', steel['End Use']) +
-      '</div>';
-    if (steel['Litho Notes']) {
-      html += '<div class="sub">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
-    }
-    html += '<div class="row" style="margin-top:6px">' +
-      '<div class="stat"><div class="num">' + (detail.passCount || 0) + '</div><div class="label">Coatings</div></div>' +
-      '<div class="stat"><div class="num">' + money(detail.litho) + '</div><div class="label">Litho cost</div></div>' +
-      '</div>';
-    html += '</div>';
-
-    html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Litho cost</h3>' +
-      '<div class="row">' +
-        '<div class="field"><label>Current litho cost</label><input type="number" id="wipCostInput" value="' + esc(detail.litho) + '"></div>' +
-        operatorFieldHtml('wipCostOperator') +
-      '</div>' +
-      '<div class="field"><label>Reason for change (optional)</label><input id="wipCostNotes" placeholder="e.g. correcting a typo"></div>' +
-      '<button class="btn secondary" id="saveWipCostBtn">Save Litho Cost</button>' +
-      '</div>';
-
-    html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Add another coating</h3>' +
-      '<div class="sub" style="margin-bottom:10px">Logs another pass and adds its cost to this ticket\'s litho total.</div>' +
-      '<div class="row">' +
-        selectField('wipGroupSelect', 'Size / Group', rateGroups(), null) +
-        selectField('wipSubSelect', 'Sub-Variant', [], null) +
-        selectField('wipItemSelect', 'Coating Item', [], null) +
-        selectField('wipChemSelect', 'Chem Code', [], null) +
-      '</div>' +
-      '<div class="row">' +
-        operatorFieldHtml('wipCoatOperator') +
-        '<div class="field"><label>Notes (optional)</label><input id="wipCoatNotes" placeholder="e.g. second coat"></div>' +
-      '</div>' +
-      '<div id="wipItemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
-      '<div class="field"><label>Litho Notes (optional)</label><input id="wipLithoNoteInput" placeholder="Note kept with this ticket"></div>' +
-      '<button class="btn" id="addCoatingBtn">Add Coating</button>' +
-      '</div>';
-
-    html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">History</h3>' +
-      renderHistoryTable(detail.transactions) +
-      '</div>';
-
-    view.innerHTML = html;
-    wireWipDetailEvents(detail);
-  }
-
-  function wireWipDetailEvents(detail) {
-    var saveWipCostBtn = document.getElementById('saveWipCostBtn');
-    if (saveWipCostBtn) {
-      saveWipCostBtn.onclick = function () {
-        var newCost = document.getElementById('wipCostInput').value;
-        var operator = document.getElementById('wipCostOperator').value.trim();
-        var notes = document.getElementById('wipCostNotes').value;
-        if (!operator) { toast('Enter an operator name'); return; }
-        saveWipCostBtn.disabled = true;
-        google.script.run.withSuccessHandler(function () {
-          toast('Litho cost updated');
-          renderWipDetail();
-        }).withFailureHandler(function (err) {
-          toast('Error: ' + err.message);
-          saveWipCostBtn.disabled = false;
-        }).updateWipLithoCost(state.ticket, newCost, operator, notes);
-      };
-    }
-
-    var wipGroupSelect = document.getElementById('wipGroupSelect');
-    var wipSubSelect = document.getElementById('wipSubSelect');
-    var wipItemSelect = document.getElementById('wipItemSelect');
-    var wipChemSelect = document.getElementById('wipChemSelect');
-    var wipCostPreview = document.getElementById('wipItemCostPreview');
-    wireCoatingCascade(wipGroupSelect, wipSubSelect, wipItemSelect, wipChemSelect, wipCostPreview, function (c) {
-      return 'This coating adds ' + money(c) + ' to the litho cost.';
-    });
-
-    var addCoatingBtn = document.getElementById('addCoatingBtn');
-    if (addCoatingBtn) {
-      addCoatingBtn.onclick = function () {
-        var group = wipGroupSelect.value, sub = wipSubSelect.value, item = wipItemSelect.value;
-        var operator = document.getElementById('wipCoatOperator').value.trim();
-        var notes = document.getElementById('wipCoatNotes').value;
-        var lithoNote = document.getElementById('wipLithoNoteInput').value;
-        if (!group || !item) { toast('Pick a group and coating item first'); return; }
-        if (!operator) { toast('Enter an operator name'); return; }
-        addCoatingBtn.disabled = true;
-        google.script.run.withSuccessHandler(function (result) {
-          showInfo('Coating added', 'Added to ' + state.ticket + '. Litho cost is now ' + money(result.litho) + '.',
-            function () { renderWipDetail(); });
-        }).withFailureHandler(function (err) {
-          showModal({ title: 'Could not add coating', message: err.message, confirmText: 'OK' });
-          addCoatingBtn.disabled = false;
-        }).applyCoating(state.ticket, group, sub, item, operator, notes, '', false, lithoNote, '');
-      };
-    }
   }
 
   // boot
