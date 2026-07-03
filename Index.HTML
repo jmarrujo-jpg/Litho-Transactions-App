@@ -369,11 +369,6 @@
     overlay.onclick = function (e) { if (e.target === overlay && opts.cancelText) close(); };
   }
 
-  function showConfirm(title, message, onConfirm, confirmText, variant) {
-    showModal({ title: title, message: message, onConfirm: onConfirm,
-      confirmText: confirmText || 'Confirm', cancelText: 'Cancel', variant: variant || 'success' });
-  }
-
   function showInfo(title, message, onClose) {
     showModal({ title: title, message: message, icon: '✓', confirmText: 'OK', onConfirm: onClose });
   }
@@ -547,6 +542,9 @@
     google.script.run.withSuccessHandler(function (detail) {
       ensureRateData(function () { renderDetailContent(view, detail); });
     }).withFailureHandler(function (err) {
+      // Another operator may have coated this ticket while the list was open — it now lives
+      // in WIP, so route there instead of showing a "not found" error.
+      if (String(err.message).indexOf('not found in Current Steel') !== -1) { openWipTicket(state.ticket); return; }
       view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
     }).getTicketDetail(state.ticket);
   }
@@ -583,13 +581,15 @@
         '<div class="field"><label>Notes (optional)</label><input id="passNotes" placeholder="e.g. re-run, color match"></div>' +
       '</div>' +
       '<div id="itemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
-      '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
-        '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty || '') + '"></div>' +
-      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
-        '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
-        'This is a partial skid — return leftovers to Current Steel' +
-      '</label>' +
-      '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>' +
+      (origQty > 0
+        ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
+            '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
+            '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
+            'This is a partial skid — return leftovers to Current Steel' +
+          '</label>' +
+          '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>'
+        : '<div class="sub" style="margin-bottom:10px">No sheet count on this ticket — the whole skid runs as-is.</div>') +
       '<div class="field"><label>Litho Notes (optional)</label><input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
       '<button class="btn success" id="logCoatingBtn">Log Coating &amp; Send to WIP</button>' +
       '</div>';
@@ -699,12 +699,10 @@
   // ---------------- Create Job (one ticket at a time) ----------------
   var currentJob = null; // { jobName, group, sub, item, operator, notes }
   var jobAddedTickets = []; // running list of what's been added so far, for display
-  var jobPickedTicket = null; // ticket currently staged for "sheets run" entry
 
   function openCreateJob() {
     currentJob = null;
     jobAddedTickets = [];
-    jobPickedTicket = null;
     state.view = 'createJob';
     enterDetailView();
     renderCreateJobSetup();
@@ -896,13 +894,15 @@
       '<div class="ticket-id">' + esc(ticket) + '</div>' +
       '<div class="sub" style="margin-bottom:6px">' + esc(origQty) + ' sheets on hand &middot; ~' + esc(origWeight) + ' lbs</div>' +
       specsHtml +
-      '<div class="field"><label>Sheets run</label>' +
-        '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty || '') + '"></div>' +
-      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
-        '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
-        'This is a partial skid — return leftovers to Current Steel' +
-      '</label>' +
-      '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>' +
+      (origQty > 0
+        ? '<div class="field"><label>Sheets run</label>' +
+            '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
+            '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
+            'This is a partial skid — return leftovers to Current Steel' +
+          '</label>' +
+          '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>'
+        : '<div class="sub" style="margin-bottom:10px">No sheet count on this ticket — the whole skid runs as-is.</div>') +
       '<div class="field"><label>Litho Notes (optional)</label>' +
         '<input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
       '<button class="btn" id="addTicketToJobBtn">Add to Job</button>';
@@ -914,6 +914,7 @@
     var partialToggle = document.getElementById('partialSkidToggle');
 
     function updatePreview() {
+      if (!preview || !sheetsRunInput) return;
       var sheets = Number(sheetsRunInput.value) || 0;
       var estWeight = Math.round(sheets * weightPerSheet * 100) / 100;
       var remSheets = origQty - sheets;
@@ -928,14 +929,14 @@
           ' leftover sheets will be scrapped (not returned to Current Steel).';
       }
     }
-    sheetsRunInput.oninput = updatePreview;
-    partialToggle.onchange = updatePreview;
+    if (sheetsRunInput) sheetsRunInput.oninput = updatePreview;
+    if (partialToggle) partialToggle.onchange = updatePreview;
     updatePreview();
 
     document.getElementById('addTicketToJobBtn').onclick = function () {
-      var sheetsRun = sheetsRunInput.value;
+      var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
       var lithoNote = document.getElementById('lithoNoteInput').value;
-      var isPartialSkid = partialToggle.checked;
+      var isPartialSkid = !!(partialToggle && partialToggle.checked);
       var btn = document.getElementById('addTicketToJobBtn');
       btn.disabled = true; btn.textContent = 'Adding&hellip;';
       google.script.run.withSuccessHandler(function (result) {

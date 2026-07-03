@@ -399,17 +399,16 @@ function ensureColumns_(sheet, names) {
   return map;
 }
 
-/** Writes all PROGRESS_EXTRA_COLS on a Litho In Progress row in a single setValues when the
- *  columns are contiguous (they are, by construction in setupTabs/getInProgressSheet_),
- *  falling back to per-cell writes otherwise. `vals` must contain every extra-col name. */
-function setProgressFields_(ip, row, ipMap, vals) {
-  var cols = PROGRESS_EXTRA_COLS.map(function (name) { return ipMap[name]; });
-  var ordered = PROGRESS_EXTRA_COLS.map(function (name) { return vals[name]; });
-  var contiguous = cols.every(function (c, i) { return c && (i === 0 || c === cols[i - 1] + 1); });
-  if (contiguous) {
-    ip.getRange(row, cols[0], 1, cols.length).setValues([ordered]);
-  } else {
-    cols.forEach(function (c, i) { if (c) ip.getRange(row, c).setValue(ordered[i]); });
+/** Serializes every mutating operation behind Apps Script's script-wide lock so two operators
+ *  acting at the same moment (e.g. both coating the same ticket from different tablets) can't
+ *  interleave reads and writes — the second call waits for the first to finish. */
+function withScriptLock_(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000); // wait up to 30s for the other operator's write to finish
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -586,6 +585,10 @@ function getTicketDetail(ticket) {
  *  floor. Only the ticket number is required; steel fields stay blank. The operator then logs
  *  a coating like any other ticket, which moves it to WIP. */
 function createManualTicket(ticket, operatorName) {
+  return withScriptLock_(function () { return createManualTicket_(ticket, operatorName); });
+}
+
+function createManualTicket_(ticket, operatorName) {
   ticket = String(ticket || '').trim();
   if (!ticket) throw new Error('Enter a ticket number.');
 
@@ -635,6 +638,12 @@ function logCoatingTx_(ticket, passNumber, operatorName, group, sub, itemName, m
  * only live number kept on the WIP row is the running Litho cost.
  */
 function applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName) {
+  return withScriptLock_(function () {
+    return applyCoating_(ticket, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName);
+  });
+}
+
+function applyCoating_(ticket, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName) {
   ticket = String(ticket || '').trim();
   if (!ticket) throw new Error('Enter a ticket number.');
   if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
@@ -656,6 +665,7 @@ function applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsR
   var wipRow = findRowByTicket_(wip, ticket);
   if (wipRow > -1) {
     var wm = headerMap_(wip);
+    if (!wm['Litho']) throw new Error('WIP sheet has no Litho column.');
     var currentLitho = Number(wip.getRange(wipRow, wm['Litho']).getValue()) || 0;
     var newTotal = Math.round((currentLitho + match.totalCost) * 100) / 100;
     wip.getRange(wipRow, wm['Litho']).setValue(newTotal);
@@ -680,8 +690,12 @@ function applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsR
   var originalWeight = Number(sourceObj['Weight']) || 0;
   var weightPerSheet = originalQty > 0 ? (originalWeight / originalQty) : 0;
   var sheets = (sheetsRun === undefined || sheetsRun === null || sheetsRun === '') ? originalQty : Number(sheetsRun);
-  if (isNaN(sheets) || sheets <= 0) throw new Error('Enter a valid number of sheets run for ' + ticket + '.');
-  if (originalQty > 0 && sheets > originalQty) throw new Error('Sheets run (' + sheets + ') exceeds sheets available (' + originalQty + ') for ' + ticket + '.');
+  if (originalQty > 0) {
+    if (isNaN(sheets) || sheets <= 0) throw new Error('Enter a valid number of sheets run for ' + ticket + '.');
+    if (sheets > originalQty) throw new Error('Sheets run (' + sheets + ') exceeds sheets available (' + originalQty + ') for ' + ticket + '.');
+  } else {
+    sheets = 0; // no sheet count on this ticket (e.g. manually created) — run it whole, no split/scrap math
+  }
   var usedFewer = originalQty > 0 && sheets < originalQty;
   isPartialSkid = usedFewer && !!isPartialSkid;
   var estimatedWeightUsed = weightPerSheet > 0 ? Math.round(sheets * weightPerSheet * 100) / 100 : originalWeight;
@@ -741,6 +755,10 @@ function applyCoating(ticket, group, sub, itemName, operatorName, notes, sheetsR
 /** One-time migration: move any tickets still sitting in the old Litho In Progress sheet into
  *  WIP, carrying their running litho cost. Safe to run repeatedly / when empty. */
 function migrateInProgressToWip() {
+  return withScriptLock_(migrateInProgressToWip_);
+}
+
+function migrateInProgressToWip_() {
   var ip = getInProgressSheet_();
   var last = ip.getLastRow();
   if (last < 2) return { moved: 0 };
@@ -760,6 +778,51 @@ function migrateInProgressToWip() {
   }
   return { moved: moved };
 }
+
+/**
+ * Audits every WIP ticket's Litho cost against the Litho Transactions log. The log is the
+ * source of truth: coating costs plus manual-adjustment deltas sum to the current cost, so
+ * any drift (hand edits to the sheet, a half-failed run) shows up as a mismatch here.
+ * Run from the Apps Script editor: auditWipLithoCosts() to report, auditWipLithoCosts(true)
+ * to also write the recomputed value back where it differs.
+ */
+function auditWipLithoCosts(applyFixes) {
+  return withScriptLock_(function () {
+    var wip = getSheet_(SHEETS.WIP);
+    var wipMap = headerMap_(wip);
+    if (!wipMap['Ticket'] || !wipMap['Litho']) throw new Error('WIP sheet needs Ticket and Litho columns.');
+    var last = wip.getLastRow();
+    if (last < 2) return { checked: 0, mismatches: [] };
+
+    // One read of the whole transaction log; sum Pass Total Cost per ticket.
+    var tx = getTransactionsSheet_();
+    var txLast = tx.getLastRow();
+    var sums = {};
+    if (txLast > 1) {
+      tx.getRange(2, 1, txLast - 1, TRANSACTION_COLS.length).getValues().forEach(function (r) {
+        var t = String(r[1]).trim();
+        if (!t) return;
+        sums[t] = Math.round(((sums[t] || 0) + (Number(r[10]) || 0)) * 100) / 100;
+      });
+    }
+
+    var tickets = wip.getRange(2, wipMap['Ticket'], last - 1, 1).getValues();
+    var costs = wip.getRange(2, wipMap['Litho'], last - 1, 1).getValues();
+    var mismatches = [];
+    for (var i = 0; i < tickets.length; i++) {
+      var t = String(tickets[i][0]).trim();
+      if (!t) continue;
+      var sheetCost = Math.round((Number(costs[i][0]) || 0) * 100) / 100;
+      var computed = sums[t] || 0;
+      if (sheetCost !== computed) {
+        if (applyFixes) wip.getRange(i + 2, wipMap['Litho']).setValue(computed);
+        mismatches.push({ ticket: t, sheetCost: sheetCost, computedFromLog: computed, fixed: !!applyFixes });
+      }
+    }
+    return { checked: tickets.length, mismatches: mismatches };
+  });
+}
+
 function getTransactionHistory(ticket) {
   var tx = getTransactionsSheet_();
   var last = tx.getLastRow();
@@ -830,7 +893,9 @@ function getWipDetail(ticket) {
   return sanitizeForClient_({
     steel: steel,
     litho: steel['Litho'] || 0,
-    passCount: history.filter(function (h) { return Number(h.passTotal) > 0; }).length,
+    passCount: history.filter(function (h) {
+      return Number(h.passTotal) > 0 && String(h.item).indexOf('MANUAL COST ADJUSTMENT') === -1;
+    }).length,
     transactions: history
   });
 }
@@ -838,6 +903,10 @@ function getWipDetail(ticket) {
 /** Directly overrides the Litho cost on a WIP row (e.g. correcting a typo or manual adjustment)
  *  and logs the change to Litho Transactions so there's a record of who changed it and why. */
 function updateWipLithoCost(ticket, newCost, operatorName, notes) {
+  return withScriptLock_(function () { return updateWipLithoCost_(ticket, newCost, operatorName, notes); });
+}
+
+function updateWipLithoCost_(ticket, newCost, operatorName, notes) {
   var wip = getSheet_(SHEETS.WIP);
   var wipRow = findRowByTicket_(wip, ticket);
   if (wipRow === -1) throw new Error('Ticket not found in WIP: ' + ticket);
