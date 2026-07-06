@@ -693,17 +693,35 @@ function getTicketCard(skidId) {
   var headers = getHeaders_(m);
   var obj = rowToObject_(headers, m.getRange(row, 1, 1, headers.length).getValues()[0]);
   var history = getTransactionHistory(skidId, obj['Ticket']);
+  var active = activeCoatings_(history);
   return sanitizeForClient_({
     skidId: skidId,
     ticket: obj['Ticket'],
     status: obj['Status'] || STATUS.CURRENT,
     steel: obj,
     litho: obj['Litho'] || 0,
-    passCount: history.filter(function (h) {
-      return Number(h.passTotal) > 0 && String(h.item).indexOf('MANUAL COST ADJUSTMENT') === -1;
-    }).length,
+    passCount: active.length,
     suggestedGroup: guessGroupForEndUse_(obj['End Use']),
+    coatings: active,
     transactions: history
+  });
+}
+
+/** The coatings currently in effect on a skid, derived from the log. A real coating pass has
+ *  a non-empty Group and a positive Pass Total (events, cost adjustments and voids write an
+ *  empty Group). A void row's Notes begin with "VOID#<passNumber>:" and cancel that pass, so
+ *  a corrected/removed coating drops out of this list while staying in the audit trail. */
+function activeCoatings_(history) {
+  var voided = {};
+  (history || []).forEach(function (h) {
+    var m = /^VOID#(\d+):/.exec(String(h.notes || ''));
+    if (m) voided[m[1]] = true;
+  });
+  return (history || []).filter(function (h) {
+    return String(h.group || '').trim() !== '' && Number(h.passTotal) > 0 && !voided[String(h.passNumber)];
+  }).map(function (h) {
+    return { passNumber: h.passNumber, group: h.group, sub: h.sub, item: h.item,
+      chemCode: h.chemCode, cost: Number(h.passTotal) || 0 };
   });
 }
 
@@ -1207,6 +1225,80 @@ function updateWipLithoCost_(skidId, newCost, operatorName, notes, opId) {
   ]]);
 
   return getTicketCard(skidId);
+}
+
+/** Shared: loads the master row + validates a skid has an editable coating pass, returning the
+ *  pieces edit/remove both need. The pass must be a live coating (non-empty Group, positive
+ *  cost) that hasn't already been voided. */
+function loadCoatingForEdit_(skidId, passNumber) {
+  normalizeMasterRows_();
+  var m = getMasterSheet_();
+  var mMap = headerMap_(m);
+  if (!mMap['Litho']) throw new Error('Steel Tickets sheet has no Litho column.');
+  var row = findRowBySkidId_(m, skidId);
+  if (row === -1) throw new Error('Skid not found: ' + skidId);
+  var headers = getHeaders_(m);
+  var obj = rowToObject_(headers, m.getRange(row, 1, 1, headers.length).getValues()[0]);
+  var history = getTransactionHistory(skidId, obj['Ticket']);
+  var active = activeCoatings_(history);
+  var target = active.filter(function (c) { return String(c.passNumber) === String(passNumber); })[0];
+  if (!target) throw new Error('That coating is no longer on the ticket (it may have already been changed).');
+  var nextPass = history.length ? Math.max.apply(null, history.map(function (h) { return Number(h.passNumber) || 0; })) + 1 : 1;
+  return { m: m, mMap: mMap, row: row, obj: obj, target: target, nextPass: nextPass };
+}
+
+/** Corrects a coating already logged on a ticket: voids the old pass and logs the replacement,
+ *  so the Litho cost follows the new rate and the log keeps a full "was X, now Y" trail. The
+ *  ticket's Job ID and status are untouched — only this skid's coating changes, not the job's
+ *  recipe or its link. */
+function editTicketCoating(skidId, passNumber, group, sub, item, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
+    if (!group || !item) throw new Error('Pick a size/group and coating item.');
+    var match = findRate_(group, sub, item);
+    if (!match) throw new Error('Could not find rate for item: ' + item);
+    var ctx = loadCoatingForEdit_(skidId, passNumber);
+    var oldCost = Number(ctx.target.cost) || 0;
+    var newCost = Number(match.totalCost) || 0;
+    var currentLitho = Number(ctx.obj['Litho']) || 0;
+    var afterVoid = Math.round((currentLitho - oldCost) * 100) / 100;
+    var afterNew = Math.round((afterVoid + newCost) * 100) / 100;
+    var ticket = ctx.obj['Ticket'];
+
+    // 1) void the old pass  2) log the corrected coating
+    var tx = getTransactionsSheet_();
+    tx.getRange(tx.getLastRow() + 1, 1, 1, TRANSACTION_COLS.length).setValues([[
+      new Date(), ticket, ctx.nextPass, operatorName || '', '', '', 'COATING CHANGED (VOID)', '',
+      0, 0, -oldCost, afterVoid,
+      'VOID#' + passNumber + ': corrected ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ') -> ' + item + ' (' + newCost.toFixed(2) + ')',
+      '', skidId
+    ]]);
+    logCoatingTx_(skidId, ticket, ctx.nextPass + 1, operatorName, group, sub, item, match, afterNew,
+      'Correction of pass ' + passNumber, ctx.obj['Job ID'] || '');
+    stampRow_(ctx.m, ctx.row, ctx.mMap, { 'Litho': afterNew, 'Last Updated At': new Date(), 'Last Updated By': operatorName || '' });
+    return getTicketCard(skidId);
+  });
+}
+
+/** Removes a coating already logged on a ticket: voids the pass and drops its cost from the
+ *  Litho total, keeping the void in the audit trail. Job ID and status are untouched. */
+function removeTicketCoating(skidId, passNumber, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
+    var ctx = loadCoatingForEdit_(skidId, passNumber);
+    var oldCost = Number(ctx.target.cost) || 0;
+    var currentLitho = Number(ctx.obj['Litho']) || 0;
+    var afterVoid = Math.round((currentLitho - oldCost) * 100) / 100;
+    var tx = getTransactionsSheet_();
+    tx.getRange(tx.getLastRow() + 1, 1, 1, TRANSACTION_COLS.length).setValues([[
+      new Date(), ctx.obj['Ticket'], ctx.nextPass, operatorName || '', '', '', 'COATING REMOVED (VOID)', '',
+      0, 0, -oldCost, afterVoid,
+      'VOID#' + passNumber + ': removed ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ')',
+      '', skidId
+    ]]);
+    stampRow_(ctx.m, ctx.row, ctx.mMap, { 'Litho': afterVoid, 'Last Updated At': new Date(), 'Last Updated By': operatorName || '' });
+    return getTicketCard(skidId);
+  });
 }
 
 // ---------------- audits & one-time migration ----------------

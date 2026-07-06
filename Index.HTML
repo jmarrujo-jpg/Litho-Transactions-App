@@ -79,6 +79,8 @@
   .btn:hover { background: var(--accent-dark); }
   .btn.secondary { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
   .btn.success { background: var(--good); }
+  .btn.danger { background: #c0392b; }
+  .btn.danger:hover { background: #a5311f; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .field { flex: 1; min-width: 160px; margin-bottom: 12px; }
@@ -686,6 +688,10 @@
         'awaiting approval. Review and approve it from <strong>Review Jobs</strong> to move it to WIP.</div></div>';
     }
 
+    if ((status === 'WIP' || status === 'Pending') && card.coatings && card.coatings.length) {
+      html += coatingsEditorHtml(card);
+    }
+
     if (card.transactions && card.transactions.length) {
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">History</h3>' +
         renderHistoryTable(card.transactions) + '</div>';
@@ -694,6 +700,111 @@
     view.innerHTML = html;
     if (status === 'Current') wireCurrentActions(card);
     if (status === 'WIP') wireWipActions(card);
+    if ((status === 'WIP' || status === 'Pending') && card.coatings && card.coatings.length) {
+      wireCoatingsEditor(card);
+    }
+  }
+
+  // ----- Edit coatings already applied to a ticket (change the item, or remove one) -----
+  // Corrections void the old pass and log the replacement, so the Litho cost follows the new
+  // rate and the audit trail keeps the full "was X, now Y" record. The ticket's Job ID and
+  // status are never touched — only this skid's coating changes, not the job it belongs to.
+  function coatingsEditorHtml(card) {
+    var html = '<div class="card"><h3 style="margin-top:0;font-size:15px">Coatings on this ticket</h3>' +
+      '<div class="sub" style="margin-bottom:8px">Change corrects the coating (cost follows the new rate); Remove voids it. The ticket stays linked to its job.</div>' +
+      '<div class="row">' + operatorFieldHtml('coatEditOperator') + '</div>';
+    card.coatings.forEach(function (c) {
+      html += '<div class="queue-item" data-coat-pass="' + esc(c.passNumber) + '">' +
+        '<div style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(c.item) + '</span> ' +
+        '<span class="sub">' + esc(c.group) + (c.sub ? ' / ' + esc(c.sub) : '') + ' &middot; ' + money(c.cost) + '</span></div>' +
+        '<div style="white-space:nowrap">' +
+          '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-edit-coat="' + esc(c.passNumber) + '">Change</button> ' +
+          '<button class="btn danger" style="padding:6px 10px;font-size:13px" data-del-coat="' + esc(c.passNumber) + '">Remove</button>' +
+        '</div>' +
+      '</div>';
+    });
+    html += '<div id="coatEditForm" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:12px"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function wireCoatingsEditor(card) {
+    var form = document.getElementById('coatEditForm');
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-del-coat]'), function (btn) {
+      btn.onclick = function () {
+        var pass = btn.getAttribute('data-del-coat');
+        var coat = card.coatings.filter(function (c) { return String(c.passNumber) === String(pass); })[0];
+        var operator = (document.getElementById('coatEditOperator') || {}).value;
+        operator = (operator || '').trim();
+        if (!operator) { toast('Enter an operator name first'); return; }
+        showConfirm('Remove coating',
+          'Remove ' + (coat ? coat.item : 'this coating') + ' from ticket ' + card.ticket +
+            '? Its cost comes off the litho total and the change is logged.',
+          function () {
+            runMutation('removeTicketCoating', [card.skidId, pass, operator, newOpId()],
+              function () { toast('Coating removed'); renderCard(); },
+              function (err) { toast('Error: ' + err.message); });
+          }, 'Remove', 'danger');
+      };
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-edit-coat]'), function (btn) {
+      btn.onclick = function () {
+        var pass = btn.getAttribute('data-edit-coat');
+        var coat = card.coatings.filter(function (c) { return String(c.passNumber) === String(pass); })[0];
+        openCoatingEdit(card, coat, form);
+      };
+    });
+  }
+
+  function openCoatingEdit(card, coat, form) {
+    form.style.display = 'block';
+    form.innerHTML =
+      '<h4 style="margin:0 0 8px;font-size:14px">Change coating (currently ' + esc(coat.item) + ')</h4>' +
+      '<div class="row">' +
+        selectField('editGroup', 'Size / Group', rateGroups(), coat.group) +
+        selectField('editSub', 'Sub-Variant', [], null) +
+        selectField('editItem', 'Coating Item', [], null) +
+        selectField('editChem', 'Chem Code', [], null) +
+      '</div>' +
+      '<div id="editCoatCost" class="sub" style="margin-bottom:10px"></div>' +
+      '<button class="btn success" id="saveCoatEditBtn">Save change</button> ' +
+      '<button class="btn secondary" id="cancelCoatEditBtn">Cancel</button>';
+    if (form.scrollIntoView) form.scrollIntoView({ block: 'nearest' });
+
+    var groupSelect = document.getElementById('editGroup');
+    var subSelect = document.getElementById('editSub');
+    var itemSelect = document.getElementById('editItem');
+    var chemSelect = document.getElementById('editChem');
+    var costPreview = document.getElementById('editCoatCost');
+
+    wireCoatingCascade(groupSelect, subSelect, itemSelect, chemSelect, costPreview, function (c) {
+      return 'New coating cost: ' + money(c) + ' (was ' + money(coat.cost) + ').';
+    });
+    // Pre-fill the cascade to the coating being edited so the operator only changes what's wrong.
+    if (coat.group) {
+      groupSelect.value = coat.group; groupSelect.onchange();
+      if (coat.sub) { subSelect.value = coat.sub; }
+      subSelect.onchange();
+      itemSelect.value = coat.item;
+      itemSelect.onchange();
+    }
+
+    document.getElementById('cancelCoatEditBtn').onclick = function () {
+      form.style.display = 'none'; form.innerHTML = '';
+    };
+    document.getElementById('saveCoatEditBtn').onclick = function () {
+      var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
+      var operator = ((document.getElementById('coatEditOperator') || {}).value || '').trim();
+      if (!group || !item) { toast('Pick a size/group and coating item'); return; }
+      if (!operator) { toast('Enter an operator name (top of this card)'); return; }
+      var btn = document.getElementById('saveCoatEditBtn');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      runMutation('editTicketCoating', [card.skidId, coat.passNumber, group, sub, item, operator, newOpId()],
+        function () { toast('Coating updated'); renderCard(); },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Save change'; });
+    };
   }
 
   // ----- Current: log the first coating (moves the skid to WIP) -----
