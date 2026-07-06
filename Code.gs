@@ -442,6 +442,11 @@ function getMasterSheet_() {
     var headers = steelHeaders.concat(MASTER_EXTRA_COLS);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     sh.setFrozenRows(1);
+  } else {
+    // Sheet already exists (possibly created in an earlier version): make sure every lifecycle
+    // column is present. Without this, writes to a missing column (e.g. Job ID) are silently
+    // dropped by stampRow_, so tickets never link to their job.
+    ensureColumns_(sh, MASTER_EXTRA_COLS.concat(['Litho Notes', 'Litho']));
   }
   return sh;
 }
