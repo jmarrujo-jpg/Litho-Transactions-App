@@ -15,21 +15,24 @@ var SHEETS = {
   CURRENT_STEEL: 'Current Steel',
   IN_PROGRESS: 'Litho In Progress',
   TRANSACTIONS: 'Litho Transactions',
+  JOBS: 'Litho Jobs',
   WIP: 'WIP',
-  IN_PRODUCTION: 'In Production',
-  USED: 'Used In Production',
   RATE_TABLE: 'Litho Rate Table'
 };
 
 // Ticket lifecycle. A row is created once in Steel Tickets and never moves or gets deleted —
-// only its Status (and the matching timestamp stamps) change. Full history of every movement
-// lives in Litho Transactions, which is what makes the trail SQF-auditable.
-var STATUS = { CURRENT: 'Current', WIP: 'WIP', PRODUCTION: 'In Production', USED: 'Used' };
+// only its Status (and the matching timestamp stamps) change. Coatings run during the day put a
+// ticket in Pending; a supervisor reviews the day's jobs and approves, which flips them to WIP.
+// Full history lives in Litho Transactions, which is what makes the trail SQF-auditable.
+var STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP' };
 
 // Lifecycle columns appended after the steel columns on the Steel Tickets master tab.
-var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'First Coated At', 'First Coated By',
-  'In Production At', 'In Production By', 'Used At', 'Used By',
-  'Last Updated At', 'Last Updated By'];
+var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'Job ID', 'First Coated At', 'First Coated By',
+  'Approved At', 'Approved By', 'Last Updated At', 'Last Updated By'];
+
+// Columns for the Litho Jobs tab (one row per job; Coatings JSON holds the reusable recipe).
+var JOB_COLS = ['Job ID', 'Created At', 'Created By', 'Description', 'Coatings', 'Coatings JSON',
+  'Ticket Count', 'Status', 'Approved At', 'Approved By', 'Notes'];
 
 // Extra columns Litho In Progress has on top of the normal steel columns
 var PROGRESS_EXTRA_COLS = ['Status', 'Started By', 'Started At', 'Pass Count', 'Running Litho Total'];
@@ -770,10 +773,11 @@ function createManualTicket_(ticket, operatorName, opId) {
       if (String(obj['Ticket']).trim() !== ticket) continue;
       var st = obj['Status'] || STATUS.CURRENT;
       if (st === STATUS.CURRENT) return getTicketCard(obj['Skid ID']); // already in the queue — open it
-      if (st !== STATUS.USED) {
-        throw new Error('Ticket ' + ticket + ' is already active as "' + st + '" (skid ' + obj['Skid ID'] + '). Open it from the list.');
+      if (st === STATUS.PENDING) {
+        throw new Error('Ticket ' + ticket + ' is already active (Pending in a job, skid ' + obj['Skid ID'] + '). Open it from the list.');
       }
-      // Used rows don't block — a ticket number can come around again.
+      // WIP rows are finished litho — a ticket number may legitimately come around again, so
+      // don't block; fall through and create a fresh Current row with its own Skid ID.
     }
   }
 
@@ -801,7 +805,7 @@ function applyCoating(skidId, group, sub, itemName, operatorName, notes, sheetsR
   });
 }
 
-function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId) {
+function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId) {
   if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
   if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
   var match = findRate_(group, sub, itemName);
@@ -834,8 +838,8 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
     cell.setValue((existing ? existing + ' | ' : '') + text);
   }
 
-  // ----- Another coat on a WIP skid: just add cost -----
-  if (status === STATUS.WIP) {
+  // ----- Another coat on a Pending or WIP skid: just add cost -----
+  if (status === STATUS.WIP || status === STATUS.PENDING) {
     var currentLitho = Number(obj['Litho']) || 0;
     var newTotal = Math.round((currentLitho + match.totalCost) * 100) / 100;
     stampRow_(m, row, mMap, { 'Litho': newTotal, 'Last Updated At': new Date(), 'Last Updated By': operatorName || '' });
@@ -846,10 +850,11 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
     return sanitizeForClient_(result);
   }
   if (status !== STATUS.CURRENT) {
-    throw new Error('Ticket ' + ticket + ' is "' + status + '" — coatings can only be logged while Current or WIP.');
+    throw new Error('Ticket ' + ticket + ' is "' + status + '" — coatings can only be logged while Current, Pending or WIP.');
   }
 
-  // ----- First coating: Current -> WIP -----
+  // ----- First coating on a Current skid: flip to firstStatus (WIP for a single coat, or
+  //       Pending when run as part of a job that still needs approval) -----
   var originalQty = Number(obj['QTY/LOAD']) || 0;
   var originalWeight = Number(obj['Weight']) || 0;
   var weightPerSheet = originalQty > 0 ? (originalWeight / originalQty) : 0;
@@ -866,7 +871,7 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
 
   var now = new Date();
   stampRow_(m, row, mMap, {
-    'Status': STATUS.WIP, 'Litho': match.totalCost,
+    'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost,
     'First Coated At': now, 'First Coated By': operatorName || '',
     'Last Updated At': now, 'Last Updated By': operatorName || ''
   });
@@ -910,60 +915,256 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
   return sanitizeForClient_(result);
 }
 
-/** Adds ONE skid to a job: applies the job's coating pass (Current -> WIP, or another coat
- *  in WIP). Partial/scrap handling and Litho Notes are all done by applyCoating. */
-function addTicketToJob(jobName, group, sub, itemName, operatorName, notes, skidId, sheetsRun, lithoNote, isPartialSkid, opId) {
-  return applyCoating(skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId);
+// ---------------- jobs (a day's coating runs, reviewed then approved) ----------------
+
+/** Litho Jobs tab: one row per job, holding the reusable coating recipe (Coatings JSON). */
+function getJobsSheet_() {
+  var sh = getSheet_(SHEETS.JOBS);
+  if (sh.getLastColumn() === 0) {
+    sh.getRange(1, 1, 1, JOB_COLS.length).setValues([JOB_COLS]);
+    sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < JOB_COLS.length) {
+    ensureColumns_(sh, JOB_COLS);
+  }
+  return sh;
 }
 
-/** Marks a skid as on a production line. Allowed from Current (uncoated steel can go to a
- *  line) or WIP. Stamps who/when on the row and logs the event. */
-function markInProduction(skidId, operatorName, opId) {
-  return withScriptLock_(function () {
-    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
-    normalizeMasterRows_();
-    var m = getMasterSheet_();
-    var mMap = headerMap_(m);
-    var row = findRowBySkidId_(m, skidId);
-    if (row === -1) throw new Error('Skid not found: ' + skidId);
-    var headers = getHeaders_(m);
-    var obj = rowToObject_(headers, m.getRange(row, 1, 1, headers.length).getValues()[0]);
-    var status = obj['Status'] || STATUS.CURRENT;
-    if (status === STATUS.USED) throw new Error('Ticket ' + obj['Ticket'] + ' is already Used.');
-    if (status === STATUS.PRODUCTION) return getTicketCard(skidId); // already there
-    var now = new Date();
-    stampRow_(m, row, mMap, {
-      'Status': STATUS.PRODUCTION, 'In Production At': now, 'In Production By': operatorName || '',
-      'Last Updated At': now, 'Last Updated By': operatorName || ''
-    });
-    eventTx_(skidId, obj['Ticket'], 'MOVED TO PRODUCTION', operatorName,
-      'Skid moved to production line (was ' + status + ')', Number(obj['Litho']) || 0);
-    return getTicketCard(skidId);
+function nextJobId_() {
+  var props = PropertiesService.getScriptProperties();
+  var n = Number(props.getProperty('jobCounter') || 0) + 1;
+  props.setProperty('jobCounter', String(n));
+  return 'JOB-' + ('000000' + n).slice(-6);
+}
+
+function findRowByJobId_(sheet, jobId) {
+  var map = headerMap_(sheet);
+  var col = map['Job ID'];
+  if (!col) return -1;
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var vals = sheet.getRange(2, col, last - 1, 1).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    if (String(vals[i][0]).trim() === String(jobId).trim()) return i + 2;
+  }
+  return -1;
+}
+
+function coatingSummary_(coatings) {
+  return (coatings || []).map(function (c) {
+    return c.item + (c.sub ? ' (' + c.sub + ')' : '');
+  }).join(' | ');
+}
+
+function getJobRecipe_(jobs, jobRow, jMap) {
+  var json = jobs.getRange(jobRow, jMap['Coatings JSON']).getValue();
+  try { return JSON.parse(json) || []; } catch (e) { return []; }
+}
+
+/** All master rows tagged with this Job ID. */
+function jobTickets_(jobId) {
+  var m = getMasterSheet_();
+  var headers = getHeaders_(m);
+  var mMap = headerMap_(m);
+  var out = [];
+  var last = m.getLastRow();
+  if (last < 2 || !mMap['Job ID']) return out;
+  m.getRange(2, 1, last - 1, headers.length).getValues().forEach(function (r) {
+    var o = rowToObject_(headers, r);
+    if (String(o['Job ID']).trim() === String(jobId).trim()) out.push(o);
+  });
+  return out;
+}
+
+/** Validates a coatings recipe (array of {group, sub, item}) against the rate table. */
+function validateCoatings_(coatings) {
+  if (!coatings || !coatings.length) throw new Error('Add at least one coating to the job.');
+  coatings.forEach(function (c) {
+    if (!c || !c.group || !c.item) throw new Error('Each coating needs a size/group and a coating item.');
+    if (!findRate_(c.group, c.sub, c.item)) throw new Error('No rate found for coating: ' + c.item);
   });
 }
 
-/** Marks a skid Used — the pallet is exhausted on the line. Stamps who/when and logs the
- *  event; the row stays forever as the traceability record. */
-function markUsed(skidId, operatorName, notes, opId) {
+/** Creates a Pending job with a coating recipe (one or more coatings). Tickets are added to
+ *  it afterward; the whole job is reviewed and approved later, which flips its tickets to WIP. */
+function createJob(description, operatorName, coatings, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
+    validateCoatings_(coatings);
+    var jobs = getJobsSheet_();
+    var jMap = headerMap_(jobs);
+    var jobId = nextJobId_();
+    var now = new Date();
+    var rowArr = new Array(jobs.getLastColumn()).fill('');
+    function put(col, val) { if (jMap[col]) rowArr[jMap[col] - 1] = val; }
+    put('Job ID', jobId); put('Created At', now); put('Created By', operatorName || '');
+    put('Description', description || ''); put('Coatings', coatingSummary_(coatings));
+    put('Coatings JSON', JSON.stringify(coatings)); put('Ticket Count', 0); put('Status', 'Pending');
+    jobs.getRange(jobs.getLastRow() + 1, 1, 1, rowArr.length).setValues([rowArr]);
+    return sanitizeForClient_({ jobId: jobId, description: description || '', coatings: coatings, status: 'Pending' });
+  });
+}
+
+/** Adds one skid to a Pending job: applies every coating in the recipe (first coating flips
+ *  Current -> Pending with partial/scrap handling; the rest just add cost). */
+function jobAddTicket(jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operatorName, opId) {
   return withScriptLock_(function () {
     if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
     normalizeMasterRows_();
+    var jobs = getJobsSheet_();
+    var jMap = headerMap_(jobs);
+    var jobRow = findRowByJobId_(jobs, jobId);
+    if (jobRow === -1) throw new Error('Job not found: ' + jobId);
+    if (String(jobs.getRange(jobRow, jMap['Status']).getValue()) === 'Approved') throw new Error('Job ' + jobId + ' is approved and locked.');
+    var recipe = getJobRecipe_(jobs, jobRow, jMap);
+    if (!recipe.length) throw new Error('Job ' + jobId + ' has no coatings.');
+    var desc = jobs.getRange(jobRow, jMap['Description']).getValue();
+
+    var result = null;
+    recipe.forEach(function (c, i) {
+      var r = applyCoating_(skidId, c.group, c.sub, c.item, operatorName, '',
+        i === 0 ? sheetsRun : '', i === 0 ? isPartialSkid : false, i === 0 ? lithoNote : '',
+        desc, null, STATUS.PENDING, jobId);
+      if (i === 0) result = r; else if (r && r.litho !== undefined) result.litho = r.litho;
+    });
+    jobs.getRange(jobRow, jMap['Ticket Count']).setValue(jobTickets_(jobId).length);
+    result = result || { skidId: skidId };
+    result.jobId = jobId;
+    return sanitizeForClient_(result);
+  });
+}
+
+/** Appends a coating to a Pending job's recipe and applies it to every ticket already on it. */
+function addCoatingToJob(jobId, coating, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
+    validateCoatings_([coating]);
+    var jobs = getJobsSheet_();
+    var jMap = headerMap_(jobs);
+    var jobRow = findRowByJobId_(jobs, jobId);
+    if (jobRow === -1) throw new Error('Job not found: ' + jobId);
+    if (String(jobs.getRange(jobRow, jMap['Status']).getValue()) === 'Approved') throw new Error('Job is approved and locked.');
+    var recipe = getJobRecipe_(jobs, jobRow, jMap);
+    recipe.push({ group: coating.group, sub: coating.sub || '', item: coating.item });
+    jobs.getRange(jobRow, jMap['Coatings JSON']).setValue(JSON.stringify(recipe));
+    jobs.getRange(jobRow, jMap['Coatings']).setValue(coatingSummary_(recipe));
+    var desc = jobs.getRange(jobRow, jMap['Description']).getValue();
+    jobTickets_(jobId).forEach(function (o) {
+      if ((o['Status'] || '') !== STATUS.PENDING) return;
+      applyCoating_(o['Skid ID'], coating.group, coating.sub, coating.item, operatorName, '',
+        '', false, '', desc, null, STATUS.PENDING, jobId);
+    });
+    return getJobDetail(jobId);
+  });
+}
+
+/** Removes a still-Pending ticket from a job: reverts it to Current and voids its pending
+ *  coatings with a negative delta row, so the transaction log still reconciles to zero. */
+function removeTicketFromJob(jobId, skidId, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
+    var jobs = getJobsSheet_();
+    var jMap = headerMap_(jobs);
+    var jobRow = findRowByJobId_(jobs, jobId);
+    if (jobRow === -1) throw new Error('Job not found: ' + jobId);
+    if (String(jobs.getRange(jobRow, jMap['Status']).getValue()) === 'Approved') throw new Error('Job is approved and locked.');
     var m = getMasterSheet_();
     var mMap = headerMap_(m);
+    var headers = getHeaders_(m);
     var row = findRowBySkidId_(m, skidId);
     if (row === -1) throw new Error('Skid not found: ' + skidId);
-    var headers = getHeaders_(m);
     var obj = rowToObject_(headers, m.getRange(row, 1, 1, headers.length).getValues()[0]);
-    var status = obj['Status'] || STATUS.CURRENT;
-    if (status === STATUS.USED) return getTicketCard(skidId); // already used
-    var now = new Date();
+    if (String(obj['Job ID']).trim() !== String(jobId).trim()) throw new Error('Skid is not part of this job.');
+    var litho = Number(obj['Litho']) || 0;
     stampRow_(m, row, mMap, {
-      'Status': STATUS.USED, 'Used At': now, 'Used By': operatorName || '',
-      'Last Updated At': now, 'Last Updated By': operatorName || ''
+      'Status': STATUS.CURRENT, 'Job ID': '', 'Litho': '',
+      'First Coated At': '', 'First Coated By': '',
+      'Last Updated At': new Date(), 'Last Updated By': operatorName || ''
     });
-    eventTx_(skidId, obj['Ticket'], 'PALLET USED IN PRODUCTION', operatorName,
-      ('Pallet exhausted (was ' + status + ')') + (notes ? ' — ' + notes : ''), Number(obj['Litho']) || 0);
-    return getTicketCard(skidId);
+    var history = getTransactionHistory(skidId, obj['Ticket']);
+    var nextPass = history.length ? Math.max.apply(null, history.map(function (h) { return Number(h.passNumber) || 0; })) + 1 : 1;
+    var tx = getTransactionsSheet_();
+    tx.getRange(tx.getLastRow() + 1, 1, 1, TRANSACTION_COLS.length).setValues([[
+      new Date(), obj['Ticket'], nextPass, operatorName || '', '', '', 'REMOVED FROM JOB (VOID)', '',
+      0, 0, -litho, 0, 'Removed from job ' + jobId + ' before approval; pending coatings voided', '', skidId
+    ]]);
+    jobs.getRange(jobRow, jMap['Ticket Count']).setValue(jobTickets_(jobId).length);
+    return getJobDetail(jobId);
+  });
+}
+
+/** Approves a job: every Pending ticket on it flips to WIP (with an approval stamp), and the
+ *  job itself is locked. This is the supervisor sign-off gate before steel counts as WIP. */
+function approveJob(jobId, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
+    var jobs = getJobsSheet_();
+    var jMap = headerMap_(jobs);
+    var jobRow = findRowByJobId_(jobs, jobId);
+    if (jobRow === -1) throw new Error('Job not found: ' + jobId);
+    if (String(jobs.getRange(jobRow, jMap['Status']).getValue()) === 'Approved') return getJobDetail(jobId);
+    var m = getMasterSheet_();
+    var headers = getHeaders_(m);
+    var mMap = headerMap_(m);
+    var last = m.getLastRow();
+    var now = new Date();
+    var flipped = 0;
+    if (last > 1) {
+      var vals = m.getRange(2, 1, last - 1, headers.length).getValues();
+      for (var i = 0; i < vals.length; i++) {
+        var obj = rowToObject_(headers, vals[i]);
+        if (String(obj['Job ID']).trim() !== String(jobId).trim()) continue;
+        if ((obj['Status'] || '') !== STATUS.PENDING) continue;
+        stampRow_(m, i + 2, mMap, {
+          'Status': STATUS.WIP, 'Approved At': now, 'Approved By': operatorName || '',
+          'Last Updated At': now, 'Last Updated By': operatorName || ''
+        });
+        eventTx_(obj['Skid ID'], obj['Ticket'], 'JOB APPROVED', operatorName, 'Approved in job ' + jobId + ' — moved to WIP', Number(obj['Litho']) || 0);
+        flipped++;
+      }
+    }
+    stampRow_(jobs, jobRow, jMap, { 'Status': 'Approved', 'Approved At': now, 'Approved By': operatorName || '' });
+    return getJobDetail(jobId);
+  });
+}
+
+/** Jobs created on a given day (yyyy-MM-dd; blank = today), newest activity first. */
+function getJobsForDate(dateStr) {
+  var jobs = getJobsSheet_();
+  var last = jobs.getLastRow();
+  if (last < 2) return [];
+  var tz = Session.getScriptTimeZone() || 'America/Los_Angeles';
+  var target = dateStr || Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var headers = getHeaders_(jobs);
+  var out = [];
+  jobs.getRange(2, 1, last - 1, headers.length).getValues().forEach(function (r) {
+    var o = rowToObject_(headers, r);
+    if (!o['Job ID']) return;
+    var created = o['Created At'];
+    var d = (created instanceof Date) ? Utilities.formatDate(created, tz, 'yyyy-MM-dd') : String(created).slice(0, 10);
+    if (d !== target) return;
+    out.push({ jobId: o['Job ID'], createdBy: o['Created By'], createdAt: o['Created At'],
+      description: o['Description'], coatings: o['Coatings'], ticketCount: o['Ticket Count'], status: o['Status'] });
+  });
+  return sanitizeForClient_(out);
+}
+
+/** One job plus its coating recipe and the tickets currently on it. */
+function getJobDetail(jobId) {
+  var jobs = getJobsSheet_();
+  var jMap = headerMap_(jobs);
+  var jobRow = findRowByJobId_(jobs, jobId);
+  if (jobRow === -1) throw new Error('Job not found: ' + jobId);
+  var headers = getHeaders_(jobs);
+  var jobObj = rowToObject_(headers, jobs.getRange(jobRow, 1, 1, headers.length).getValues()[0]);
+  var tickets = jobTickets_(jobId).map(function (o) {
+    return { skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'], litho: o['Litho'] || 0,
+      bw: o['BW'], type: o['TC'], temper: o['TM'], endUse: o['End Use'] };
+  });
+  return sanitizeForClient_({
+    jobId: jobObj['Job ID'], description: jobObj['Description'], createdBy: jobObj['Created By'],
+    createdAt: jobObj['Created At'], status: jobObj['Status'], approvedAt: jobObj['Approved At'],
+    approvedBy: jobObj['Approved By'], coatings: getJobRecipe_(jobs, jobRow, jMap),
+    coatingsSummary: jobObj['Coatings'], tickets: tickets
   });
 }
 
@@ -1006,7 +1207,7 @@ function updateWipLithoCost_(skidId, newCost, operatorName, notes, opId) {
 // ---------------- audits & one-time migration ----------------
 
 /**
- * Audits WIP / In Production skids' Litho cost against the Litho Transactions log (the
+ * Audits WIP / Pending skids' Litho cost against the Litho Transactions log (the
  * source of truth: coating costs + adjustment deltas sum to the current cost). Run from the
  * Apps Script editor; pass true to write the recomputed value back where it differs.
  */
@@ -1038,7 +1239,7 @@ function auditWipLithoCosts(applyFixes) {
     for (var i = 0; i < values.length; i++) {
       var obj = rowToObject_(headers, values[i]);
       var status = obj['Status'] || '';
-      if (status !== STATUS.WIP && status !== STATUS.PRODUCTION) continue;
+      if (status !== STATUS.WIP && status !== STATUS.PENDING) continue;
       checked++;
       var sid = String(obj['Skid ID'] || '').trim();
       var computed = Math.round((((sid && sumBySkid[sid]) || 0) + (sumByTicketLegacy[String(obj['Ticket']).trim()] || 0)) * 100) / 100;
@@ -1053,10 +1254,9 @@ function auditWipLithoCosts(applyFixes) {
 }
 
 /**
- * ONE-TIME migration: builds the Steel Tickets master from the four old lifecycle tabs
- * (Current Steel -> Current, Litho In Progress + WIP -> WIP, In Production -> In Production,
- * Used In Production -> Used), assigning Skid IDs. Old tabs are left untouched as backups.
- * Run from the Apps Script editor. Refuses to run twice.
+ * ONE-TIME migration: builds the Steel Tickets master from the old lifecycle tabs
+ * (Current Steel -> Current, Litho In Progress + WIP -> WIP), assigning Skid IDs. Old tabs
+ * are left untouched as backups. Run from the Apps Script editor. Refuses to run twice.
  */
 function migrateToMasterTable() {
   return withScriptLock_(function () {
@@ -1067,9 +1267,7 @@ function migrateToMasterTable() {
     var sources = [
       { name: SHEETS.CURRENT_STEEL, status: STATUS.CURRENT },
       { name: SHEETS.IN_PROGRESS, status: STATUS.WIP },
-      { name: SHEETS.WIP, status: STATUS.WIP },
-      { name: SHEETS.IN_PRODUCTION, status: STATUS.PRODUCTION },
-      { name: SHEETS.USED, status: STATUS.USED }
+      { name: SHEETS.WIP, status: STATUS.WIP }
     ];
     var counts = {};
     var rowsOut = [];
@@ -1118,9 +1316,7 @@ function createLegacyViews() {
   var lastLetter = columnLetter_(m.getLastColumn());
   var views = [
     { name: SHEETS.CURRENT_STEEL, status: STATUS.CURRENT },
-    { name: SHEETS.WIP, status: STATUS.WIP },
-    { name: SHEETS.IN_PRODUCTION, status: STATUS.PRODUCTION },
-    { name: SHEETS.USED, status: STATUS.USED }
+    { name: SHEETS.WIP, status: STATUS.WIP }
   ];
   views.forEach(function (v) {
     var old = ss.getSheetByName(v.name);

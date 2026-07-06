@@ -129,15 +129,15 @@
       <h1>Litho Floor App</h1>
     </div>
     <div class="header-right">
+      <button id="reviewBtn">Review Jobs</button>
       <button id="backBtn" style="display:none">&larr; Back</button>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
     <button id="filterAll" class="active" data-filter="all">All</button>
     <button id="filterCurrent" data-filter="current">Current Steel</button>
+    <button id="filterPending" data-filter="pending">Pending</button>
     <button id="filterWip" data-filter="wip">WIP</button>
-    <button id="filterProduction" data-filter="production">Production</button>
-    <button id="filterUsed" data-filter="used">Used</button>
   </div>
   <div id="view"></div>
 </div>
@@ -432,8 +432,14 @@
   document.getElementById('backBtn').onclick = function () {
     document.getElementById('backBtn').style.display = 'none';
     document.getElementById('tabbar').style.display = 'flex';
+    document.getElementById('reviewBtn').style.display = 'inline-block';
     state.view = 'all'; state.listView = 'all'; state.skid = null;
     renderAll();
+  };
+
+  document.getElementById('reviewBtn').onclick = function () {
+    enterDetailView();
+    renderReview();
   };
 
   var activeFilter = 'all';
@@ -455,6 +461,7 @@
   function enterDetailView() {
     document.getElementById('tabbar').style.display = 'none';
     document.getElementById('backBtn').style.display = 'inline-block';
+    document.getElementById('reviewBtn').style.display = 'none';
   }
 
   // ---------------- Combined ticket list (every status, from Steel Tickets) ----------------
@@ -467,6 +474,38 @@
       '<input id="' + id + '" placeholder="Search by ticket number&hellip;" autocomplete="off"></div>';
   }
 
+  // Builds a labeled <select> field for a coating cascade. Options may be plain strings or
+  // {value,text}/{item} objects; a leading "--" placeholder is always added. Sub/item/chem
+  // selects are passed [] here and filled later by wireCoatingCascade.
+  function selectField(id, label, options, selected) {
+    var html = '<div class="field"><label>' + esc(label) + '</label><select id="' + esc(id) + '">' +
+      '<option value="">--</option>';
+    (options || []).forEach(function (o) {
+      var val = (o && typeof o === 'object') ? (o.value != null ? o.value : o.item) : o;
+      var text = (o && typeof o === 'object') ? (o.text != null ? o.text : (o.item != null ? o.item : val)) : o;
+      var sel = (selected != null && selected !== '' && String(selected) === String(val)) ? ' selected' : '';
+      html += '<option value="' + esc(val) + '"' + sel + '>' + esc(text) + '</option>';
+    });
+    return html + '</select></div>';
+  }
+
+  // A small labeled info box for the six steel specs shown on every ticket card.
+  function metaBox(label, val) {
+    return '<div><span>' + esc(label) + '</span>' + esc(val) + '</div>';
+  }
+
+  // Renders the SQF trace table from a skid's Litho Transactions rows.
+  function renderHistoryTable(rows) {
+    if (!rows || !rows.length) return '<div class="sub">No passes logged yet.</div>';
+    var html = '<table><thead><tr><th>#</th><th>Item</th><th>Group</th><th>Cost</th><th>Operator</th><th>Job</th><th>Running Total</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      html += '<tr><td>' + esc(r.passNumber) + '</td><td>' + esc(r.item) + '</td><td>' + esc(r.group) +
+        (r.sub ? ' / ' + esc(r.sub) : '') + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
+        '</td><td>' + esc(r.jobName) + '</td><td>' + money(r.runningTotal) + '</td></tr>';
+    });
+    return html + '</tbody></table>';
+  }
+
   function setCaches(all) {
     allCache = all || [];
     queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
@@ -474,9 +513,8 @@
 
   function badgeClassFor(status) {
     if (status === 'Current') return 'notstarted';
+    if (status === 'Pending') return 'inprogress';
     if (status === 'WIP') return 'wip';
-    if (status === 'In Production') return 'production';
-    if (status === 'Used') return 'used';
     return 'notstarted';
   }
 
@@ -530,13 +568,12 @@
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;
         if (!hit) return false;
-        if (activeFilter === 'all') return true; // searching under All also finds Used skids
+        if (activeFilter === 'all') return true;
       }
-      if (activeFilter === 'all') return t.status !== 'Used';
+      if (activeFilter === 'all') return true;
       if (activeFilter === 'current') return t.status === 'Current';
+      if (activeFilter === 'pending') return t.status === 'Pending';
       if (activeFilter === 'wip') return t.status === 'WIP';
-      if (activeFilter === 'production') return t.status === 'In Production';
-      if (activeFilter === 'used') return t.status === 'Used';
       return true;
     });
 
@@ -617,8 +654,7 @@
     }
     var stamps = [];
     if (steel['First Coated At']) stamps.push('First coated ' + fmtStamp(steel['First Coated At'], steel['First Coated By']));
-    if (steel['In Production At']) stamps.push('To production ' + fmtStamp(steel['In Production At'], steel['In Production By']));
-    if (steel['Used At']) stamps.push('Used ' + fmtStamp(steel['Used At'], steel['Used By']));
+    if (steel['Approved At']) stamps.push('Approved ' + fmtStamp(steel['Approved At'], steel['Approved By']));
     if (stamps.length) html += '<div class="sub" style="margin-bottom:6px">' + stamps.join(' &middot; ') + '</div>';
     if (status === 'Current') {
       html += '<div class="sub">In Current Steel — no litho applied yet. Logging a coating sends it to WIP.</div>';
@@ -632,10 +668,9 @@
 
     if (status === 'Current') html += currentActionsHtml(card);
     if (status === 'WIP') html += wipActionsHtml(card);
-    if (status === 'In Production') html += productionActionsHtml();
-    if (status === 'Used') {
-      html += '<div class="card"><div class="sub">This pallet has been used in production. ' +
-        'The record is read-only; the history below is its full traceability trail.</div></div>';
+    if (status === 'Pending') {
+      html += '<div class="card"><div class="sub">Ran as part of job <strong>' + esc(steel['Job ID'] || '') + '</strong>, ' +
+        'awaiting approval. Review and approve it from <strong>Review Jobs</strong> to move it to WIP.</div></div>';
     }
 
     if (card.transactions && card.transactions.length) {
@@ -646,7 +681,6 @@
     view.innerHTML = html;
     if (status === 'Current') wireCurrentActions(card);
     if (status === 'WIP') wireWipActions(card);
-    if (status === 'In Production') wireProductionActions(card);
   }
 
   // ----- Current: log the first coating (moves the skid to WIP) -----
@@ -742,7 +776,7 @@
     };
   }
 
-  // ----- WIP: adjust cost, add coats, send to production -----
+  // ----- WIP: adjust cost, add coats (WIP is terminal; approval already happened) -----
   function wipActionsHtml(card) {
     return '<div class="card">' +
       '<h3 style="margin-top:0;font-size:15px">Litho cost</h3>' +
@@ -770,13 +804,6 @@
       '<div id="wipItemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
       '<div class="field"><label>Litho Notes (optional)</label><input id="wipLithoNoteInput" placeholder="Note kept with this ticket"></div>' +
       '<button class="btn" id="addCoatingBtn">Add Coating</button>' +
-      '</div>' +
-
-      '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Send to production</h3>' +
-      '<div class="sub" style="margin-bottom:10px">Marks this skid as on a production line and stamps who moved it and when.</div>' +
-      operatorFieldHtml('prodOperator') +
-      '<button class="btn success" id="moveProdBtn">Move to Production</button>' +
       '</div>';
   }
 
@@ -825,77 +852,278 @@
           addCoatingBtn.disabled = false;
         });
     };
-
-    var moveProdBtn = document.getElementById('moveProdBtn');
-    moveProdBtn.onclick = function () {
-      var operator = document.getElementById('prodOperator').value.trim();
-      if (!operator) { toast('Enter an operator name'); return; }
-      showConfirm('Move to production',
-        'Mark ticket ' + card.ticket + ' as on a production line? Litho work is finished at that point.',
-        function () {
-          moveProdBtn.disabled = true;
-          runMutation('markInProduction', [state.skid, operator, newOpId()],
-            function () { showInfo('Moved to production', 'Ticket ' + card.ticket + ' is now marked In Production.', function () { renderCard(); }); },
-            function (err) {
-              showModal({ title: 'Could not move to production', message: err.message, confirmText: 'OK' });
-              moveProdBtn.disabled = false;
-            });
-        }, 'Move');
-    };
   }
 
-  // ----- In Production: mark the pallet used when exhausted -----
-  function productionActionsHtml() {
-    return '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">On the production line</h3>' +
-      '<div class="sub" style="margin-bottom:10px">When the pallet is exhausted, mark it Used. The record is kept forever as the traceability trail.</div>' +
-      operatorFieldHtml('usedOperator') +
-      '<div class="field"><label>Note (optional)</label><input id="usedNotes" placeholder="e.g. line 2, finished goods lot #"></div>' +
-      '<button class="btn success" id="markUsedBtn">Mark Used — pallet exhausted</button>' +
+  // ---------------- Review Jobs (a day's coating runs, then approve -> WIP) ----------------
+  var reviewDate = ''; // yyyy-MM-dd; '' means today
+
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
+
+  function renderReview() {
+    var view = document.getElementById('view');
+    var day = reviewDate || todayStr();
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Review jobs</h3>' +
+        '<div class="field"><label>Day</label><input type="date" id="reviewDay" value="' + esc(day) + '"></div>' +
+        '<div class="sub">Jobs created that day. Open one to add tickets/coatings and approve — approving moves its tickets to WIP.</div>' +
+      '</div>' +
+      '<div id="reviewList"><div class="loading">Loading jobs&hellip;</div></div>';
+    document.getElementById('reviewDay').onchange = function () {
+      reviewDate = this.value; renderReview();
+    };
+    google.script.run.withSuccessHandler(function (jobs) {
+      renderReviewList(jobs);
+    }).withFailureHandler(function (err) {
+      document.getElementById('reviewList').innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getJobsForDate(reviewDate);
+  }
+
+  function renderReviewList(jobs) {
+    var el = document.getElementById('reviewList');
+    if (!el) return;
+    if (!jobs || !jobs.length) { el.innerHTML = '<div class="card empty">No jobs created that day.</div>'; return; }
+    var html = '<div class="card">';
+    jobs.forEach(function (j) {
+      var badge = j.status === 'Approved' ? '<span class="badge wip">Approved</span>' : '<span class="badge inprogress">Pending</span>';
+      html += '<div class="queue-item" data-job="' + esc(j.jobId) + '">' +
+        '<div style="min-width:0">' +
+          '<div class="ticket-id">' + esc(j.description || '(untitled job)') + ' <span class="sub" style="font-weight:400">' + esc(j.jobId) + '</span></div>' +
+          '<div class="sub">' + esc(j.coatings || '') + '</div>' +
+          '<div class="sub">' + (j.ticketCount || 0) + ' ticket(s) &middot; by ' + esc(j.createdBy) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;white-space:nowrap">' + badge + '</div>' +
       '</div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-job]'), function (row) {
+      row.onclick = function () { openJob(row.getAttribute('data-job')); };
+    });
   }
 
-  function wireProductionActions(card) {
-    var markUsedBtn = document.getElementById('markUsedBtn');
-    markUsedBtn.onclick = function () {
-      var operator = document.getElementById('usedOperator').value.trim();
-      var notes = document.getElementById('usedNotes').value;
+  function openJob(jobId) {
+    state.view = 'job'; state.jobId = jobId;
+    enterDetailView();
+    renderJob();
+  }
+
+  function renderJob() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="loading">Loading job&hellip;</div>';
+    google.script.run.withSuccessHandler(function (job) {
+      ensureRateData(function () { renderJobContent(view, job); });
+    }).withFailureHandler(function (err) {
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getJobDetail(state.jobId);
+  }
+
+  function renderJobContent(view, job) {
+    var approved = job.status === 'Approved';
+    var html = '';
+
+    html += '<div class="card">' +
+      '<div class="ticket-id">' + esc(job.description || '(untitled job)') +
+        ' <span class="badge ' + (approved ? 'wip' : 'inprogress') + '">' + esc(job.status) + '</span>' +
+        ' <span class="sub" style="font-weight:400">' + esc(job.jobId) + '</span></div>' +
+      '<div class="sub" style="margin-top:4px">Coatings: ' + esc(job.coatingsSummary || '(none)') + '</div>' +
+      '<div class="sub">Created by ' + esc(job.createdBy) + ' &middot; ' + esc(job.createdAt) + '</div>' +
+      (approved ? '<div class="sub">Approved by ' + esc(job.approvedBy) + ' &middot; ' + esc(job.approvedAt) + '</div>' : '') +
+      '</div>';
+
+    // Tickets on the job
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this job (' + job.tickets.length + ')</h3>';
+    if (!job.tickets.length) html += '<div class="sub">None yet.</div>';
+    else {
+      html += '<table><thead><tr><th>Ticket</th><th>Skid</th><th>Status</th><th>Litho</th>' + (approved ? '' : '<th></th>') + '</tr></thead><tbody>';
+      job.tickets.forEach(function (t) {
+        html += '<tr><td>' + esc(t.ticket) + '</td><td class="sub">' + esc(t.skidId) + '</td><td>' + esc(t.status) + '</td><td>' + money(t.litho) + '</td>' +
+          (approved ? '' : '<td><button class="btn secondary" style="padding:4px 8px;font-size:12px" data-remove="' + esc(t.skidId) + '">Remove</button></td>') +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '</div>';
+
+    if (!approved) {
+      // Add a ticket
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a ticket</h3>' +
+        searchBarHtml('jobReviewSearch') +
+        '<div id="jobReviewPicker" style="margin-top:10px"></div>' +
+        '<div class="card" id="jobReviewPicked" style="display:none;margin-top:10px"></div>' +
+        '</div>';
+
+      // Add a coating to the recipe
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a coating to this job</h3>' +
+        '<div class="sub" style="margin-bottom:8px">Applies to every ticket already on the job.</div>' +
+        '<div class="row">' +
+          selectField('jrGroup', 'Size / Group', rateGroups(), null) +
+          selectField('jrSub', 'Sub-Variant', [], null) +
+          selectField('jrItem', 'Coating Item', [], null) +
+          selectField('jrChem', 'Chem Code', [], null) +
+        '</div>' +
+        operatorFieldHtml('jrOperator') +
+        '<div id="jrCostPreview" class="sub" style="margin:6px 0"></div>' +
+        '<button class="btn" id="jrAddCoatingBtn">Add Coating</button>' +
+        '</div>';
+
+      // Approve
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Approve job</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Approving moves all ' + job.tickets.length + ' ticket(s) to WIP and locks the job.</div>' +
+        operatorFieldHtml('approveOperator') +
+        '<button class="btn success" id="approveJobBtn"' + (job.tickets.length ? '' : ' disabled') + '>Approve &amp; Send to WIP</button>' +
+        (job.tickets.length ? '' : '<div class="sub" style="margin-top:8px">Add at least one ticket first.</div>') +
+        '</div>';
+    }
+
+    view.innerHTML = html;
+    wireJobReview(job, approved);
+  }
+
+  function wireJobReview(job, approved) {
+    if (approved) return;
+
+    // Remove ticket buttons
+    Array.prototype.forEach.call(document.querySelectorAll('[data-remove]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-remove');
+        showConfirm('Remove ticket', 'Remove skid ' + sk + ' from this job? Its pending coatings are voided.', function () {
+          btn.disabled = true;
+          runMutation('removeTicketFromJob', [state.jobId, sk, currentApprover(), newOpId()],
+            function () { renderJob(); },
+            function (err) { showModal({ title: 'Could not remove', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+        }, 'Remove', 'secondary');
+      };
+    });
+
+    // Ticket picker (Current skids only)
+    var search = document.getElementById('jobReviewSearch');
+    if (search) {
+      if (!queueCache.length) {
+        google.script.run.withSuccessHandler(function (all) { setCaches(all); renderJobReviewPicker(''); }).getAllTickets();
+      } else { renderJobReviewPicker(''); }
+      search.oninput = function () { renderJobReviewPicker(search.value); };
+    }
+
+    // Add-coating cascade
+    var jrGroup = document.getElementById('jrGroup'), jrSub = document.getElementById('jrSub'),
+        jrItem = document.getElementById('jrItem'), jrChem = document.getElementById('jrChem'),
+        jrCost = document.getElementById('jrCostPreview');
+    wireCoatingCascade(jrGroup, jrSub, jrItem, jrChem, jrCost, function (c) { return 'Adds ' + money(c) + ' per ticket.'; });
+    document.getElementById('jrAddCoatingBtn').onclick = function () {
+      var operator = document.getElementById('jrOperator').value.trim();
+      if (!jrGroup.value || !jrItem.value) { toast('Pick a group and coating item'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
-      showConfirm('Mark pallet used',
-        'Mark ticket ' + card.ticket + ' as Used? This closes out the skid for good.',
-        function () {
-          markUsedBtn.disabled = true;
-          runMutation('markUsed', [state.skid, operator, notes, newOpId()],
-            function () { showInfo('Pallet marked used', 'Ticket ' + card.ticket + ' is now recorded as Used in production.', function () { renderCard(); }); },
-            function (err) {
-              showModal({ title: 'Could not mark used', message: err.message, confirmText: 'OK' });
-              markUsedBtn.disabled = false;
-            });
-        }, 'Mark Used');
+      var btn = document.getElementById('jrAddCoatingBtn'); btn.disabled = true;
+      runMutation('addCoatingToJob', [state.jobId, { group: jrGroup.value, sub: jrSub.value, item: jrItem.value }, operator, newOpId()],
+        function () { toast('Coating added to job'); renderJob(); },
+        function (err) { showModal({ title: 'Could not add coating', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+    };
+
+    // Approve
+    var approveBtn = document.getElementById('approveJobBtn');
+    if (approveBtn) approveBtn.onclick = function () {
+      var operator = document.getElementById('approveOperator').value.trim();
+      if (!operator) { toast('Enter an operator name'); return; }
+      showConfirm('Approve job', 'Approve ' + state.jobId + ' and move ' + job.tickets.length + ' ticket(s) to WIP?', function () {
+        approveBtn.disabled = true;
+        runMutation('approveJob', [state.jobId, operator, newOpId()],
+          function () { showInfo('Job approved', 'All tickets moved to WIP.', function () { renderJob(); }); },
+          function (err) { showModal({ title: 'Could not approve', message: err.message, confirmText: 'OK' }); approveBtn.disabled = false; });
+      }, 'Approve');
     };
   }
 
-  // ---------------- Create Job (one ticket at a time) ----------------
-  var currentJob = null; // { jobName, group, sub, item, operator, notes }
-  var jobAddedTickets = []; // running list of what's been added so far, for display
+  function currentApprover() {
+    var el = document.getElementById('approveOperator') || document.getElementById('jrOperator');
+    return el ? el.value.trim() : '';
+  }
+
+  function renderJobReviewPicker(term) {
+    var c = document.getElementById('jobReviewPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    var rows = (term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache.slice(0, 15));
+    if (!rows.length) { c.innerHTML = '<div class="sub">No Current tickets match.</div>'; return; }
+    var html = '';
+    rows.forEach(function (q) {
+      html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:14px">' + esc(q.ticket) + '</span> <span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-pick="' + esc(q.skidId) + '">Select</button></div>';
+    });
+    c.innerHTML = html;
+    Array.prototype.forEach.call(c.querySelectorAll('[data-pick]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-pick');
+        renderJobReviewPicked(sk, queueCache.filter(function (q) { return q.skidId === sk; })[0]);
+      };
+    });
+  }
+
+  function renderJobReviewPicked(skidId, entry) {
+    var card = document.getElementById('jobReviewPicked');
+    var origQty = entry ? Number(entry.qty) || 0 : 0;
+    card.style.display = 'block';
+    card.innerHTML = '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) + '</div>' +
+      (origQty > 0
+        ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label><input type="number" id="jrSheets" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:6px"><input type="checkbox" id="jrPartial" style="width:18px;height:18px"> Partial skid — return leftovers to Current</label>'
+        : '') +
+      operatorFieldHtml('jrPickOperator') +
+      '<div class="field"><label>Litho Notes (optional)</label><input id="jrLithoNote"></div>' +
+      '<button class="btn" id="jrAddTicketBtn">Add to Job</button>';
+    document.getElementById('jrAddTicketBtn').onclick = function () {
+      var operator = document.getElementById('jrPickOperator').value.trim();
+      if (!operator) { toast('Enter an operator name'); return; }
+      var sheets = document.getElementById('jrSheets') ? document.getElementById('jrSheets').value : '';
+      var partial = document.getElementById('jrPartial') ? document.getElementById('jrPartial').checked : false;
+      var lithoNote = document.getElementById('jrLithoNote').value;
+      var btn = document.getElementById('jrAddTicketBtn'); btn.disabled = true;
+      runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId()],
+        function () { toast('Ticket added'); renderJob(); },
+        function (err) { showModal({ title: 'Could not add ticket', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+    };
+  }
+
+  // ---------------- Create Job (multi-coating recipe) ----------------
+  // A job carries a recipe of one or more coatings. Every ticket added to the job gets
+  // the whole recipe applied and lands in Pending, awaiting review/approval in Review Jobs.
+  var currentJob = null; // { jobId, description, coatings:[...], operator, notes }
+  var jobCoatings = [];   // recipe being built in step 1, before the job is created
+  var jobAddedTickets = []; // running list of tickets added so far, for display
 
   function openCreateJob() {
     currentJob = null;
+    jobCoatings = [];
     jobAddedTickets = [];
     state.view = 'createJob';
     enterDetailView();
     renderCreateJobSetup();
   }
 
-  // Step 1: describe the job (what's being done) before adding any tickets.
+  // Step 1: describe the job and build its coating recipe (one or more coatings) before
+  // adding any tickets.
   function renderCreateJobSetup() {
     var view = document.getElementById('view');
     var html = '';
 
     html += '<div class="card">' +
       '<h3 style="margin-top:0">New Job</h3>' +
-      '<div class="sub" style="margin-bottom:12px">Describe what\'s being done. Once set, you\'ll add tickets to it one at a time.</div>' +
+      '<div class="sub" style="margin-bottom:12px">Describe what\'s being done and add one or more coatings. Every ticket you add gets the whole recipe. The job is reviewed and approved later in Review Jobs.</div>' +
       '<div class="field"><label>Job description</label><input id="jobName" placeholder="e.g. White coat run, 7/1 morning"></div>' +
+      '<div class="row">' +
+        operatorFieldHtml('jobOperator') +
+        '<div class="field"><label>Notes (optional)</label><input id="jobNotes" placeholder="e.g. re-run, color match"></div>' +
+      '</div>' +
+      '</div>';
+
+    // Coating builder card: add coatings to the recipe one at a time.
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Coatings on this job</h3>' +
+      '<div id="jobCoatingList" class="sub" style="margin-bottom:12px">No coatings added yet.</div>' +
       '<div class="field"><label>Can Fitting Size (sets the Size / Group)</label>' +
         '<select id="jobCanSize"><option value="">-- pick a can size --</option></select></div>' +
       '<div class="row">' +
@@ -904,11 +1132,11 @@
         '<div class="field" id="jobItemWrap"></div>' +
         '<div class="field" id="jobChemWrap"></div>' +
       '</div>' +
-      '<div class="row">' +
-        operatorFieldHtml('jobOperator') +
-        '<div class="field"><label>Notes (optional)</label><input id="jobNotes" placeholder="e.g. re-run, color match"></div>' +
-      '</div>' +
       '<div class="sub" id="jobCostPreview" style="margin-bottom:10px"></div>' +
+      '<button class="btn secondary" id="addCoatingBtn">+ Add Coating</button>' +
+      '</div>';
+
+    html += '<div class="card">' +
       '<button class="btn" id="startJobSetupBtn">Start Adding Tickets</button>' +
       '</div>';
 
@@ -926,10 +1154,6 @@
     var chemSelect = document.getElementById('jobChemSelect');
     var costPreview = document.getElementById('jobCostPreview');
 
-    wireItemChem(itemSelect, chemSelect, costPreview, function (c) {
-      return 'This pass adds ' + money(c) + ' per ticket added to this job.';
-    });
-
     ensureRateData(function () {
       rateGroups().forEach(function (g) {
         var opt = document.createElement('option');
@@ -941,6 +1165,9 @@
         opt.value = cs; opt.textContent = cs;
         canSizeInput.appendChild(opt);
       });
+      wireCoatingCascade(groupSelect, subSelect, itemSelect, chemSelect, costPreview, function (c) {
+        return 'This coating adds ' + money(c) + ' per ticket.';
+      });
     });
 
     // Picking a can size (e.g. 603x700) decides the Size/Group and drives the cascade.
@@ -949,38 +1176,71 @@
       if (g && g !== groupSelect.value) { groupSelect.value = g; groupSelect.onchange(); }
     };
 
-    groupSelect.onchange = function () {
-      var group = groupSelect.value;
-      subSelect.innerHTML = '<option value="">--</option>';
-      itemSelect.innerHTML = '<option value="">--</option>';
-      chemSelect.innerHTML = '<option value="">--</option>';
-      costPreview.textContent = '';
-      if (!group) return;
-      var subs = rateSubs(group);
-      subs.forEach(function (s) {
-        var opt = document.createElement('option');
-        opt.value = s || ''; opt.textContent = s || '(single)';
-        subSelect.appendChild(opt);
-      });
-      if (subs.length === 1) { subSelect.value = subs[0] || ''; subSelect.onchange(); }
-    };
+    renderJobCoatingList();
 
-    subSelect.onchange = function () {
-      fillItemChem(groupSelect.value, subSelect.value, itemSelect, chemSelect, costPreview);
+    document.getElementById('addCoatingBtn').onclick = function () {
+      var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
+      if (!group || !item) { toast('Pick a size/group and coating item'); return; }
+      jobCoatings.push({ group: group, sub: sub, item: item });
+      renderJobCoatingList();
+      // Reset the coating picker for the next one, keeping the group so multi-coats on the
+      // same size are quick to add.
+      subSelect.value = ''; itemSelect.innerHTML = '<option value="">--</option>';
+      chemSelect.innerHTML = '<option value="">--</option>'; costPreview.textContent = '';
+      toast('Coating added — add another or start adding tickets');
     };
 
     document.getElementById('startJobSetupBtn').onclick = function () {
       var jobName = document.getElementById('jobName').value.trim();
-      var group = groupSelect.value, sub = subSelect.value, item = itemSelect.value;
       var operator = document.getElementById('jobOperator').value.trim();
       var notes = document.getElementById('jobNotes').value;
 
-      if (!group || !item) { toast('Pick a size/group and coating item'); return; }
+      // Fold in an un-added coating still sitting in the picker so it isn't lost.
+      var pendingGroup = groupSelect.value, pendingItem = itemSelect.value;
+      if (pendingGroup && pendingItem) {
+        jobCoatings.push({ group: pendingGroup, sub: subSelect.value, item: pendingItem });
+      }
+
+      if (!jobCoatings.length) { toast('Add at least one coating'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
 
-      currentJob = { jobName: jobName, group: group, sub: sub, item: item, operator: operator, notes: notes };
-      renderCreateJobAddTickets();
+      var btn = document.getElementById('startJobSetupBtn');
+      btn.disabled = true; btn.textContent = 'Creating job…';
+      runMutation('createJob', [jobName, operator, jobCoatings, newOpId()],
+        function (result) {
+          currentJob = {
+            jobId: result.jobId, description: jobName,
+            coatings: jobCoatings.slice(), operator: operator, notes: notes
+          };
+          state.jobId = result.jobId;
+          renderCreateJobAddTickets();
+        },
+        function (err) {
+          toast('Error: ' + err.message);
+          btn.disabled = false; btn.textContent = 'Start Adding Tickets';
+        });
     };
+  }
+
+  function renderJobCoatingList() {
+    var container = document.getElementById('jobCoatingList');
+    if (!container) return;
+    if (!jobCoatings.length) { container.innerHTML = 'No coatings added yet.'; return; }
+    var html = '';
+    jobCoatings.forEach(function (c, i) {
+      html += '<div class="queue-item" style="padding:6px 0">' +
+        '<div style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(c.item) + '</span> ' +
+        '<span class="sub">' + esc(c.group) + (c.sub ? ' / ' + esc(c.sub) : '') + '</span></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-remove-coat="' + i + '">Remove</button>' +
+        '</div>';
+    });
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('[data-remove-coat]'), function (btn) {
+      btn.onclick = function () {
+        jobCoatings.splice(Number(btn.getAttribute('data-remove-coat')), 1);
+        renderJobCoatingList();
+      };
+    });
   }
 
   // Step 2: add tickets to the job one at a time, entering sheets run for each.
@@ -988,9 +1248,13 @@
     var view = document.getElementById('view');
     var html = '';
 
+    var recipeText = currentJob.coatings.map(function (c) {
+      return esc(c.item) + (c.sub ? ' (' + esc(c.sub) + ')' : '');
+    }).join(', ');
     html += '<div class="card">' +
-      '<div class="sub">Job: <strong>' + esc(currentJob.jobName || '(untitled)') + '</strong> &middot; ' +
-      esc(currentJob.group) + (currentJob.sub ? ' / ' + esc(currentJob.sub) : '') + ' &middot; ' + esc(currentJob.item) + '</div>' +
+      '<div class="sub">Job <strong>' + esc(currentJob.jobId) + '</strong>' +
+      (currentJob.description ? ' &middot; ' + esc(currentJob.description) : '') + '</div>' +
+      '<div class="sub" style="margin-top:4px">Coatings: ' + recipeText + '</div>' +
       '</div>';
 
     html += '<div class="card" id="jobPickedTicketCard" style="display:none"></div>';
@@ -1007,7 +1271,7 @@
       '</div>';
 
     html += '<div class="card">' +
-      '<div class="sub" style="margin-bottom:10px">Each ticket you add is coated and sent to WIP right away. Add more coats later by opening the ticket in WIP.</div>' +
+      '<div class="sub" style="margin-bottom:10px">Tickets you add are logged as <strong>Pending</strong>. Review and approve the job in <strong>Review Jobs</strong> to send them all to WIP.</div>' +
       '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — Back to Tickets</button>' +
       '</div>';
 
@@ -1118,9 +1382,8 @@
       var isPartialSkid = !!(partialToggle && partialToggle.checked);
       var btn = document.getElementById('addTicketToJobBtn');
       btn.disabled = true; btn.textContent = 'Adding&hellip;';
-      runMutation('addTicketToJob',
-        [currentJob.jobName, currentJob.group, currentJob.sub, currentJob.item,
-         currentJob.operator, currentJob.notes, skidId, sheetsRun, lithoNote, isPartialSkid, newOpId()],
+      runMutation('jobAddTicket',
+        [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, currentJob.operator, newOpId()],
         function (result) {
           if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
           jobAddedTickets.push(result);
