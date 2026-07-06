@@ -1266,12 +1266,13 @@ function editTicketCoating(skidId, passNumber, group, sub, item, operatorName, o
     var ticket = ctx.obj['Ticket'];
 
     // 1) void the old pass  2) log the corrected coating
+    var jobId = ctx.obj['Job ID'] || '';
     var tx = getTransactionsSheet_();
     tx.getRange(tx.getLastRow() + 1, 1, 1, TRANSACTION_COLS.length).setValues([[
       new Date(), ticket, ctx.nextPass, operatorName || '', '', '', 'COATING CHANGED (VOID)', '',
       0, 0, -oldCost, afterVoid,
       'VOID#' + passNumber + ': corrected ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ') -> ' + item + ' (' + newCost.toFixed(2) + ')',
-      '', skidId
+      jobId, skidId
     ]]);
     logCoatingTx_(skidId, ticket, ctx.nextPass + 1, operatorName, group, sub, item, match, afterNew,
       'Correction of pass ' + passNumber, ctx.obj['Job ID'] || '');
@@ -1294,7 +1295,7 @@ function removeTicketCoating(skidId, passNumber, operatorName, opId) {
       new Date(), ctx.obj['Ticket'], ctx.nextPass, operatorName || '', '', '', 'COATING REMOVED (VOID)', '',
       0, 0, -oldCost, afterVoid,
       'VOID#' + passNumber + ': removed ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ')',
-      '', skidId
+      ctx.obj['Job ID'] || '', skidId
     ]]);
     stampRow_(ctx.m, ctx.row, ctx.mMap, { 'Litho': afterVoid, 'Last Updated At': new Date(), 'Last Updated By': operatorName || '' });
     return getTicketCard(skidId);

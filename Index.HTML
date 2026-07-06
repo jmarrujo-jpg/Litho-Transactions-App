@@ -81,6 +81,7 @@
   .btn.success { background: var(--good); }
   .btn.danger { background: #c0392b; }
   .btn.danger:hover { background: #a5311f; }
+  .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .field { flex: 1; min-width: 160px; margin-bottom: 12px; }
@@ -439,6 +440,12 @@
   }
 
   document.getElementById('backBtn').onclick = function () {
+    // If we drilled into a ticket from a job, Back returns to that job.
+    if (state.view === 'card' && state.returnToJobId) {
+      var jid = state.returnToJobId; state.returnToJobId = null;
+      openJob(jid);
+      return;
+    }
     document.getElementById('backBtn').style.display = 'none';
     document.getElementById('tabbar').style.display = 'flex';
     document.getElementById('reviewBtn').style.display = 'inline-block';
@@ -519,6 +526,12 @@
   function setCaches(all) {
     allCache = all || [];
     queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
+  }
+
+  // After a skid is added to a job it's no longer Current, so drop it from the picker source
+  // immediately — otherwise it lingers as selectable until the background refresh lands.
+  function dropFromQueueCache(skidId) {
+    queueCache = queueCache.filter(function (q) { return q.skidId !== skidId; });
   }
 
   function badgeClassFor(status) {
@@ -627,9 +640,15 @@
 
   // ---------------- Ticket card (one detail view for every status) ----------------
   function openCard(skidId) {
-    state.view = 'card'; state.listView = 'all'; state.skid = skidId;
+    state.view = 'card'; state.listView = 'all'; state.skid = skidId; state.returnToJobId = null;
     enterDetailView();
     renderCard();
+  }
+
+  // Open a ticket from inside a job so Back returns to that job (not the main list).
+  function openTicketFromJob(skidId, jobId) {
+    openCard(skidId);
+    state.returnToJobId = jobId;
   }
 
   function renderCard() {
@@ -1070,9 +1089,11 @@
     html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this job (' + job.tickets.length + ')</h3>';
     if (!job.tickets.length) html += '<div class="sub">None yet.</div>';
     else {
+      html += '<div class="sub" style="margin-bottom:8px">Tap a ticket number to view it and change or remove its coatings.</div>';
       html += '<table><thead><tr><th>Ticket</th><th>Skid</th><th>Status</th><th>Litho</th>' + (approved ? '' : '<th></th>') + '</tr></thead><tbody>';
       job.tickets.forEach(function (t) {
-        html += '<tr><td>' + esc(t.ticket) + '</td><td class="sub">' + esc(t.skidId) + '</td><td>' + esc(t.status) + '</td><td>' + money(t.litho) + '</td>' +
+        html += '<tr><td><span class="ticket-link" data-open-skid="' + esc(t.skidId) + '">' + esc(t.ticket) + '</span></td>' +
+          '<td class="sub">' + esc(t.skidId) + '</td><td>' + esc(t.status) + '</td><td>' + money(t.litho) + '</td>' +
           (approved ? '' : '<td><button class="btn secondary" style="padding:4px 8px;font-size:12px" data-remove="' + esc(t.skidId) + '">Remove</button></td>') +
           '</tr>';
       });
@@ -1116,6 +1137,13 @@
   }
 
   function wireJobReview(job, approved) {
+    // Tap a ticket to open its full detail (coating editor, history). Works whatever the job
+    // status — approved jobs' tickets are WIP and can still have coatings corrected. Back
+    // returns to this job.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-open-skid]'), function (el) {
+      el.onclick = function () { openTicketFromJob(el.getAttribute('data-open-skid'), job.jobId); };
+    });
+
     if (approved) return;
 
     // Remove ticket buttons
@@ -1215,7 +1243,12 @@
       var lithoNote = document.getElementById('jrLithoNote').value;
       var btn = document.getElementById('jrAddTicketBtn'); btn.disabled = true;
       runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId()],
-        function () { toast('Ticket added'); renderJob(); },
+        function () {
+          toast('Ticket added');
+          dropFromQueueCache(skidId); // no longer Current — keep it out of the picker
+          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+          renderJob();
+        },
         function (err) { showModal({ title: 'Could not add ticket', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
     };
   }
@@ -1526,6 +1559,7 @@
           toast(msg);
           card.style.display = 'none';
           document.getElementById('jobTicketSearch').value = '';
+          dropFromQueueCache(skidId); // no longer Current — remove from picker right away
           renderJobQueuePicker('');
           renderJobAddedList();
           // Refresh caches in the background so qty/status reflect the change next pick
