@@ -422,6 +422,13 @@
     }).getOperatorNames();
   }
 
+  // Monotonic guard against stale async responses clobbering the current view. Each render
+  // that overwrites #view claims a token; a late server response only writes if its token is
+  // still current. Without this, e.g. an in-flight getAllTickets from "Back to Tickets" can
+  // overwrite the Review Jobs list you navigated to a moment later.
+  var viewToken = 0;
+  function nextViewToken() { return ++viewToken; }
+
   function boot() {
     loadOperatorNames();
     loadRateData();
@@ -459,6 +466,7 @@
   }
 
   function enterDetailView() {
+    nextViewToken(); // invalidate any in-flight list/detail response from the view we're leaving
     document.getElementById('tabbar').style.display = 'none';
     document.getElementById('backBtn').style.display = 'inline-block';
     document.getElementById('reviewBtn').style.display = 'none';
@@ -520,9 +528,11 @@
 
   function renderAll() {
     var view = document.getElementById('view');
+    var tok = nextViewToken();
     view.innerHTML = '<div class="loading">Loading tickets&hellip;</div>';
     google.script.run.withSuccessHandler(function (all) {
       setCaches(all);
+      if (tok !== viewToken) return; // superseded by a later navigation
       view.innerHTML =
         '<div class="searchrow">' +
           searchBarHtml('mainSearch') +
@@ -622,10 +632,13 @@
 
   function renderCard() {
     var view = document.getElementById('view');
+    var tok = nextViewToken();
     view.innerHTML = '<div class="loading">Loading ticket&hellip;</div>';
     google.script.run.withSuccessHandler(function (card) {
-      ensureRateData(function () { renderCardContent(view, card); });
+      if (tok !== viewToken) return;
+      ensureRateData(function () { if (tok === viewToken) renderCardContent(view, card); });
     }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
       view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
     }).getTicketCard(state.skid);
   }
@@ -863,7 +876,9 @@
   }
 
   function renderReview() {
+    state.view = 'review';
     var view = document.getElementById('view');
+    var tok = nextViewToken();
     var day = reviewDate || todayStr();
     view.innerHTML =
       '<div class="card">' +
@@ -876,9 +891,12 @@
       reviewDate = this.value; renderReview();
     };
     google.script.run.withSuccessHandler(function (jobs) {
+      if (tok !== viewToken) return;
       renderReviewList(jobs);
     }).withFailureHandler(function (err) {
-      document.getElementById('reviewList').innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+      if (tok !== viewToken) return;
+      var el = document.getElementById('reviewList');
+      if (el) el.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
     }).getJobsForDate(reviewDate);
   }
 
@@ -913,10 +931,13 @@
 
   function renderJob() {
     var view = document.getElementById('view');
+    var tok = nextViewToken();
     view.innerHTML = '<div class="loading">Loading job&hellip;</div>';
     google.script.run.withSuccessHandler(function (job) {
-      ensureRateData(function () { renderJobContent(view, job); });
+      if (tok !== viewToken) return;
+      ensureRateData(function () { if (tok === viewToken) renderJobContent(view, job); });
     }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
       view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
     }).getJobDetail(state.jobId);
   }
