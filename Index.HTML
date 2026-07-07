@@ -783,7 +783,7 @@
       '<h4 style="margin:0 0 8px;font-size:14px">Change coating (currently ' + esc(coat.item) + ')</h4>' +
       '<div class="row">' +
         selectField('editGroup', 'Size / Group', rateGroups(), coat.group) +
-        selectField('editSub', 'Sub-Variant', [], null) +
+        selectField('editSub', '#OUT', [], null) +
         selectField('editItem', 'Coating Item', [], null) +
         selectField('editChem', 'Chem Code', [], null) +
       '</div>' +
@@ -833,7 +833,7 @@
       '<h3 style="margin-top:0;font-size:15px">Log a coating</h3>' +
       '<div class="row">' +
         selectField('groupSelect', 'Size / Group', rateGroups(), card.suggestedGroup) +
-        selectField('subSelect', 'Sub-Variant', [], null) +
+        selectField('subSelect', '#OUT', [], null) +
         selectField('itemSelect', 'Coating Item', [], null) +
         selectField('chemSelect', 'Chem Code', [], null) +
       '</div>' +
@@ -936,7 +936,7 @@
       '<div class="sub" style="margin-bottom:10px">Logs another pass and adds its cost to this ticket\'s litho total.</div>' +
       '<div class="row">' +
         selectField('wipGroupSelect', 'Size / Group', rateGroups(), null) +
-        selectField('wipSubSelect', 'Sub-Variant', [], null) +
+        selectField('wipSubSelect', '#OUT', [], null) +
         selectField('wipItemSelect', 'Coating Item', [], null) +
         selectField('wipChemSelect', 'Chem Code', [], null) +
       '</div>' +
@@ -1114,7 +1114,7 @@
         '<div class="sub" style="margin-bottom:8px">Applies to every ticket already on the job.</div>' +
         '<div class="row">' +
           selectField('jrGroup', 'Size / Group', rateGroups(), null) +
-          selectField('jrSub', 'Sub-Variant', [], null) +
+          selectField('jrSub', '#OUT', [], null) +
           selectField('jrItem', 'Coating Item', [], null) +
           selectField('jrChem', 'Chem Code', [], null) +
         '</div>' +
@@ -1308,7 +1308,7 @@
     view.innerHTML = html;
 
     document.getElementById('jobGroupWrap').innerHTML = '<label>Size / Group</label><select id="jobGroupSelect"><option value="">--</option></select>';
-    document.getElementById('jobSubWrap').innerHTML = '<label>Sub-Variant</label><select id="jobSubSelect"><option value="">--</option></select>';
+    document.getElementById('jobSubWrap').innerHTML = '<label>#OUT</label><select id="jobSubSelect"><option value="">--</option></select>';
     document.getElementById('jobItemWrap').innerHTML = '<label>Coating Item</label><select id="jobItemSelect"><option value="">--</option></select>';
     document.getElementById('jobChemWrap').innerHTML = '<label>Chem Code</label><select id="jobChemSelect"><option value="">--</option></select>';
 
