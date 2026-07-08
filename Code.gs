@@ -27,7 +27,7 @@ var SHEETS = {
 var STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP' };
 
 // Lifecycle columns appended after the steel columns on the Steel Tickets master tab.
-var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'Job ID', 'First Coated At', 'First Coated By',
+var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'Job ID', 'Split Of', 'First Coated At', 'First Coated By',
   'Approved At', 'Approved By', 'Last Updated At', 'Last Updated By'];
 
 // Columns for the Litho Jobs tab (one row per job; Coatings JSON holds the reusable recipe).
@@ -933,6 +933,7 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
     var remainderSkid = nextSkidId_();
     appendMasterRow_(m, mMap, obj, {
       'Ticket': result.remainderTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT,
+      'Job ID': '', 'Split Of': skidId, // link back to the parent so a job-removal can reabsorb it
       'QTY/LOAD': result.remainderSheets, 'Weight': result.remainderWeight, 'Litho': '',
       'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket +
         ' (partial skid, ' + sheets + ' of ' + originalQty + ' sheets run) on ' +
@@ -1032,7 +1033,7 @@ function validateCoatings_(coatings) {
 
 /** Creates a Pending job with a coating recipe (one or more coatings). Tickets are added to
  *  it afterward; the whole job is reviewed and approved later, which flips its tickets to WIP. */
-function createJob(description, operatorName, coatings, opId) {
+function createJob(description, operatorName, coatings, notes, opId) {
   return withScriptLock_(function () {
     if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
     validateCoatings_(coatings);
@@ -1045,6 +1046,7 @@ function createJob(description, operatorName, coatings, opId) {
     put('Job ID', jobId); put('Created At', now); put('Created By', operatorName || '');
     put('Description', description || ''); put('Coatings', coatingSummary_(coatings));
     put('Coatings JSON', JSON.stringify(coatings)); put('Ticket Count', 0); put('Status', 'Pending');
+    put('Notes', notes || '');
     jobs.getRange(jobs.getLastRow() + 1, 1, 1, rowArr.length).setValues([rowArr]);
     return sanitizeForClient_({ jobId: jobId, description: description || '', coatings: coatings, status: 'Pending' });
   });
@@ -1064,6 +1066,18 @@ function jobAddTicket(jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operat
     var recipe = getJobRecipe_(jobs, jobRow, jMap);
     if (!recipe.length) throw new Error('Job ' + jobId + ' has no coatings.');
     var desc = jobs.getRange(jobRow, jMap['Description']).getValue();
+
+    // Don't add the same skid to the same job twice — the recipe would be applied again and
+    // double the coating cost. (A retried call is already caught above by guardOp_; this
+    // guards a genuinely new double-add from a stale screen.)
+    var mCheck = getMasterSheet_();
+    var rCheck = findRowBySkidId_(mCheck, skidId);
+    if (rCheck !== -1) {
+      var oCheck = rowToObject_(getHeaders_(mCheck), mCheck.getRange(rCheck, 1, 1, mCheck.getLastColumn()).getValues()[0]);
+      if (String(oCheck['Job ID']).trim() === String(jobId).trim() && (oCheck['Status'] || STATUS.CURRENT) !== STATUS.CURRENT) {
+        throw new Error('Ticket ' + (oCheck['Ticket'] || skidId) + ' is already on job ' + jobId + '.');
+      }
+    }
 
     var result = null;
     recipe.forEach(function (c, i) {
@@ -1103,8 +1117,43 @@ function addCoatingToJob(jobId, coating, operatorName, opId) {
   });
 }
 
+/** Folds any pristine split-remainder rows (Split Of == parentSkid, still Current with no
+ *  litho of their own) back into the parent skid and removes them. Used when a partial-skid
+ *  ticket is taken off a job, so the skid isn't left permanently split. Returns sheets folded
+ *  back. A remainder that's already been used (not Current, or has litho) is left alone. */
+function reabsorbSplitRemainders_(m, mMap, parentRow, parentSkid, operatorName) {
+  if (!mMap['Split Of']) return 0;
+  var headers = getHeaders_(m);
+  var last = m.getLastRow();
+  if (last < 2) return 0;
+  var vals = m.getRange(2, 1, last - 1, headers.length).getValues();
+  var toDelete = [], addQty = 0, addWeight = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var o = rowToObject_(headers, vals[i]);
+    if (String(o['Split Of']).trim() !== String(parentSkid).trim()) continue;
+    if ((o['Status'] || STATUS.CURRENT) !== STATUS.CURRENT) continue; // remainder in use — leave it
+    if (Number(o['Litho']) > 0) continue;
+    addQty += Number(o['QTY/LOAD']) || 0;
+    addWeight += Number(o['Weight']) || 0;
+    toDelete.push(i + 2);
+    eventTx_(o['Skid ID'], o['Ticket'], 'SPLIT REABSORBED', operatorName,
+      'Remainder folded back into ' + parentSkid + ' when its ticket left the job', 0);
+  }
+  if (!toDelete.length) return 0;
+  var pObj = rowToObject_(headers, m.getRange(parentRow, 1, 1, headers.length).getValues()[0]);
+  stampRow_(m, parentRow, mMap, {
+    'QTY/LOAD': (Number(pObj['QTY/LOAD']) || 0) + addQty,
+    'Weight': Math.round(((Number(pObj['Weight']) || 0) + addWeight) * 100) / 100
+  });
+  // Remainder rows are always appended below the parent, so deleting them bottom-up never
+  // shifts the parent row we just stamped.
+  toDelete.sort(function (a, b) { return b - a; }).forEach(function (r) { m.deleteRow(r); });
+  return addQty;
+}
+
 /** Removes a still-Pending ticket from a job: reverts it to Current and voids its pending
- *  coatings with a negative delta row, so the transaction log still reconciles to zero. */
+ *  coatings with a negative delta row (so the log reconciles to zero), and folds any partial-
+ *  skid remainder back into it so the skid isn't left split. */
 function removeTicketFromJob(jobId, skidId, operatorName, opId) {
   return withScriptLock_(function () {
     if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
@@ -1133,6 +1182,8 @@ function removeTicketFromJob(jobId, skidId, operatorName, opId) {
       new Date(), obj['Ticket'], nextPass, operatorName || '', '', '', 'REMOVED FROM JOB (VOID)', '',
       0, 0, -litho, 0, 'Removed from job ' + jobId + ' before approval; pending coatings voided', '', skidId
     ]]);
+    // If this ticket had been split as a partial skid, fold the pristine remainder back in.
+    reabsorbSplitRemainders_(m, mMap, row, skidId, operatorName);
     jobs.getRange(jobRow, jMap['Ticket Count']).setValue(jobTickets_(jobId).length);
     return getJobDetail(jobId);
   });
@@ -1142,7 +1193,10 @@ function removeTicketFromJob(jobId, skidId, operatorName, opId) {
  *  job itself is locked. This is the supervisor sign-off gate before steel counts as WIP. */
 function approveJob(jobId, operatorName, opId) {
   return withScriptLock_(function () {
-    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true });
+    // No guardOp_ here: approval is idempotent by design (already-WIP tickets are skipped,
+    // and an already-Approved job returns early). That makes it safe to RESUME — if a first
+    // attempt died partway (timeout / transient error) leaving some tickets flipped and some
+    // not, the retry simply finishes the rest instead of being masked as a completed duplicate.
     var jobs = getJobsSheet_();
     var jMap = headerMap_(jobs);
     var jobRow = findRowByJobId_(jobs, jobId);
@@ -1210,7 +1264,7 @@ function getJobDetail(jobId) {
     jobId: jobObj['Job ID'], description: jobObj['Description'], createdBy: jobObj['Created By'],
     createdAt: jobObj['Created At'], status: jobObj['Status'], approvedAt: jobObj['Approved At'],
     approvedBy: jobObj['Approved By'], coatings: getJobRecipe_(jobs, jobRow, jMap),
-    coatingsSummary: jobObj['Coatings'], tickets: tickets
+    coatingsSummary: jobObj['Coatings'], notes: jobObj['Notes'], tickets: tickets
   });
 }
 

@@ -1081,6 +1081,7 @@
         ' <span class="badge ' + (approved ? 'wip' : 'inprogress') + '">' + esc(job.status) + '</span>' +
         ' <span class="sub" style="font-weight:400">' + esc(job.jobId) + '</span></div>' +
       '<div class="sub" style="margin-top:4px">Coatings: ' + esc(job.coatingsSummary || '(none)') + '</div>' +
+      (job.notes ? '<div class="sub">Notes: ' + esc(job.notes) + '</div>' : '') +
       '<div class="sub">Created by ' + esc(job.createdBy) + ' &middot; ' + esc(job.createdAt) + '</div>' +
       (approved ? '<div class="sub">Approved by ' + esc(job.approvedBy) + ' &middot; ' + esc(job.approvedAt) + '</div>' : '') +
       '</div>';
@@ -1376,7 +1377,7 @@
 
       var btn = document.getElementById('startJobSetupBtn');
       btn.disabled = true; btn.textContent = 'Creating job…';
-      runMutation('createJob', [jobName, operator, jobCoatings, newOpId()],
+      runMutation('createJob', [jobName, operator, jobCoatings, notes, newOpId()],
         function (result) {
           currentJob = {
             jobId: result.jobId, description: jobName,
