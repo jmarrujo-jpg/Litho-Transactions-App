@@ -1085,6 +1085,10 @@
       (approved ? '<div class="sub">Approved by ' + esc(job.approvedBy) + ' &middot; ' + esc(job.approvedAt) + '</div>' : '') +
       '</div>';
 
+    // Picked-ticket entry sits at the top (like New Job) so the sheets/notes form appears
+    // above the search when you select a ticket, instead of below the results.
+    if (!approved) html += '<div class="card" id="jobReviewPicked" style="display:none"></div>';
+
     // Tickets on the job
     html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this job (' + job.tickets.length + ')</h3>';
     if (!job.tickets.length) html += '<div class="sub">None yet.</div>';
@@ -1106,7 +1110,6 @@
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a ticket</h3>' +
         searchBarHtml('jobReviewSearch') +
         '<div id="jobReviewPicker" style="margin-top:10px"></div>' +
-        '<div class="card" id="jobReviewPicked" style="display:none;margin-top:10px"></div>' +
         '</div>';
 
       // Add a coating to the recipe
@@ -1227,7 +1230,8 @@
     var card = document.getElementById('jobReviewPicked');
     var origQty = entry ? Number(entry.qty) || 0 : 0;
     card.style.display = 'block';
-    card.innerHTML = '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) + '</div>' +
+    card.innerHTML = '<h3 style="margin-top:0;font-size:15px">Add ticket to job</h3>' +
+      '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) + '</div>' +
       (origQty > 0
         ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label><input type="number" id="jrSheets" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:6px"><input type="checkbox" id="jrPartial" style="width:18px;height:18px"> Partial skid — return leftovers to Current</label>'
@@ -1235,6 +1239,7 @@
       operatorFieldHtml('jrPickOperator') +
       '<div class="field"><label>Litho Notes (optional)</label><input id="jrLithoNote"></div>' +
       '<button class="btn" id="jrAddTicketBtn">Add to Job</button>';
+    if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
     document.getElementById('jrAddTicketBtn').onclick = function () {
       var operator = document.getElementById('jrPickOperator').value.trim();
       if (!operator) { toast('Enter an operator name'); return; }
