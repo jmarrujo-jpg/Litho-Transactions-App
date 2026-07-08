@@ -132,7 +132,6 @@
       <h1>Litho Floor App</h1>
     </div>
     <div class="header-right">
-      <button id="reviewBtn">Review Jobs</button>
       <button id="backBtn" style="display:none">&larr; Back</button>
     </div>
   </header>
@@ -354,6 +353,24 @@
   function esc(s) { return (s === undefined || s === null) ? '' : String(s); }
   function money(n) { return '$' + (Number(n) || 0).toFixed(2); }
 
+  // Sheets-run entry can never exceed what's on the ticket. clampSheets keeps the input in
+  // range as you type; sheetsError is the submit-time guard (returns a message or null). When
+  // the ticket has no sheet count (maxQty 0) there's no cap.
+  function clampSheets(inputEl, maxQty) {
+    if (!inputEl || !(maxQty > 0)) return;
+    inputEl.addEventListener('input', function () {
+      var v = Number(inputEl.value);
+      if (!isNaN(v) && v > maxQty) inputEl.value = maxQty;
+    });
+  }
+  function sheetsError(value, maxQty) {
+    if (!(maxQty > 0)) return null;
+    var v = Number(value);
+    if (isNaN(v) || v <= 0) return 'Enter how many sheets ran.';
+    if (v > maxQty) return 'Only ' + maxQty + ' sheets on this ticket — you can\'t run more than that.';
+    return null;
+  }
+
   // In-app modal (replaces native confirm()/alert popups).
   // opts: { title, message(html-safe text), icon, confirmText, cancelText, variant, onConfirm }
   function showModal(opts) {
@@ -448,15 +465,15 @@
     }
     document.getElementById('backBtn').style.display = 'none';
     document.getElementById('tabbar').style.display = 'flex';
-    document.getElementById('reviewBtn').style.display = 'inline-block';
     state.view = 'all'; state.listView = 'all'; state.skid = null;
     renderAll();
   };
 
-  document.getElementById('reviewBtn').onclick = function () {
+  // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
+  function openReview() {
     enterDetailView();
     renderReview();
-  };
+  }
 
   var activeFilter = 'all';
   Array.prototype.forEach.call(document.querySelectorAll('#tabbar button'), function (btn) {
@@ -478,7 +495,6 @@
     nextViewToken(); // invalidate any in-flight list/detail response from the view we're leaving
     document.getElementById('tabbar').style.display = 'none';
     document.getElementById('backBtn').style.display = 'inline-block';
-    document.getElementById('reviewBtn').style.display = 'none';
   }
 
   // ---------------- Combined ticket list (every status, from Steel Tickets) ----------------
@@ -544,23 +560,30 @@
   function renderAll() {
     var view = document.getElementById('view');
     var tok = nextViewToken();
-    view.innerHTML = '<div class="loading">Loading tickets&hellip;</div>';
+    // Render the search + action buttons immediately so the search is usable right away; the
+    // ticket list loads in the background (and shows instantly if we already have it cached).
+    view.innerHTML =
+      '<div class="searchrow">' + searchBarHtml('mainSearch') + '</div>' +
+      '<div class="searchrow">' +
+        '<button class="btn" id="newJobBtn" style="flex:1">+ New Job</button>' +
+        '<button class="btn secondary" id="reviewJobsBtn" style="flex:1">Review Jobs</button>' +
+      '</div>' +
+      '<div id="allListContainer"><div class="loading">Loading tickets&hellip;</div></div>';
+    document.getElementById('newJobBtn').onclick = openCreateJob;
+    document.getElementById('reviewJobsBtn').onclick = openReview;
+    var searchInput = document.getElementById('mainSearch');
+    searchInput.oninput = function () { renderAllRows(searchInput.value); };
+    setActiveFilter(activeFilter);
+    if (allCache.length) renderAllRows(searchInput.value || ''); // instant from cache
     google.script.run.withSuccessHandler(function (all) {
       setCaches(all);
       if (tok !== viewToken) return; // superseded by a later navigation
-      view.innerHTML =
-        '<div class="searchrow">' +
-          searchBarHtml('mainSearch') +
-          '<button class="btn secondary" id="newJobBtn" style="flex:0 0 auto">+ New Job</button>' +
-        '</div>' +
-        '<div id="allListContainer"></div>';
-      document.getElementById('newJobBtn').onclick = openCreateJob;
-      var searchInput = document.getElementById('mainSearch');
-      searchInput.oninput = function () { renderAllRows(searchInput.value); };
-      setActiveFilter(activeFilter);
-      renderAllRows('');
+      var si = document.getElementById('mainSearch');
+      renderAllRows(si ? si.value : '');
     }).withFailureHandler(function (err) {
-      view.innerHTML = '<div class="card empty">Error loading tickets: ' + esc(err.message) + '</div>';
+      if (tok !== viewToken) return;
+      var c = document.getElementById('allListContainer');
+      if (c && !allCache.length) c.innerHTML = '<div class="card empty">Error loading tickets: ' + esc(err.message) + '</div>';
     }).getAllTickets();
   }
 
@@ -686,6 +709,10 @@
     if (steel['Litho Notes']) {
       html += '<div class="sub" style="margin-bottom:8px">Litho Notes: ' + esc(steel['Litho Notes']) + '</div>';
     }
+    var meta2 = [];
+    if (steel['Row'] !== '' && steel['Row'] != null) meta2.push('Row ' + esc(steel['Row']));
+    if (Number(steel['Spoilage']) > 0) meta2.push('Spoilage ' + esc(steel['Spoilage']) + ' sheets');
+    if (meta2.length) html += '<div class="sub" style="margin-bottom:6px">' + meta2.join(' &middot; ') + '</div>';
     var stamps = [];
     if (steel['First Coated At']) stamps.push('First coated ' + fmtStamp(steel['First Coated At'], steel['First Coated By']));
     if (steel['Approved At']) stamps.push('Approved ' + fmtStamp(steel['Approved At'], steel['Approved By']));
@@ -711,6 +738,8 @@
       html += coatingsEditorHtml(card);
     }
 
+    html += ticketDetailsEditorHtml(card);
+
     if (card.transactions && card.transactions.length) {
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">History</h3>' +
         renderHistoryTable(card.transactions) + '</div>';
@@ -722,6 +751,38 @@
     if ((status === 'WIP' || status === 'Pending') && card.coatings && card.coatings.length) {
       wireCoatingsEditor(card);
     }
+    wireTicketDetailsEditor(card);
+  }
+
+  // ----- Edit a skid's Row number and Spoilage count (sheets assumed spoiled) -----
+  function ticketDetailsEditorHtml(card) {
+    var steel = card.steel || {};
+    return '<div class="card"><h3 style="margin-top:0;font-size:15px">Edit ticket details</h3>' +
+      '<div class="sub" style="margin-bottom:8px">Correct the Row number, or record spoiled sheets for this skid. Changes are logged.</div>' +
+      '<div class="row">' +
+        '<div class="field"><label>Row number</label><input id="editRowInput" value="' + esc(steel['Row']) + '"></div>' +
+        '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="editSpoilInput" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
+      '</div>' +
+      '<div class="row">' + operatorFieldHtml('editDetailsOperator') + '</div>' +
+      '<button class="btn" id="saveTicketDetailsBtn">Save details</button>' +
+      '</div>';
+  }
+
+  function wireTicketDetailsEditor(card) {
+    var btn = document.getElementById('saveTicketDetailsBtn');
+    if (!btn) return;
+    btn.onclick = function () {
+      var operator = document.getElementById('editDetailsOperator').value.trim();
+      if (!operator) { toast('Enter an operator name'); return; }
+      var rowVal = document.getElementById('editRowInput').value;
+      var spoil = document.getElementById('editSpoilInput').value;
+      if (spoil !== '' && (isNaN(Number(spoil)) || Number(spoil) < 0)) { toast('Spoilage must be 0 or more'); return; }
+      btn.disabled = true; btn.textContent = 'Saving…';
+      runMutation('updateTicketDetails',
+        [card.skidId, { Row: rowVal, Spoilage: Number(spoil) || 0 }, operator, newOpId()],
+        function () { toast('Details updated'); renderCard(); },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Save details'; });
+    };
   }
 
   // ----- Edit coatings already applied to a ticket (change the item, or remove one) -----
@@ -889,6 +950,7 @@
       }
     }
     if (sheetsRunInput) sheetsRunInput.oninput = updatePreview;
+    clampSheets(sheetsRunInput, origQty);
     if (partialToggle) partialToggle.onchange = updatePreview;
     updatePreview();
 
@@ -902,6 +964,8 @@
       var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
       if (!group || !item) { toast('Pick a group and coating item first'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
+      var sErr = sheetsError(sheetsRun, origQty);
+      if (sErr) { toast(sErr); return; }
       logCoatingBtn.disabled = true;
       runMutation('applyCoating',
         [state.skid, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '', newOpId()],
@@ -1241,12 +1305,15 @@
       '<div class="field"><label>Litho Notes (optional)</label><input id="jrLithoNote"></div>' +
       '<button class="btn" id="jrAddTicketBtn">Add to Job</button>';
     if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
+    clampSheets(document.getElementById('jrSheets'), origQty);
     document.getElementById('jrAddTicketBtn').onclick = function () {
       var operator = document.getElementById('jrPickOperator').value.trim();
       if (!operator) { toast('Enter an operator name'); return; }
       var sheets = document.getElementById('jrSheets') ? document.getElementById('jrSheets').value : '';
       var partial = document.getElementById('jrPartial') ? document.getElementById('jrPartial').checked : false;
       var lithoNote = document.getElementById('jrLithoNote').value;
+      var sErr = sheetsError(sheets, origQty);
+      if (sErr) { toast(sErr); return; }
       var btn = document.getElementById('jrAddTicketBtn'); btn.disabled = true;
       runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId()],
         function () {
@@ -1544,6 +1611,7 @@
       }
     }
     if (sheetsRunInput) sheetsRunInput.oninput = updatePreview;
+    clampSheets(sheetsRunInput, origQty);
     if (partialToggle) partialToggle.onchange = updatePreview;
     updatePreview();
 
@@ -1551,6 +1619,8 @@
       var sheetsRun = sheetsRunInput ? sheetsRunInput.value : '';
       var lithoNote = document.getElementById('lithoNoteInput').value;
       var isPartialSkid = !!(partialToggle && partialToggle.checked);
+      var sErr = sheetsError(sheetsRun, origQty);
+      if (sErr) { toast(sErr); return; }
       var btn = document.getElementById('addTicketToJobBtn');
       btn.disabled = true; btn.textContent = 'Adding&hellip;';
       runMutation('jobAddTicket',

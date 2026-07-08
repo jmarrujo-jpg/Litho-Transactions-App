@@ -27,7 +27,7 @@ var SHEETS = {
 var STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP' };
 
 // Lifecycle columns appended after the steel columns on the Steel Tickets master tab.
-var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'Job ID', 'Split Of', 'First Coated At', 'First Coated By',
+var MASTER_EXTRA_COLS = ['Skid ID', 'Status', 'Job ID', 'Split Of', 'Spoilage', 'First Coated At', 'First Coated By',
   'Approved At', 'Approved By', 'Last Updated At', 'Last Updated By'];
 
 // Columns for the Litho Jobs tab (one row per job; Coatings JSON holds the reusable recipe).
@@ -947,6 +947,9 @@ function applyCoating_(skidId, group, sub, itemName, operatorName, notes, sheets
     result.scrapSheets = originalQty - sheets;
     result.scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
     scrapNote = 'Scrapped ' + result.scrapSheets + ' sheets (~' + result.scrapWeight + ' lbs, estimated) of ' + originalQty + ' on hand';
+    if (mMap['Spoilage']) { // roll the scrapped sheets into the skid's running Spoilage count
+      stampRow_(m, row, mMap, { 'Spoilage': (Number(obj['Spoilage']) || 0) + result.scrapSheets });
+    }
   }
 
   appendLithoNote([lithoNoteClean, scrapNote].filter(function (s) { return s; }).join(' | '));
@@ -1375,6 +1378,47 @@ function removeTicketCoating(skidId, passNumber, operatorName, opId) {
       ctx.obj['Job ID'] || '', skidId
     ]]);
     stampRow_(ctx.m, ctx.row, ctx.mMap, { 'Litho': afterVoid, 'Last Updated At': new Date(), 'Last Updated By': operatorName || '' });
+    return getTicketCard(skidId);
+  });
+}
+
+/** Edits a skid's editable metadata from the app: the Row number (free text, matches the
+ *  sheet) and/or the Spoilage count (non-negative — sheets assumed spoiled). Only changed
+ *  fields are written, and the change is recorded in the log. */
+function updateTicketDetails(skidId, fields, operatorName, opId) {
+  return withScriptLock_(function () {
+    if (guardOp_(opId)) return sanitizeForClient_({ duplicate: true, skidId: skidId });
+    normalizeMasterRows_();
+    var m = getMasterSheet_();
+    var mMap = ensureColumns_(m, ['Row', 'Spoilage']); // make sure both exist, refreshed map
+    var row = findRowBySkidId_(m, skidId);
+    if (row === -1) throw new Error('Skid not found: ' + skidId);
+    var headers = getHeaders_(m);
+    var obj = rowToObject_(headers, m.getRange(row, 1, 1, headers.length).getValues()[0]);
+    fields = fields || {};
+    var changes = {}, notes = [];
+    if (fields.hasOwnProperty('Row')) {
+      var newRow = String(fields.Row == null ? '' : fields.Row).trim();
+      var oldRow = String(obj['Row'] == null ? '' : obj['Row']).trim();
+      if (newRow !== oldRow) {
+        changes['Row'] = newRow;
+        notes.push('Row ' + (oldRow || '(blank)') + ' -> ' + (newRow || '(blank)'));
+      }
+    }
+    if (fields.hasOwnProperty('Spoilage')) {
+      var sp = Number(fields.Spoilage);
+      if (isNaN(sp) || sp < 0) throw new Error('Spoilage must be a non-negative number.');
+      var oldSp = Number(obj['Spoilage']) || 0;
+      if (oldSp !== sp) {
+        changes['Spoilage'] = sp;
+        notes.push('Spoilage ' + oldSp + ' -> ' + sp);
+      }
+    }
+    if (!Object.keys(changes).length) return getTicketCard(skidId);
+    changes['Last Updated At'] = new Date();
+    changes['Last Updated By'] = operatorName || '';
+    stampRow_(m, row, mMap, changes);
+    eventTx_(skidId, obj['Ticket'], 'TICKET DETAILS EDITED', operatorName, notes.join('; '), Number(obj['Litho']) || 0);
     return getTicketCard(skidId);
   });
 }
