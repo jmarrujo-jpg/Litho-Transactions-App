@@ -516,6 +516,28 @@ function normalizeMasterRows_() {
   }
 }
 
+/** Cheap check-then-fix used by reads: if any master row has a Ticket but no Skid ID or no
+ *  Status (a row just pasted in as intake), assign them now under the lock so the row is
+ *  openable immediately. No-op (three column reads, no writes) when everything's already
+ *  normalized, so it's safe to call from a frequently-hit read like getAllTickets. */
+function normalizeMasterIfNeeded_() {
+  var m = getMasterSheet_();
+  var map = headerMap_(m);
+  var last = m.getLastRow();
+  if (last < 2 || !map['Ticket'] || !map['Skid ID'] || !map['Status']) return false;
+  var tickets = m.getRange(2, map['Ticket'], last - 1, 1).getValues();
+  var skids = m.getRange(2, map['Skid ID'], last - 1, 1).getValues();
+  var statuses = m.getRange(2, map['Status'], last - 1, 1).getValues();
+  var needs = false;
+  for (var i = 0; i < tickets.length; i++) {
+    if (!String(tickets[i][0]).trim()) continue;
+    if (!String(skids[i][0]).trim() || !String(statuses[i][0]).trim()) { needs = true; break; }
+  }
+  if (!needs) return false;
+  withScriptLock_(function () { normalizeMasterRows_(); });
+  return true;
+}
+
 /** Retry-safe writes: every mutating call carries a client-generated opId. If we've seen it
  *  (within the cache window), the first call already did the work — report a duplicate so
  *  the client can treat the retry as success. Check/set only under withScriptLock_. */
@@ -663,6 +685,7 @@ function guessGroupForEndUse_(endUse) {
 
 /** Every ticket, one master read. Ticket data is never cached — always live. */
 function getAllTickets() {
+  normalizeMasterIfNeeded_(); // assign Skid IDs to any freshly pasted intake rows before listing
   var m = getMasterSheet_();
   var headers = getHeaders_(m);
   var last = m.getLastRow();
