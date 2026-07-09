@@ -262,6 +262,37 @@ function doGet(e) {
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
+// ---- JSON API (for hosting the UI elsewhere, e.g. GitHub Pages via a Cloudflare Worker) ----
+// The app can run two ways: served by Apps Script (doGet + google.script.run), OR served as a
+// static page that POSTs calls here as JSON. doPost runs ONE whitelisted function and returns
+// its result as JSON. Deploy this as "Anyone", keep the /exec URL secret inside the Worker, and
+// gate human access at Cloudflare (Access / Google SSO). Only the functions the client actually
+// calls are exposed — editor-only helpers (migrations, seed, audit) are deliberately omitted.
+var API_METHODS = {
+  getAllTickets: getAllTickets, getTicketCard: getTicketCard, getRateTree: getRateTree,
+  getOperatorNames: getOperatorNames, getJobsForDate: getJobsForDate, getJobDetail: getJobDetail,
+  applyCoating: applyCoating, createManualTicket: createManualTicket, updateWipLithoCost: updateWipLithoCost,
+  editTicketCoating: editTicketCoating, removeTicketCoating: removeTicketCoating, updateTicketDetails: updateTicketDetails,
+  createJob: createJob, jobAddTicket: jobAddTicket, addCoatingToJob: addCoatingToJob,
+  removeTicketFromJob: removeTicketFromJob, approveJob: approveJob
+};
+
+function doPost(e) {
+  var out;
+  try {
+    var payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    // Optional shared secret: if the script property API_SECRET is set, callers must match it.
+    var expected = PropertiesService.getScriptProperties().getProperty('API_SECRET');
+    if (expected && String(payload.secret || '') !== String(expected)) throw new Error('Unauthorized.');
+    var fn = API_METHODS[payload.fn];
+    if (typeof fn !== 'function') throw new Error('Unknown function: ' + payload.fn);
+    out = { ok: true, result: fn.apply(null, payload.args || []) };
+  } catch (err) {
+    out = { ok: false, error: (err && err.message) ? err.message : String(err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
 /**
  * Fill this in with your real operator names whenever you're ready — one edit here
  * is all it takes, no changes needed anywhere else. Until then the name field on the
