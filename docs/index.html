@@ -153,7 +153,7 @@
   // When it's served as a static page (e.g. GitHub Pages), we recreate google.script.run so the
   // app's existing calls transparently POST to the Cloudflare Worker as JSON. Set LITHO_API_URL
   // to your Worker URL (LITHO_API_SECRET only if you set an API_SECRET script property).
-  var LITHO_API_URL = '';    // e.g. 'https://litho.cscmfg.com/api' — leave '' when Apps Script hosts the page
+  var LITHO_API_URL = '/api';  // Pages Function on the same origin. Ignored when Apps Script hosts the page.
   var LITHO_API_SECRET = ''; // optional; must match the API_SECRET script property if you set one
   (function installHostingShim() {
     if (window.google && window.google.script && window.google.script.run) return; // real Apps Script bridge present
