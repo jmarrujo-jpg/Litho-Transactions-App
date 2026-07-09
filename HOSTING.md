@@ -1,87 +1,80 @@
-# Hosting the Litho Floor App
-
-The app can run two ways, both from the **same** `Code.gs` and UI:
-
-1. **Apps Script hosting** — open the Apps Script `/exec` URL directly. Nothing else needed;
-   this stays the fallback.
-2. **Cloudflare Pages (recommended)** — the UI is a static page on Cloudflare Pages (built from
-   this GitHub repo); a bundled Pages Function forwards its calls to a JSON version of the
-   backend; Cloudflare Access gates the whole thing to cscmfg.com Google logins.
+# Hosting: GitHub Pages front end + Cloudflare Worker backend
 
 ```
-Browser ──▶ your-site.pages.dev          (static UI from /docs)
-        ──▶ your-site.pages.dev/api       (Pages Function — holds the secret Apps Script URL)
-        ──▶ Apps Script /exec (doPost)    ("Anyone" JSON API; URL never shown to the browser)
-   ▲
-   └── Cloudflare Access (Google SSO, @cscmfg.com) gates the site before anything loads.
+Browser (github.io page)  ──fetch {fn,args}──▶  Cloudflare Worker  ──▶  Google Sheet
+   docs/index.html                                worker.js              (service account)
 ```
 
-Everything is on one Cloudflare domain, so the page and `/api` are same-origin — no CORS, no
-DNS dance, and Access covers both.
+- **GitHub Pages** serves the UI (`docs/index.html`) — a plain `*.github.io` URL, no custom
+  domain needed.
+- **Cloudflare Worker** (`worker.js`) is the backend: it reads/writes the spreadsheet directly
+  with a **Google service account** (no Apps Script). Self-contained — paste it into a dashboard
+  Worker, no build step.
+- The Apps Script app keeps working as a fallback the whole time. **Stage 1 = reads only** on the
+  new backend; writes still go through Apps Script until Stage 2 is finished.
 
-## What's already in the repo
-- `Code.gs` — has a `doPost(e)` JSON API (whitelist of exactly the functions the UI calls).
-- `docs/index.html` — the UI for Pages (copy of `Index.HTML`). Its hosting shim recreates
-  `google.script.run` over `fetch` to `/api` when not served by Apps Script.
-- `functions/api.js` — the Pages Function that proxies `/api` → Apps Script.
-- `cloudflare-worker.js` — a standalone-Worker version (only if you ever want a separate Worker
-  on a custom domain instead of the Pages Function; not needed for the steps below).
-
-> `docs/index.html` is a copy of `Index.HTML`. After a UI change, run
-> `cp Index.HTML docs/index.html` (or ask and it'll be regenerated).
+> Not using Cloudflare Pages for this. If you started a Pages project earlier, you can delete it.
 
 ---
 
-## Step 1 — Deploy Apps Script as an "Anyone" JSON API
-Your cscmfg.com-restricted deployment can't be called by a server, so make a second one:
-1. Spreadsheet → **Extensions → Apps Script**, make sure the latest `Code.gs` is pasted, **Save**.
-2. **Deploy → New deployment → ⚙ → Web app.**
-3. **Execute as: Me** · **Who has access: Anyone** → **Deploy** → authorize.
-4. Copy the URL — `https://script.google.com/macros/s/AKfyc.../exec` (**no** `/a/macros/cscmfg.com/`).
-   Keep it private; it only goes into Cloudflare.
-5. *(Optional)* Apps Script → **Project Settings → Script Properties** → add `API_SECRET` = a long
-   random string. If set, add the same value in Step 2.
+## Step 1 — Service account can reach the sheet
+1. Share the **Traceability Test** spreadsheet with the service account's email
+   (`…@…iam.gserviceaccount.com`, the `client_email` in the key JSON) — give it **Editor**.
+2. Google Cloud Console → the service account's project → **APIs & Services → Library →
+   Google Sheets API → Enable**.
 
-## Step 2 — Create the Cloudflare Pages project
-1. Cloudflare → **Workers & Pages → Create → Pages → Connect to Git** → authorize GitHub, pick
-   `jmarrujo-jpg/litho-transactions-app`.
-2. **Production branch:** `claude/litho-transactions-review-m1m762` (or your default branch if you
-   merge this one first).
-3. Build settings: **Framework preset: None** · **Build command:** *(leave empty)* ·
-   **Build output directory:** `docs`.
-4. **Save and Deploy.** You get a URL like `https://litho-transactions-app.pages.dev`.
-5. Project → **Settings → Variables and secrets → Add** (Production):
-   - `APPS_SCRIPT_URL` = the "Anyone" `/exec` URL from Step 1 (mark as **Secret / Encrypt**).
-   - `API_SECRET` = same value as Step 1, only if you set one (**Secret**).
-   - **Save**, then **Deployments → Retry deployment** (so the function picks up the variables).
+## Step 2 — Create the Cloudflare Worker
+1. Cloudflare → **Workers & Pages → Create → Create Worker** → name it e.g. `litho-api` → Deploy.
+2. **Edit code** → delete the template → paste all of **`worker.js`** → **Deploy**.
+3. **Settings → Variables and Secrets → Add:**
+   - `GCP_SA_EMAIL` (Secret) = the service account email.
+   - `GCP_SA_PRIVATE_KEY` (Secret) = the `private_key` value from the key JSON (paste verbatim;
+     the `\n`s are fine).
+   - `SHEET_ID` (optional) — only if it's ever not the default.
+   - `ALLOWED_ORIGIN` (optional) = `https://<youruser>.github.io` to lock CORS to your page.
+   - `API_TOKEN` (optional Secret) = a long random string, if you want a shared-token gate.
+   - Deploy again after adding variables.
+4. Copy the Worker URL, e.g. `https://litho-api.<subdomain>.workers.dev`.
+5. Test: open that URL in a browser → `{"ok":true,"service":"litho-api","stage":"reads"}`.
 
-## Step 3 — Confirm it works (before locking it down)
-1. Open `https://<your-site>.pages.dev/api` → you should see
-   `{"ok":true,"service":"litho-api",...}` (the function is live).
-2. Open `https://<your-site>.pages.dev` → the app loads and the ticket list appears.
-3. Log a coating / create a job → confirm it writes to the sheet (the proxy is reaching Apps
-   Script). `LITHO_API_URL` is already set to `/api` in the code, so nothing to edit.
+## Step 3 — Point the front end at the Worker
+In `docs/index.html`, set near the top:
+```js
+var LITHO_API_URL = 'https://litho-api.<subdomain>.workers.dev';  // your Worker URL
+var LITHO_API_SECRET = '';   // set only if you added API_TOKEN in Step 2
+```
+Commit. (Or paste me the Worker URL and I'll set it and push.)
 
-## Step 4 — Gate it with Google SSO (Cloudflare Access)
-1. Cloudflare → **Zero Trust → Access → Applications → Add an application → Self-hosted.**
-2. **Application domain:** your `*.pages.dev` hostname (covers the page and `/api`).
-3. **Identity providers:** add **Google Workspace** if not present (Zero Trust → Settings →
-   Authentication).
-4. **Policy:** Action **Allow**, rule **Emails ending in** `@cscmfg.com` → **Save.**
-5. Reopen the site in a fresh browser → Google sign-in → after a cscmfg.com login it loads.
+## Step 4 — Turn on GitHub Pages
+1. GitHub repo → **Settings → Pages**.
+2. **Custom domain:** clear it if anything is there (we're using the plain github.io URL).
+3. **Source: Deploy from a branch** → Branch `claude/litho-transactions-review-m1m762`,
+   Folder **`/docs`** → Save. *(The repo root has `Index.HTML` with a capital I, which Pages
+   won't serve as an index — `/docs` has the correct lowercase `index.html`.)*
+4. Wait ~1 min → open the `https://<youruser>.github.io/litho-transactions-app/` URL.
 
-## Step 5 (optional) — Nicer URL
-Pages project → **Custom domains → Set up a domain** → `litho.cscmfg.com`. Because the domain is
-in your Cloudflare account, DNS + HTTPS are created automatically (no GitHub-Pages DNS dance).
-Then point the Access application at `litho.cscmfg.com` too.
-
----
+## Step 5 — Verify
+- The app loads the ticket list **from the sheet, fast**, and you can browse tickets and the
+  Review tab.
+- Actions (log coating, jobs, edits) show "not on the new backend yet (Stage 2)" — expected.
+  Keep using Apps Script for real work until Stage 2 ships.
 
 ## Troubleshooting
-- `/api` returns **500 "APPS_SCRIPT_URL not set"** → the env var didn't save, or you didn't
-  redeploy after adding it (Step 2.5).
-- App loads but every action errors → open dev-tools Network on an `/api` call: a login
-  redirect/401 means Access isn't covering `/api` (use the bare hostname in Step 4, not a path);
-  a 502 means the Apps Script URL is wrong or still cscmfg-restricted (must be the "Anyone" one).
-- Still works on the plain Apps Script `/exec` URL — the shim detects the real bridge and stays
-  out of the way, so that remains a fallback.
+- App shows **"Service account not configured"** → the Worker secrets didn't save, or you didn't
+  redeploy after adding them.
+- **"Sheets API 403"** → the sheet isn't shared with the service account email, or the Sheets API
+  isn't enabled on its project.
+- **Nothing loads / CORS error in dev-tools** → `LITHO_API_URL` in `docs/index.html` doesn't
+  match the Worker URL, or `ALLOWED_ORIGIN` doesn't match your github.io origin (or leave it
+  unset to allow all).
+- Page 404 "provide an index.html" → Pages Source is the repo root; switch it to **`/docs`**.
+
+## Security note
+With a plain github.io page, the optional `API_TOKEN` lives in the page source, so it only
+deters casual access. It's fine for an internal floor tool; if you later want a real login gate,
+we can move the page onto a Cloudflare-proxied domain and add Cloudflare Access (Google SSO).
+
+## Stage 2 (next)
+Writes — logging coatings, jobs/approval, edits — added to `worker.js`, with a Durable Object
+handling the Skid/Job ID counters and one-operator-at-a-time safety. Only after you've tested
+Stage 2 do you switch the floor off Apps Script.
