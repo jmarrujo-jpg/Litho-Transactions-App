@@ -1,47 +1,37 @@
 /**
- * Litho Floor App — Cloudflare Pages Function (API proxy)
+ * Litho Floor App — Cloudflare Pages Function (backend entry, serves at /api).
  *
- * Deploys automatically with the Pages site and serves at  <your-site>/api .
- * It's the only thing that knows the Apps Script URL (kept as a Pages secret,
- * never sent to the browser). Because it's the same origin as the page, no CORS
- * is needed, and Cloudflare Access protects it along with the rest of the site.
+ * The browser POSTs {fn, args} here; this runs the corresponding backend function (which talks
+ * to the Google Sheet via a service account) and returns {ok, result} or {ok:false, error}.
  *
- * Set these in the Pages project (Settings > Variables and secrets):
- *   APPS_SCRIPT_URL  (secret)  the "Anyone" Apps Script /exec URL
- *   API_SECRET       (secret)  optional; matches the API_SECRET script property if you set one
+ * Pages env vars / secrets (Settings > Variables and secrets):
+ *   GCP_SA_EMAIL        service account email (client_email from the key JSON)
+ *   GCP_SA_PRIVATE_KEY  the private_key from the key JSON (PEM)
+ *   SHEET_ID            spreadsheet id (optional; defaults to the known one)
  */
+import { handle } from './_lib/backend.js';
+
+const json = (obj, status) =>
+  new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+
 export async function onRequestPost(context) {
   const { request, env } = context;
-  if (!env.APPS_SCRIPT_URL) return json({ ok: false, error: 'APPS_SCRIPT_URL not set' }, 500);
-
   let payload;
   try {
     payload = JSON.parse((await request.text()) || '{}');
   } catch (e) {
     return json({ ok: false, error: 'Bad request body' }, 400);
   }
-  // Inject the shared secret server-side so it never lives in the public page.
-  if (env.API_SECRET) payload.secret = env.API_SECRET;
-
   try {
-    const upstream = await fetch(env.APPS_SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
-      redirect: 'follow',
-    });
-    const text = await upstream.text();
-    return new Response(text, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const result = await handle(payload.fn, payload.args || [], env);
+    return json({ ok: true, result }, 200);
   } catch (e) {
-    return json({ ok: false, error: 'Upstream error: ' + (e && e.message ? e.message : String(e)) }, 502);
+    // 200 with ok:false so the client's failure handler surfaces the message cleanly.
+    return json({ ok: false, error: e && e.message ? e.message : String(e) }, 200);
   }
 }
 
-// A GET to /api just confirms the function is deployed (handy for a quick check).
+// GET /api is a health check.
 export function onRequestGet() {
-  return json({ ok: true, service: 'litho-api', hint: 'POST {fn,args} here' }, 200);
-}
-
-function json(obj, status) {
-  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+  return json({ ok: true, service: 'litho-api', stage: 'reads', hint: 'POST {fn,args}' }, 200);
 }
