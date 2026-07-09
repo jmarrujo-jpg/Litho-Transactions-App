@@ -37,9 +37,16 @@ const WRITE_FNS = ['applyCoating', 'createManualTicket', 'updateWipLithoCost', '
 
 export default {
   async fetch(request, env) {
+    // Echo the caller's Origin so the CORS header always matches (avoids a misconfigured
+    // ALLOWED_ORIGIN silently blocking the app). If ALLOWED_ORIGIN is set to a specific origin,
+    // only that origin is allowed; otherwise any origin is echoed back.
+    const reqOrigin = request.headers.get('Origin') || '*';
+    const allowOrigin = (env.ALLOWED_ORIGIN && env.ALLOWED_ORIGIN !== '*')
+      ? (env.ALLOWED_ORIGIN === reqOrigin ? reqOrigin : env.ALLOWED_ORIGIN)
+      : reqOrigin;
     const cors = {
-      'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Origin': allowOrigin,
+      'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Vary': 'Origin',
     };
