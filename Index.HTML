@@ -85,6 +85,9 @@
   .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .colgrid { display: flex; gap: 16px; flex-wrap: wrap; }
+  .colstack { flex: 1; min-width: 150px; }
+  .colstack .field { min-width: 0; }
   .field { flex: 1; min-width: 160px; margin-bottom: 12px; }
   .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .field select, .field input, .field textarea {
@@ -467,32 +470,44 @@
     attempt();
   }
 
-  // Steel-spec fields captured on Add Ticket and Edit ticket details, laid out like the paper
-  // ticket (QTY first). `col` is the Steel Tickets column; `id` is the input id (prefixed).
+  // Steel-spec fields captured on Add Ticket and Edit ticket details. `col` is the Steel
+  // Tickets column; `id` is the input id (prefixed to keep Add vs Edit distinct). Laid out in
+  // three fixed columns (TICKET_COLUMNS) mirroring the paper ticket.
   var TICKET_FIELDS = [
     { id: 'Qty', col: 'QTY/LOAD', label: 'QTY', num: true },
-    { id: 'Weight', col: 'Weight', label: 'Weight', num: true },
     { id: 'BC', col: 'B/C', label: 'B/C' },
     { id: 'Type', col: 'TC', label: 'Type' },
     { id: 'Length', col: 'Length', label: 'Length' },
     { id: 'Mill', col: 'Mill', label: 'Mill' },
-    { id: 'BW', col: 'BW', label: 'BW' },
+    { id: 'BW', col: 'BW', label: 'Basis Weight' },
+    { id: 'CoilSheet', col: 'Coil/Sheet', label: 'Coil / Sheet' },
     { id: 'EndUse', col: 'End Use', label: 'End Use' },
     { id: 'Supplier', col: 'Supplier', label: 'Supplier' },
     { id: 'Temper', col: 'TM', label: 'Temper' },
     { id: 'Width', col: 'Width', label: 'Width' },
-    { id: 'Comments', col: 'Comments', label: 'Comments', wide: true }
+    { id: 'Weight', col: 'Weight', label: 'Weight', num: true },
+    { id: 'Comments', col: 'Comments', label: 'Comments' }
+  ];
+  var TICKET_COLUMNS = [
+    ['Qty', 'BC', 'Type', 'Length', 'Mill'],
+    ['BW', 'CoilSheet', 'EndUse'],
+    ['Supplier', 'Temper', 'Width', 'Weight', 'Comments']
   ];
 
-  // Renders the steel-spec inputs (prefix keeps Add vs Edit ids distinct); prefill from a steel row.
+  // Renders the steel-spec inputs in three columns (prefix keeps Add vs Edit ids distinct);
+  // prefill from a steel row.
   function ticketFieldsHtml(prefix, steel) {
     steel = steel || {};
-    return TICKET_FIELDS.map(function (f) {
+    function fieldHtml(id) {
+      var f = TICKET_FIELDS.filter(function (x) { return x.id === id; })[0];
+      if (!f) return '';
       var val = steel[f.col] != null ? steel[f.col] : '';
-      return '<div class="field"' + (f.wide ? ' style="min-width:100%"' : '') + '>' +
-        '<label>' + esc(f.label) + '</label>' +
+      return '<div class="field"><label>' + esc(f.label) + '</label>' +
         '<input id="' + prefix + f.id + '"' + (f.num ? ' type="number" min="0"' : '') + ' value="' + esc(val) + '"></div>';
-    }).join('');
+    }
+    return '<div class="colgrid">' + TICKET_COLUMNS.map(function (col) {
+      return '<div class="colstack">' + col.map(fieldHtml).join('') + '</div>';
+    }).join('') + '</div>';
   }
 
   // Collects the steel-spec inputs back into a { column: value } object for the server.
@@ -817,7 +832,7 @@
       '</div>' +
       '<div class="card"><h3 style="margin-top:0;font-size:15px">Ticket details</h3>' +
         '<div class="sub" style="margin-bottom:10px">Fill in what you can from the steel ticket.</div>' +
-        '<div class="row">' + ticketFieldsHtml('at', {}) + '</div>' +
+        ticketFieldsHtml('at', {}) +
       '</div>' +
       '<div class="card">' + operatorFieldHtml('atOperator') +
         '<button class="btn success" id="saveAddTicketBtn">Add Ticket</button></div>';
@@ -947,7 +962,7 @@
     var steel = card.steel || {};
     return '<div class="card"><h3 style="margin-top:0;font-size:15px">Edit ticket details</h3>' +
       '<div class="sub" style="margin-bottom:8px">Update this skid\'s steel details, correct the Row number, or record spoiled sheets. Changes are logged.</div>' +
-      '<div class="row">' + ticketFieldsHtml('ed', steel) + '</div>' +
+      ticketFieldsHtml('ed', steel) +
       '<div class="row">' +
         '<div class="field"><label>Row number</label><input id="edRow" value="' + esc(steel['Row']) + '"></div>' +
         '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="edSpoil" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +

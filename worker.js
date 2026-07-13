@@ -37,8 +37,8 @@ const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTI
 
 // Editable steel-spec columns captured on Add Ticket and Edit ticket details (mirrors the
 // paper ticket; QTY first). B/C and Mill are new columns created on demand.
-const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill', 'BW', 'End Use', 'Supplier', 'TM', 'Width', 'Comments'];
-const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'BW', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
+const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill', 'BW', 'Coil/Sheet', 'End Use', 'Supplier', 'TM', 'Width', 'Comments'];
+const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'Basis Weight', 'Coil/Sheet': 'Coil / Sheet', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
 const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true };
 
 export default {
@@ -60,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-3' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-4' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
