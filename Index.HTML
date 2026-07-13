@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.4.0</span>
+      <span class="version" id="appVersion">v1.5.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1374,14 +1374,26 @@
     var approved = job.status === 'Approved';
     var html = '';
 
+    var totalLitho = (job.tickets || []).reduce(function (s, t) { return s + (Number(t.litho) || 0); }, 0);
+    var coatItems = String(job.coatingsSummary || '').split(' | ').filter(Boolean);
+    var coatingsBlock = coatItems.length
+      ? '<div style="margin-top:8px"><div class="sub">Coatings</div>' +
+          '<ul style="margin:4px 0 0;padding-left:20px;font-size:15px;line-height:1.6">' +
+          coatItems.map(function (c) { return '<li>' + esc(c) + '</li>'; }).join('') + '</ul></div>'
+      : '<div class="sub" style="margin-top:4px">Coatings: (none)</div>';
+
     html += '<div class="card">' +
       '<div class="ticket-id">' + esc(job.description || '(untitled job)') +
         ' <span class="badge ' + (approved ? 'wip' : 'inprogress') + '">' + esc(job.status) + '</span>' +
         ' <span class="sub" style="font-weight:400">' + esc(job.jobId) + '</span></div>' +
-      '<div class="sub" style="margin-top:4px">Coatings: ' + esc(job.coatingsSummary || '(none)') + '</div>' +
-      (job.notes ? '<div class="sub">Notes: ' + esc(job.notes) + '</div>' : '') +
-      '<div class="sub">Created by ' + esc(job.createdBy) + ' &middot; ' + esc(job.createdAt) + '</div>' +
+      coatingsBlock +
+      (job.notes ? '<div class="sub" style="margin-top:6px">Notes: ' + esc(job.notes) + '</div>' : '') +
+      '<div class="sub" style="margin-top:6px">Created by ' + esc(job.createdBy) + ' &middot; ' + esc(job.createdAt) + '</div>' +
       (approved ? '<div class="sub">Approved by ' + esc(job.approvedBy) + ' &middot; ' + esc(job.approvedAt) + '</div>' : '') +
+      '<div class="row" style="margin-top:10px">' +
+        '<div class="stat"><div class="num">' + money(totalLitho) + '</div><div class="label">Total litho cost</div></div>' +
+        '<div class="stat"><div class="num">' + job.tickets.length + '</div><div class="label">Tickets</div></div>' +
+      '</div>' +
       '</div>';
 
     // Picked-ticket entry sits at the top (like New Job) so the sheets/notes form appears
@@ -1405,10 +1417,13 @@
     html += '</div>';
 
     if (!approved) {
-      // Add a ticket
+      // Add a ticket — collapsed behind a button; pressing it opens the search + list.
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a ticket</h3>' +
-        searchBarHtml('jobReviewSearch') +
-        '<div id="jobReviewPicker" style="margin-top:10px"></div>' +
+        '<button class="btn secondary" id="showAddTicketBtn" style="width:100%">+ Add Tickets</button>' +
+        '<div id="jobAddTicketArea" style="display:none;margin-top:10px">' +
+          searchBarHtml('jobReviewSearch') +
+          '<div id="jobReviewPicker" style="margin-top:10px"></div>' +
+        '</div>' +
         '</div>';
 
       // Add a coating to the recipe
@@ -1461,14 +1476,16 @@
       };
     });
 
-    // Ticket picker (Current skids only)
-    var search = document.getElementById('jobReviewSearch');
-    if (search) {
-      if (!queueCache.length) {
-        google.script.run.withSuccessHandler(function (all) { setCaches(all); renderJobReviewPicker(''); }).getAllTickets();
-      } else { renderJobReviewPicker(''); }
-      search.oninput = function () { renderJobReviewPicker(search.value); };
-    }
+    // Ticket picker stays hidden until "Add Tickets" is pressed (Current skids only).
+    var showAddBtn = document.getElementById('showAddTicketBtn');
+    if (showAddBtn) showAddBtn.onclick = function () {
+      var area = document.getElementById('jobAddTicketArea');
+      if (area) area.style.display = 'block';
+      showAddBtn.style.display = 'none';
+      ensureAllCache(function () { renderJobReviewPicker(''); });
+      var search = document.getElementById('jobReviewSearch');
+      if (search) { search.oninput = function () { renderJobReviewPicker(search.value); }; search.focus(); }
+    };
 
     // Add-coating cascade
     var jrGroup = document.getElementById('jrGroup'), jrSub = document.getElementById('jrSub'),
