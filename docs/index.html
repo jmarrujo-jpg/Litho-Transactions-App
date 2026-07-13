@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.3.2</span>
+      <span class="version" id="appVersion">v1.4.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -545,6 +545,36 @@
   function whoRanIt(steel) {
     steel = steel || {};
     return steel['First Coated By'] || steel['Last Updated By'] || '';
+  }
+
+  // Foreman picker: a dropdown of known foremen plus "Other", which reveals a free-text box.
+  var FOREMEN = ['Joel', 'Alex'];
+  var FOREMAN_OTHER = '__OTHER__';
+  function foremanFieldHtml(prefix, label) {
+    var opts = FOREMEN.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+    return '<div class="field"><label>' + esc(label || 'Foreman name') + '</label>' +
+      '<select id="' + prefix + 'Sel"><option value="">--</option>' + opts +
+        '<option value="' + FOREMAN_OTHER + '">Other</option></select>' +
+      '<input id="' + prefix + 'Other" placeholder="Enter name" autocomplete="off" style="display:none;margin-top:8px"></div>';
+  }
+  function wireForemanField(prefix) {
+    var sel = document.getElementById(prefix + 'Sel');
+    var other = document.getElementById(prefix + 'Other');
+    if (!sel || !other) return;
+    sel.onchange = function () {
+      var isOther = sel.value === FOREMAN_OTHER;
+      other.style.display = isOther ? 'block' : 'none';
+      if (isOther) other.focus(); else other.value = '';
+    };
+  }
+  function foremanValue(prefix) {
+    var sel = document.getElementById(prefix + 'Sel');
+    if (!sel) return '';
+    if (sel.value === FOREMAN_OTHER) {
+      var other = document.getElementById(prefix + 'Other');
+      return other ? other.value.trim() : '';
+    }
+    return sel.value.trim();
   }
 
   function loadOperatorNames() {
@@ -1397,8 +1427,8 @@
 
       // Approve
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Approve job</h3>' +
-        '<div class="sub" style="margin-bottom:10px">Approving moves all ' + job.tickets.length + ' ticket(s) to WIP and locks the job.</div>' +
-        operatorFieldHtml('approveOperator') +
+        '<div class="sub" style="margin-bottom:10px">Approving moves ' + job.tickets.length + ' ticket(s) to WIP and locks the job.</div>' +
+        foremanFieldHtml('approveForeman', 'Foreman name') +
         '<button class="btn success" id="approveJobBtn"' + (job.tickets.length ? '' : ' disabled') + '>Approve &amp; Send to WIP</button>' +
         (job.tickets.length ? '' : '<div class="sub" style="margin-top:8px">Add at least one ticket first.</div>') +
         '</div>';
@@ -1456,10 +1486,11 @@
     };
 
     // Approve
+    wireForemanField('approveForeman');
     var approveBtn = document.getElementById('approveJobBtn');
     if (approveBtn) approveBtn.onclick = function () {
-      var operator = document.getElementById('approveOperator').value.trim();
-      if (!operator) { toast('Enter an operator name'); return; }
+      var operator = currentApprover();
+      if (!operator) { toast('Select or enter a foreman name'); return; }
       showConfirm('Approve job', 'Approve ' + state.jobId + ' and move ' + job.tickets.length + ' ticket(s) to WIP?', function () {
         approveBtn.disabled = true;
         runMutation('approveJob', [state.jobId, operator, newOpId()],
@@ -1470,7 +1501,9 @@
   }
 
   function currentApprover() {
-    var el = document.getElementById('approveOperator') || document.getElementById('jrOperator');
+    var f = foremanValue('approveForeman');
+    if (f) return f;
+    var el = document.getElementById('jrOperator');
     return el ? el.value.trim() : '';
   }
 
