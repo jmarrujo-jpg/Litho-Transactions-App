@@ -22,6 +22,8 @@ const MASTER = 'Steel Tickets';
 const TRANSACTIONS = 'Litho Transactions';
 const JOBS = 'Litho Jobs';
 const RATE = 'Litho Rate Table';
+const PRODUCTION = 'Production Runs';
+const PRODUCTION_HEADERS = ['Run ID', 'Created On', 'Operator', 'Machine', 'Status', 'Skid Count', 'Notes', 'Submitted On', 'Finished On', 'Op ID'];
 
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
@@ -31,7 +33,7 @@ const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
   'LITHO PRINT TWO COLOR - ONE', 'LITHO PRINT TWO COLOR - TWO', 'LITHO PRINT TWO COLOR - THREE',
   'LITHO PRINT TWO COLOR - FOUR', 'LITHO PRINT TWO COLOR - FIVE', 'LITHO PRINT TWO COLOR - SIX'];
 
-const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP' };
+const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTION: 'In Production', USED: 'Used' };
 
 export default {
   async fetch(request, env) {
@@ -52,7 +54,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'writes-2' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-1' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -105,6 +107,27 @@ async function handle(fn, args, env) {
       return removeTicketFromJob(sheets, args[0], args[1], args[2], args[3]);
     case 'approveJob': // (jobId, operator, opId)
       return approveJob(sheets, args[0], args[1]);
+    // ---- production ----
+    case 'getProductionRuns': // (dateStr, scope)
+      return getProductionRuns(sheets, args[0], args[1]);
+    case 'getRunDetail': // (runId)
+      return getRunDetail(sheets, args[0]);
+    case 'createRun': // (machine, operator, notes, opId)
+      return createRun(sheets, args[0], args[1], args[2], args[3]);
+    case 'runAddSkid': // (runId, skidId, operator, opId)
+      return runAddSkid(sheets, args[0], args[1], args[2], args[3]);
+    case 'runRemoveSkid': // (runId, skidId, operator, opId)
+      return runRemoveSkid(sheets, args[0], args[1], args[2], args[3]);
+    case 'updateRun': // (runId, fields, operator, opId)
+      return updateRun(sheets, args[0], args[1], args[2], args[3]);
+    case 'updateRunSkid': // (runId, skidId, fields, operator, opId)
+      return updateRunSkid(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'swapRunSkid': // (runId, oldSkidId, newSkidId, operator, opId)
+      return swapRunSkid(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'submitRun': // (runId, operator, opId)
+      return submitRun(sheets, args[0], args[1], args[2]);
+    case 'finishRun': // (runId, usedMap, operator, opId)
+      return finishRun(sheets, args[0], args[1], args[2], args[3]);
     default:
       throw new Error('Unknown function: ' + fn);
   }
@@ -181,6 +204,10 @@ async function makeSheets(env) {
     async batchUpdate(data) {
       return call(base + '/values:batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+    },
+    async addSheet(title) {
+      return call(base + ':batchUpdate',
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }) });
     },
   };
 }
@@ -785,4 +812,248 @@ async function approveJob(sheets, jobId, operator) {
   }
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Status': 'Approved', 'Approved At': nowStamp(), 'Approved By': operator || '' });
   return getJobDetail(sheets, jobId);
+}
+
+// ================= PRODUCTION ======================================================
+// Tracks which steel skid is used on which machine and when. A "run" (Production Runs tab,
+// mirrors Litho Jobs) is one Line/Press; skids are loaded onto it (Status -> In Production,
+// Loaded On stamped), the run is submitted for review, then Finish Work marks the skids Used
+// (with partial-usage split) and stamps Finished On. Dates only — no times. Reuses the same
+// readTab/stampCells/ensureColumn/appendRowObj/opAlreadyDone/fmtId/eventTx scaffolding.
+
+// Creates the tab with headers if it doesn't exist yet (first run ever).
+async function ensureTab(sheets, title, headers) {
+  let vals = null;
+  try { vals = await sheets.read(title); } catch (e) { vals = null; }
+  if (vals === null) {
+    await sheets.addSheet(title);
+    await sheets.update("'" + title + "'!A1", [headers]);
+    return;
+  }
+  if (!vals.length) await sheets.update("'" + title + "'!A1", [headers]);
+}
+
+async function runDetailSkids(masterRows, runId) {
+  return masterRows.filter((o) => String(o['Run ID']).trim() === String(runId).trim()).map((o) => ({
+    skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'] || '', loadedOn: toYMD(o['Loaded On']),
+    finishedOn: toYMD(o['Finished On']), qty: num(o['QTY/LOAD']), weight: num(o['Weight']),
+    bw: o['BW'], type: o['TC'], temper: o['TM'], endUse: o['End Use'], width: o['Width'], length: o['Length'],
+    litho: num(o['Litho']), notes: o['Litho Notes'] || '',
+  }));
+}
+
+async function getProductionRuns(sheets, dateStr, scope) {
+  let rows;
+  try { rows = (await readObjects(sheets, PRODUCTION, true)).rows; } catch (e) { return []; }
+  const target = dateStr || todayYMD();
+  return rows.filter((o) => o['Run ID']).filter((o) => {
+    const st = o['Status'] || 'Open';
+    if (scope === 'open') return st === 'Open';                                   // open runs always visible (ignore date)
+    if (scope === 'submitted') return st === 'Submitted' && toYMD(o['Created On']) === target;
+    if (scope === 'finished') return st === 'Finished' && toYMD(o['Created On']) === target;
+    return toYMD(o['Created On']) === target;
+  }).map((o) => ({
+    runId: o['Run ID'], createdOn: toYMD(o['Created On']), operator: o['Operator'], machine: o['Machine'],
+    status: o['Status'] || 'Open', skidCount: o['Skid Count'], notes: o['Notes'],
+    submittedOn: o['Submitted On'] ? toYMD(o['Submitted On']) : '', finishedOn: o['Finished On'] ? toYMD(o['Finished On']) : '',
+  }));
+}
+
+async function getRunDetail(sheets, runId) {
+  const runs = await readObjects(sheets, PRODUCTION, true);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  const master = await readObjects(sheets, MASTER);
+  const skids = await runDetailSkids(master.rows, runId);
+  return { runId: run['Run ID'], createdOn: toYMD(run['Created On']), operator: run['Operator'], machine: run['Machine'],
+    status: run['Status'] || 'Open', notes: run['Notes'],
+    submittedOn: run['Submitted On'] ? toYMD(run['Submitted On']) : '', finishedOn: run['Finished On'] ? toYMD(run['Finished On']) : '',
+    skidCount: skids.length, skids };
+}
+
+async function createRun(sheets, machine, operator, notes, opId) {
+  machine = String(machine || '').trim();
+  if (!machine) throw new Error('Pick a Line or Press and enter its number.');
+  await ensureTab(sheets, PRODUCTION, PRODUCTION_HEADERS);
+  const runs0 = await readTab(sheets, PRODUCTION);
+  if (opId && runs0.headers.indexOf('Op ID') !== -1) {
+    const ex = runs0.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
+    if (ex) return { duplicate: true, runId: ex['Run ID'], machine: ex['Machine'], operator: ex['Operator'], status: ex['Status'] || 'Open' };
+  }
+  const runId = fmtId('RUN-', maxIdNumber(runs0.rows, 'Run ID', 'RUN-') + 1);
+  const ens = await ensureColumn(sheets, PRODUCTION, runs0.headers, 'Op ID');
+  await appendRowObj(sheets, PRODUCTION, ens.headers, {
+    'Run ID': runId, 'Created On': todayYMD(), 'Operator': operator || '', 'Machine': machine,
+    'Status': 'Open', 'Skid Count': 0, 'Notes': notes || '', 'Submitted On': '', 'Finished On': '', 'Op ID': opId || '',
+  });
+  return { runId, machine, operator: operator || '', status: 'Open' };
+}
+
+async function recountRun(sheets, runId, runRow, runsMap) {
+  const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim()).length;
+  await stampCells(sheets, PRODUCTION, runRow, runsMap, { 'Skid Count': count });
+  return count;
+}
+
+async function runAddSkid(sheets, runId, skidId, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId, runId };
+  await normalizeMasterRows(sheets);
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') throw new Error('Run ' + runId + ' is finished and locked.');
+  let master = await readTab(sheets, MASTER);
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Run ID');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Loaded On');
+  master = await readTab(sheets, MASTER);
+  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+  if (!obj) throw new Error('Skid not found: ' + skidId);
+  const st = obj['Status'] || STATUS.CURRENT;
+  if (st === STATUS.USED) throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already marked Used.');
+  const onRun = String(obj['Run ID'] || '').trim();
+  if (onRun) {
+    if (onRun === String(runId).trim()) throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already on this run.');
+    throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already on run ' + onRun + '.');
+  }
+  await stampCells(sheets, MASTER, obj.__row, master.map, {
+    'Status': STATUS.IN_PRODUCTION, 'Run ID': runId, 'Loaded On': todayYMD(),
+    'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+  await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'ADDED TO PRODUCTION', operator,
+    note: 'Loaded on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, opId);
+  await recountRun(sheets, runId, run.__row, runs.map);
+  return { runId, skidId, ticket: obj['Ticket'], status: STATUS.IN_PRODUCTION, loadedOn: todayYMD(),
+    qty: num(obj['QTY/LOAD']), bw: obj['BW'], type: obj['TC'], temper: obj['TM'], endUse: obj['End Use'] };
+}
+
+async function runRemoveSkid(sheets, runId, skidId, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return getRunDetail(sheets, runId);
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') throw new Error('Run ' + runId + ' is finished and locked.');
+  const master = await readTab(sheets, MASTER);
+  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+  if (!obj) throw new Error('Skid not found: ' + skidId);
+  if (String(obj['Run ID']).trim() !== String(runId).trim()) throw new Error('Skid is not on this run.');
+  const restore = num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT;   // coated skids return to WIP, raw ones to Current
+  await stampCells(sheets, MASTER, obj.__row, master.map, {
+    'Status': restore, 'Run ID': '', 'Loaded On': '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+  await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'REMOVED FROM PRODUCTION', operator,
+    note: 'Removed from run ' + runId + ' (back to ' + restore + ')', runningTotal: num(obj['Litho']) }, opId);
+  await recountRun(sheets, runId, run.__row, runs.map);
+  return getRunDetail(sheets, runId);
+}
+
+async function updateRun(sheets, runId, fields, operator, opId) {
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') throw new Error('Run ' + runId + ' is finished and locked.');
+  fields = fields || {};
+  const changes = {};
+  if (fields.hasOwnProperty('Operator')) changes['Operator'] = String(fields.Operator || '').trim();
+  if (fields.hasOwnProperty('Machine')) { const m = String(fields.Machine || '').trim(); if (!m) throw new Error('Machine cannot be blank.'); changes['Machine'] = m; }
+  if (fields.hasOwnProperty('Notes')) changes['Notes'] = String(fields.Notes || '');
+  if (Object.keys(changes).length) await stampCells(sheets, PRODUCTION, run.__row, runs.map, changes);
+  return getRunDetail(sheets, runId);
+}
+
+async function updateRunSkid(sheets, runId, skidId, fields, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return getRunDetail(sheets, runId);
+  let master = await readTab(sheets, MASTER);
+  const ens = await ensureColumn(sheets, MASTER, master.headers, 'Litho Notes');
+  master = await readTab(sheets, MASTER);
+  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+  if (!obj) throw new Error('Skid not found: ' + skidId);
+  if (String(obj['Run ID']).trim() !== String(runId).trim()) throw new Error('Skid is not on this run.');
+  const note = String((fields || {}).notes || '').trim();
+  if (note) {
+    const existing = obj['Litho Notes'] || '';
+    await stampCells(sheets, MASTER, obj.__row, master.map, {
+      'Litho Notes': (existing ? existing + ' | ' : '') + note, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'PRODUCTION NOTE', operator, note, runningTotal: num(obj['Litho']) }, opId);
+  }
+  return getRunDetail(sheets, runId);
+}
+
+async function swapRunSkid(sheets, runId, oldSkidId, newSkidId, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return getRunDetail(sheets, runId);
+  const master = await readTab(sheets, MASTER);
+  const oldObj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(oldSkidId).trim())[0];
+  if (oldObj && String(oldObj['Run ID']).trim() === String(runId).trim()) {
+    await runRemoveSkid(sheets, runId, oldSkidId, operator, '');
+  }
+  await runAddSkid(sheets, runId, newSkidId, operator, opId);   // carries opId so a retry dedups on the add
+  return getRunDetail(sheets, runId);
+}
+
+async function submitRun(sheets, runId, operator, opId) {
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') throw new Error('Run ' + runId + ' is already finished.');
+  if (String(run['Status']) === 'Submitted') return { runId, status: 'Submitted' };
+  const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim()).length;
+  if (!count) throw new Error('Add at least one skid before submitting run ' + runId + '.');
+  await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Submitted', 'Submitted On': todayYMD(), 'Skid Count': count });
+  return { runId, status: 'Submitted' };
+}
+
+// Finish Work: mark the run's In-Production skids Used, stamp Finished On. Partial support —
+// usedMap = { skidId: sheetsUsed }; if used < on-hand, split the remainder off as a new
+// available skid (reuses the same split shape as applyCoating). Idempotent like approveJob.
+async function finishRun(sheets, runId, usedMap, operator, opId) {
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') return getRunDetail(sheets, runId);
+  usedMap = usedMap || {};
+  let master = await readTab(sheets, MASTER);
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Finished On');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used By');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Split Of');
+  master = await readTab(sheets, MASTER);
+  const onRun = master.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim() && (o['Status'] || '') === STATUS.IN_PRODUCTION);
+  for (const obj of onRun) {
+    const skidId = obj['Skid ID'];
+    const ticket = obj['Ticket'];
+    const onHand = num(obj['QTY/LOAD']);
+    let used = usedMap[skidId];
+    used = (used === undefined || used === null || used === '') ? onHand : Number(used);
+    if (isNaN(used) || used < 0) used = onHand;
+    if (onHand > 0 && used > onHand) used = onHand;
+    const usedFewer = onHand > 0 && used < onHand;
+
+    if (usedFewer) {
+      const weightPerSheet = onHand > 0 ? num(obj['Weight']) / onHand : 0;
+      const usedWeight = weightPerSheet > 0 ? Math.round(used * weightPerSheet * 100) / 100 : num(obj['Weight']);
+      const remQty = onHand - used;
+      const remWeight = Math.round((num(obj['Weight']) - usedWeight) * 100) / 100;
+      const remTicket = await findRemainderTicketId(master.rows, ticket);
+      const remSkid = await nextSkidId(sheets);
+      const remObj = {};
+      master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
+      delete remObj.__row;
+      Object.assign(remObj, {
+        'Ticket': remTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
+        'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
+        'QTY/LOAD': remQty, 'Weight': remWeight,
+        'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket + ' (production: ' + used + ' of ' + onHand + ' used) on ' + todayYMD(),
+        'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
+      });
+      await appendRowObj(sheets, MASTER, master.headers, remObj);
+      master.rows.push(remObj);   // so a second split of the same ticket picks -R2, and nextSkidId advances
+      await eventTx(sheets, { skidId: remSkid, ticket: remTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
+        note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) returned from ' + ticket + ' after production', runningTotal: 0 }, '');
+      await stampCells(sheets, MASTER, obj.__row, master.map, { 'QTY/LOAD': used, 'Weight': usedWeight });
+    }
+
+    await stampCells(sheets, MASTER, obj.__row, master.map, {
+      'Status': STATUS.USED, 'Finished On': todayYMD(), 'Used By': operator || '',
+      'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+    await eventTx(sheets, { skidId, ticket, itemText: 'USED IN PRODUCTION', operator,
+      note: 'Used ' + used + (onHand ? ' of ' + onHand : '') + ' sheets on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, '');
+  }
+  await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Finished', 'Finished On': todayYMD() });
+  return getRunDetail(sheets, runId);
 }

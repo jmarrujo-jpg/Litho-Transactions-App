@@ -495,22 +495,60 @@
   function boot() {
     loadOperatorNames();
     loadRateData();
-    state.view = 'all'; state.listView = 'all';
-    renderAll();
+    renderLanding();
   }
 
+  function showTabbar(show) { document.getElementById('tabbar').style.display = show ? 'flex' : 'none'; }
+  function showBack(show) { document.getElementById('backBtn').style.display = show ? 'inline-block' : 'none'; }
+
+  // Single Back handler routed by the current view. The app has three top-level screens
+  // (landing -> Litho / Production), each with their own drill-ins.
   document.getElementById('backBtn').onclick = function () {
-    // If we drilled into a ticket from a job, Back returns to that job.
+    // Drilled into a ticket from a job? Back returns to that job.
     if (state.view === 'card' && state.returnToJobId) {
       var jid = state.returnToJobId; state.returnToJobId = null;
       openJob(jid);
       return;
     }
-    document.getElementById('backBtn').style.display = 'none';
-    document.getElementById('tabbar').style.display = 'flex';
-    state.view = 'all'; state.listView = 'all'; state.skid = null;
-    renderAll();
+    switch (state.view) {
+      case 'all': renderLanding(); return;                 // litho list -> landing
+      case 'card': case 'review': case 'job': case 'createJob': openLitho(); return;
+      case 'prodHome': renderLanding(); return;            // production home -> landing
+      case 'prodAdd': case 'prodReview': openProduction(); return;
+      case 'run': openProductionReview(); return;
+      default: renderLanding(); return;
+    }
   };
+
+  // ---------------- Landing screen (three departments) ----------------
+  function renderLanding() {
+    state.view = 'home'; state.skid = null; state.jobId = null; state.runId = null;
+    nextViewToken();
+    showTabbar(false); showBack(false);
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="card" style="text-align:center">' +
+        '<h2 style="margin:4px 0">Steel Traceability</h2>' +
+        '<div class="sub">Choose where you\'re working.</div>' +
+      '</div>' +
+      '<button class="btn secondary" id="tileSearch" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🔎&nbsp; Search for a Ticket</button>' +
+      '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
+      '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px">Production</button>';
+    document.getElementById('tileSearch').onclick = function () {
+      showInfo('Search for a Ticket', 'This is coming soon — for now, open a department and use its search.', null);
+    };
+    document.getElementById('tileLitho').onclick = openLitho;
+    document.getElementById('tileProduction').onclick = openProduction;
+  }
+
+  // Opens the Litho department exactly as the app worked before: the combined ticket list
+  // with its All / Current / Pending / WIP chips, plus New Job / Review Jobs.
+  function openLitho() {
+    state.view = 'all'; state.listView = 'all'; state.skid = null;
+    nextViewToken();
+    showTabbar(true); showBack(true);
+    renderAll();
+  }
 
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
   function openReview() {
@@ -597,7 +635,24 @@
     if (status === 'Current') return 'notstarted';
     if (status === 'Pending') return 'inprogress';
     if (status === 'WIP') return 'wip';
+    if (status === 'In Production') return 'production';
+    if (status === 'Used') return 'used';
     return 'notstarted';
+  }
+
+  // Loads the combined ticket list into allCache once, then runs cb. Used by the New Job /
+  // production pickers which need every-status skids (queueCache is Current-only).
+  function ensureAllCache(cb) {
+    if (allCache.length) { cb(); return; }
+    google.script.run.withSuccessHandler(function (all) { setCaches(all); cb(); })
+      .withFailureHandler(function () { cb(); }).getAllTickets();
+  }
+
+  // Reflect a status change locally so a just-acted-on skid leaves the pickers immediately,
+  // before the background getAllTickets refresh lands.
+  function markCacheStatus(skidId, status) {
+    allCache.forEach(function (t) { if (t.skidId === skidId) t.status = status; });
+    queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
   }
 
   function renderAll() {
@@ -1707,6 +1762,482 @@
     });
     html += '</tbody></table>';
     container.innerHTML = html;
+  }
+
+  // ================= PRODUCTION department =================================================
+  // Mirrors the Litho job flow, but tracks skid USAGE instead of coating: a "run" is one
+  // Line/Press; skids are loaded onto it (-> In Production, Loaded On stamped), the run is
+  // submitted for review, then Finish Work marks them Used (with partial-usage split) and
+  // stamps Finished On. Dates only — no times.
+  var currentRun = null;     // { runId, machine, operator } — the run being built
+  var runAddedSkids = [];    // running display list of skids loaded this session
+  var prodReviewDate = '';   // yyyy-MM-dd; '' means today
+  var runSwapSkid = null;    // when set, the next picked skid replaces this one on the run
+
+  function openProduction() {
+    state.view = 'prodHome'; state.runId = null; runSwapSkid = null;
+    nextViewToken();
+    showTabbar(false); showBack(true);
+    renderProductionHome();
+  }
+
+  // ----- Log Work: start a run, resume open runs, or go to Review -----
+  function renderProductionHome() {
+    state.view = 'prodHome';
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Production — Log Work</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Start a work session on a line or press, then load the skids you run. Submit for review when the day is done.</div>' +
+        '<div class="row">' +
+          operatorFieldHtml('runOperator') +
+          selectField('runMachineType', 'Line / Press', ['Line', 'Press'], null) +
+          '<div class="field"><label>Number</label><input type="number" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
+        '</div>' +
+        '<div class="field"><label>Notes (optional)</label><input id="runNotes" placeholder="e.g. day shift"></div>' +
+        '<button class="btn success" id="startRunBtn">+ Start Work</button>' +
+      '</div>' +
+      '<div class="card"><button class="btn secondary" id="reviewWorkBtn" style="width:100%">Review Work</button></div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Open work sessions</h3>' +
+        '<div id="openRunsList"><div class="loading">Loading&hellip;</div></div></div>';
+
+    document.getElementById('reviewWorkBtn').onclick = openProductionReview;
+    document.getElementById('startRunBtn').onclick = function () {
+      var operator = document.getElementById('runOperator').value.trim();
+      var type = document.getElementById('runMachineType').value;
+      var numv = document.getElementById('runMachineNum').value.trim();
+      var notes = document.getElementById('runNotes').value;
+      if (!operator) { toast('Enter an operator name'); return; }
+      if (!type) { toast('Pick Line or Press'); return; }
+      if (!numv) { toast('Enter the line/press number'); return; }
+      var machine = type + ' ' + numv;
+      var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
+      runMutation('createRun', [machine, operator, notes, newOpId()],
+        function (result) {
+          currentRun = { runId: result.runId, machine: machine, operator: operator };
+          state.runId = result.runId; runAddedSkids = [];
+          renderRunAddSkids();
+        },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '+ Start Work'; });
+    };
+
+    google.script.run.withSuccessHandler(function (runs) {
+      if (tok !== viewToken) return;
+      renderOpenRunsList(runs);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('openRunsList');
+      if (el) el.innerHTML = '<div class="sub">Error: ' + esc(err.message) + '</div>';
+    }).getProductionRuns('', 'open');
+  }
+
+  function renderOpenRunsList(runs) {
+    var el = document.getElementById('openRunsList');
+    if (!el) return;
+    if (!runs || !runs.length) { el.innerHTML = '<div class="sub">No open sessions. Start one above.</div>'; return; }
+    var html = '';
+    runs.forEach(function (r) {
+      html += '<div class="queue-item" data-run="' + esc(r.runId) + '" style="padding:8px 0">' +
+        '<div style="min-width:0"><div class="ticket-id" style="font-size:15px">' + esc(r.machine) +
+          ' <span class="sub" style="font-weight:400">' + esc(r.runId) + '</span></div>' +
+          '<div class="sub">' + (r.skidCount || 0) + ' skid(s) &middot; by ' + esc(r.operator) + ' &middot; ' + esc(r.createdOn) + '</div></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-resume="' + esc(r.runId) + '">Resume</button>' +
+      '</div>';
+    });
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-resume]'), function (btn) {
+      btn.onclick = function () {
+        var rid = btn.getAttribute('data-resume');
+        var r = runs.filter(function (x) { return x.runId === rid; })[0];
+        currentRun = { runId: r.runId, machine: r.machine, operator: r.operator };
+        state.runId = r.runId; runAddedSkids = [];
+        renderRunAddSkids();
+      };
+    });
+  }
+
+  // ----- Add skids to the run (skids of any status except Used / already In Production) -----
+  function prodPickList() {
+    return allCache.filter(function (t) { return t.status !== 'Used' && t.status !== 'In Production'; });
+  }
+
+  function renderRunAddSkids() {
+    state.view = 'prodAdd';
+    var view = document.getElementById('view');
+    nextViewToken();
+    showTabbar(false); showBack(true);
+    view.innerHTML =
+      '<div class="card"><div class="sub">Run <strong>' + esc(currentRun.runId) + '</strong> &middot; ' + esc(currentRun.machine) +
+        (currentRun.operator ? ' &middot; ' + esc(currentRun.operator) : '') + '</div></div>' +
+      '<div class="card" id="runPickedCard" style="display:none"></div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Find a skid to load</h3>' +
+        searchBarHtml('runSkidSearch') +
+        '<div id="runSkidPicker" style="margin-top:10px"><div class="loading">Loading&hellip;</div></div></div>' +
+      '<div class="card">' +
+        '<h4 style="margin-bottom:6px;font-size:13px;color:var(--muted)">Skids loaded this session (<span id="runAddedCount">0</span>)</h4>' +
+        '<div id="runAddedList" class="sub">None yet.</div></div>' +
+      '<div class="card">' +
+        '<div class="sub" style="margin-bottom:10px">Loaded skids are marked <strong>In Production</strong> with today\'s date. Submit the run for review when the day is done.</div>' +
+        '<button class="btn success" id="submitRunBtn" style="width:100%">Submit for Review</button></div>';
+
+    var search = document.getElementById('runSkidSearch');
+    search.oninput = function () { renderRunSkidPicker(search.value); };
+    ensureAllCache(function () { renderRunSkidPicker(''); });
+    renderRunAddedList();
+
+    document.getElementById('submitRunBtn').onclick = function () {
+      var btn = this; btn.disabled = true; btn.textContent = 'Submitting…';
+      runMutation('submitRun', [currentRun.runId, currentRun.operator, newOpId()],
+        function () { showInfo('Submitted for review', 'Run ' + currentRun.runId + ' is ready to review and finish.', function () { openProduction(); }); },
+        function (err) { showModal({ title: 'Could not submit', message: err.message, confirmText: 'OK' }); btn.disabled = false; btn.textContent = 'Submit for Review'; });
+    };
+  }
+
+  function skidRowHtml(q, pickAttr) {
+    return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+      '<span class="ticket-id" style="font-size:14px">' + esc(q.ticket) + '</span> ' +
+      '<span class="badge ' + badgeClassFor(q.status) + '">' + esc(q.status) + '</span> ' +
+      '<span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span>' +
+      '<div class="specs"><span><b>BW</b> ' + esc(q.bw) + '</span><span><b>Type</b> ' + esc(q.type) +
+      '</span><span><b>Temper</b> ' + esc(q.temper) + '</span></div></div>' +
+      '<button class="btn secondary" style="padding:6px 10px;font-size:13px" ' + pickAttr + '="' + esc(q.skidId) + '">Select</button></div>';
+  }
+
+  function renderRunSkidPicker(term) {
+    var c = document.getElementById('runSkidPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    var list = prodPickList();
+    var rows = term
+      ? list.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; })
+      : list.slice(0, 15);
+    if (!rows.length) { c.innerHTML = '<div class="sub">No skids match.</div>'; return; }
+    var html = '';
+    rows.forEach(function (q) { html += skidRowHtml(q, 'data-pick'); });
+    c.innerHTML = html;
+    Array.prototype.forEach.call(c.querySelectorAll('[data-pick]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-pick');
+        renderRunPickedCard(sk, allCache.filter(function (q) { return q.skidId === sk; })[0]);
+      };
+    });
+  }
+
+  function renderRunPickedCard(skidId, entry) {
+    var card = document.getElementById('runPickedCard');
+    card.style.display = 'block';
+    var specsHtml = entry ? ('<div class="specs" style="margin:6px 0 10px">' +
+      '<span><b>BW</b> ' + esc(entry.bw) + '</span><span><b>Type</b> ' + esc(entry.type) + '</span>' +
+      '<span><b>Temper</b> ' + esc(entry.temper) + '</span><span><b>End Use</b> ' + esc(entry.endUse) + '</span></div>') : '';
+    card.innerHTML =
+      '<h3 style="margin-top:0;font-size:15px">Load skid onto ' + esc(currentRun.machine) + '</h3>' +
+      '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) +
+        (entry ? ' <span class="badge ' + badgeClassFor(entry.status) + '">' + esc(entry.status) + '</span>' : '') + '</div>' +
+      '<div class="sub" style="margin-bottom:6px">' + esc(entry ? (entry.qty || 0) : 0) + ' sheets on hand</div>' +
+      specsHtml +
+      '<button class="btn" id="addSkidToRunBtn">Add to Run</button>';
+    if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
+    document.getElementById('addSkidToRunBtn').onclick = function () {
+      var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
+      runMutation('runAddSkid', [currentRun.runId, skidId, currentRun.operator, newOpId()],
+        function (result) {
+          if (result && result.duplicate) { toast('Already loaded'); btn.disabled = false; btn.textContent = 'Add to Run'; return; }
+          runAddedSkids.push(result);
+          toast('Loaded ' + (result.ticket || skidId));
+          card.style.display = 'none';
+          document.getElementById('runSkidSearch').value = '';
+          markCacheStatus(skidId, 'In Production'); // drop it from the picker right away
+          renderRunSkidPicker('');
+          renderRunAddedList();
+          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+        },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Add to Run'; });
+    };
+  }
+
+  function renderRunAddedList() {
+    var container = document.getElementById('runAddedList');
+    var countEl = document.getElementById('runAddedCount');
+    if (countEl) countEl.textContent = runAddedSkids.length;
+    if (!container) return;
+    if (!runAddedSkids.length) { container.innerHTML = 'None yet.'; return; }
+    var html = '<table><thead><tr><th>Ticket</th><th>Skid</th><th>Loaded</th></tr></thead><tbody>';
+    runAddedSkids.forEach(function (r) {
+      html += '<tr><td>' + esc(r.ticket) + '</td><td>' + esc(r.skidId) + '</td><td>' + esc(r.loadedOn) + '</td></tr>';
+    });
+    container.innerHTML = html + '</tbody></table>';
+  }
+
+  // ----- Review Work: submitted runs for a day, open one to review + finish -----
+  function openProductionReview() {
+    state.view = 'prodReview'; runSwapSkid = null;
+    nextViewToken();
+    showTabbar(false); showBack(true);
+    renderProductionReview();
+  }
+
+  function renderProductionReview() {
+    state.view = 'prodReview';
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    var day = prodReviewDate || todayStr();
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Review production work</h3>' +
+        '<div class="field"><label>Day</label><input type="date" id="prodReviewDay" value="' + esc(day) + '"></div>' +
+        '<div class="sub">Runs submitted that day. Open one to review skids and finish the work.</div></div>' +
+      '<div id="prodReviewList"><div class="loading">Loading&hellip;</div></div>';
+    document.getElementById('prodReviewDay').onchange = function () { prodReviewDate = this.value; renderProductionReview(); };
+    google.script.run.withSuccessHandler(function (runs) {
+      if (tok !== viewToken) return;
+      renderProdReviewList(runs);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('prodReviewList');
+      if (el) el.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getProductionRuns(prodReviewDate, 'submitted');
+  }
+
+  function renderProdReviewList(runs) {
+    var el = document.getElementById('prodReviewList');
+    if (!el) return;
+    if (!runs || !runs.length) { el.innerHTML = '<div class="card empty">No runs submitted that day.</div>'; return; }
+    var html = '<div class="card">';
+    runs.forEach(function (r) {
+      html += '<div class="queue-item" data-run="' + esc(r.runId) + '">' +
+        '<div style="min-width:0"><div class="ticket-id">' + esc(r.machine) +
+          ' <span class="sub" style="font-weight:400">' + esc(r.runId) + '</span></div>' +
+          '<div class="sub">' + (r.skidCount || 0) + ' skid(s) &middot; by ' + esc(r.operator) + '</div></div>' +
+        '<div style="text-align:right;white-space:nowrap"><span class="badge inprogress">Submitted</span></div></div>';
+    });
+    el.innerHTML = html + '</div>';
+    Array.prototype.forEach.call(el.querySelectorAll('[data-run]'), function (row) {
+      row.onclick = function () { openRun(row.getAttribute('data-run')); };
+    });
+  }
+
+  function openRun(runId) {
+    state.view = 'run'; state.runId = runId; runSwapSkid = null;
+    nextViewToken();
+    showTabbar(false); showBack(true);
+    renderRun();
+  }
+
+  function renderRun() {
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    view.innerHTML = '<div class="loading">Loading run&hellip;</div>';
+    google.script.run.withSuccessHandler(function (run) {
+      if (tok !== viewToken) return;
+      renderRunContent(view, run);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getRunDetail(state.runId);
+  }
+
+  function machineParts(machine) {
+    var m = /^(Line|Press)\s*(\d+)/i.exec(String(machine || ''));
+    return m ? { type: m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase(), num: m[2] } : { type: '', num: '' };
+  }
+
+  function renderRunContent(view, run) {
+    var finished = run.status === 'Finished';
+    var mp = machineParts(run.machine);
+    var html = '';
+
+    html += '<div class="card">' +
+      '<div class="ticket-id">' + esc(run.machine) +
+        ' <span class="badge ' + (finished ? 'used' : 'inprogress') + '">' + esc(run.status) + '</span>' +
+        ' <span class="sub" style="font-weight:400">' + esc(run.runId) + '</span></div>' +
+      '<div class="sub" style="margin-top:4px">Operator ' + esc(run.operator) + ' &middot; started ' + esc(run.createdOn) +
+        (run.submittedOn ? ' &middot; submitted ' + esc(run.submittedOn) : '') +
+        (run.finishedOn ? ' &middot; finished ' + esc(run.finishedOn) : '') + '</div>' +
+      (run.notes ? '<div class="sub">Notes: ' + esc(run.notes) + '</div>' : '') +
+      '</div>';
+
+    // Edit run details (operator / machine)
+    if (!finished) {
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Run details</h3>' +
+        '<div class="row">' +
+          operatorFieldHtml('runEditOperator') +
+          selectField('runEditType', 'Line / Press', ['Line', 'Press'], mp.type) +
+          '<div class="field"><label>Number</label><input type="number" id="runEditNum" min="1" value="' + esc(mp.num) + '"></div>' +
+        '</div>' +
+        '<button class="btn secondary" id="saveRunBtn">Save details</button></div>';
+    }
+
+    // Skids on the run
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Skids on this run (' + run.skids.length + ')</h3>';
+    if (!run.skids.length) html += '<div class="sub">None yet.</div>';
+    else {
+      html += '<table><thead><tr><th>Ticket</th><th>Status</th><th>Loaded</th><th>Sheets</th>' + (finished ? '<th>Finished</th>' : '<th></th>') + '</tr></thead><tbody>';
+      run.skids.forEach(function (s) {
+        var actions = finished ? esc(s.finishedOn) :
+          '<button class="btn secondary" style="padding:4px 8px;font-size:12px" data-note="' + esc(s.skidId) + '">Note</button> ' +
+          '<button class="btn secondary" style="padding:4px 8px;font-size:12px" data-swap="' + esc(s.skidId) + '">Swap</button> ' +
+          '<button class="btn danger" style="padding:4px 8px;font-size:12px" data-remove="' + esc(s.skidId) + '">Remove</button>';
+        html += '<tr><td>' + esc(s.ticket) + ' <span class="sub">' + esc(s.skidId) + '</span></td>' +
+          '<td><span class="badge ' + badgeClassFor(s.status) + '">' + esc(s.status) + '</span></td>' +
+          '<td class="sub">' + esc(s.loadedOn) + '</td><td>' + esc(s.qty) + '</td><td style="white-space:nowrap">' + actions + '</td></tr>' +
+          (s.notes ? '<tr><td colspan="5" class="sub" style="border-bottom:1px solid var(--line)">Notes: ' + esc(s.notes) + '</td></tr>' : '');
+      });
+      html += '</tbody></table>';
+      html += '<div id="runNoteForm" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:12px"></div>';
+    }
+    html += '</div>';
+
+    if (!finished) {
+      // Add / swap skids
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a skid</h3>' +
+        operatorFieldHtml('runActionOperator') +
+        searchBarHtml('runReviewSearch') +
+        '<div id="runReviewPicker" style="margin-top:10px"></div></div>';
+
+      // Finish Work
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Finish work</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Enter how many sheets of each skid were actually used. Anything less than on-hand is split back out as an available skid. Finishing marks them <strong>Used</strong>.</div>';
+      var inProd = run.skids.filter(function (s) { return s.status === 'In Production'; });
+      if (!inProd.length) html += '<div class="sub">No in-production skids to finish.</div>';
+      else {
+        inProd.forEach(function (s) {
+          html += '<div class="field"><label>' + esc(s.ticket) + ' (' + esc(s.qty) + ' on hand)</label>' +
+            (Number(s.qty) > 0
+              ? '<input type="number" data-used-skid="' + esc(s.skidId) + '" value="' + esc(s.qty) + '" min="0" max="' + esc(s.qty) + '">'
+              : '<div class="sub">Whole skid (no sheet count)</div>') +
+            '</div>';
+        });
+      }
+      html += operatorFieldHtml('finishOperator') +
+        '<button class="btn success" id="finishRunBtn"' + (inProd.length ? '' : ' disabled') + '>Finish Work</button></div>';
+    }
+
+    view.innerHTML = html;
+    wireRunReview(run, finished);
+  }
+
+  function currentRunOperator() {
+    var el = document.getElementById('runActionOperator') || document.getElementById('runEditOperator') || document.getElementById('finishOperator');
+    var v = el ? el.value.trim() : '';
+    return v || '';
+  }
+
+  function wireRunReview(run, finished) {
+    if (finished) return;
+
+    // Save run details
+    var saveBtn = document.getElementById('saveRunBtn');
+    if (saveBtn) saveBtn.onclick = function () {
+      var operator = document.getElementById('runEditOperator').value.trim();
+      var type = document.getElementById('runEditType').value;
+      var numv = document.getElementById('runEditNum').value.trim();
+      if (!type || !numv) { toast('Pick Line/Press and a number'); return; }
+      var fields = { Machine: type + ' ' + numv };
+      if (operator) fields.Operator = operator;
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      runMutation('updateRun', [state.runId, fields, operator, newOpId()],
+        function () { toast('Run details saved'); renderRun(); },
+        function (err) { showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' }); saveBtn.disabled = false; saveBtn.textContent = 'Save details'; });
+    };
+
+    // Per-skid note
+    var noteForm = document.getElementById('runNoteForm');
+    Array.prototype.forEach.call(document.querySelectorAll('[data-note]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-note');
+        noteForm.style.display = 'block';
+        noteForm.innerHTML = '<div class="field"><label>Note for skid ' + esc(sk) + '</label><input id="runNoteInput" placeholder="e.g. edge dents"></div>' +
+          '<button class="btn success" id="saveRunNoteBtn">Save note</button> <button class="btn secondary" id="cancelRunNoteBtn">Cancel</button>';
+        if (noteForm.scrollIntoView) noteForm.scrollIntoView({ block: 'nearest' });
+        document.getElementById('cancelRunNoteBtn').onclick = function () { noteForm.style.display = 'none'; noteForm.innerHTML = ''; };
+        document.getElementById('saveRunNoteBtn').onclick = function () {
+          var note = document.getElementById('runNoteInput').value.trim();
+          if (!note) { toast('Enter a note'); return; }
+          this.disabled = true;
+          runMutation('updateRunSkid', [state.runId, sk, { notes: note }, currentRunOperator(), newOpId()],
+            function () { toast('Note saved'); renderRun(); },
+            function (err) { showModal({ title: 'Could not save note', message: err.message, confirmText: 'OK' }); });
+        };
+      };
+    });
+
+    // Swap: arm swap mode, then pick the replacement below
+    Array.prototype.forEach.call(document.querySelectorAll('[data-swap]'), function (btn) {
+      btn.onclick = function () {
+        runSwapSkid = btn.getAttribute('data-swap');
+        toast('Now pick the replacement skid below');
+        var s = document.getElementById('runReviewSearch');
+        if (s && s.scrollIntoView) s.scrollIntoView({ block: 'center' });
+      };
+    });
+
+    // Remove
+    Array.prototype.forEach.call(document.querySelectorAll('[data-remove]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-remove');
+        showConfirm('Remove skid', 'Remove skid ' + sk + ' from this run? It returns to its previous status.', function () {
+          btn.disabled = true;
+          runMutation('runRemoveSkid', [state.runId, sk, currentRunOperator(), newOpId()],
+            function () { renderRun(); },
+            function (err) { showModal({ title: 'Could not remove', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+        }, 'Remove', 'danger');
+      };
+    });
+
+    // Add-skid picker
+    var search = document.getElementById('runReviewSearch');
+    if (search) {
+      ensureAllCache(function () { renderRunReviewPicker(''); });
+      search.oninput = function () { renderRunReviewPicker(search.value); };
+    }
+
+    // Finish Work
+    var finishBtn = document.getElementById('finishRunBtn');
+    if (finishBtn) finishBtn.onclick = function () {
+      var operator = document.getElementById('finishOperator').value.trim();
+      if (!operator) { toast('Enter an operator name'); return; }
+      var usedMap = {};
+      Array.prototype.forEach.call(document.querySelectorAll('[data-used-skid]'), function (inp) {
+        usedMap[inp.getAttribute('data-used-skid')] = inp.value;
+      });
+      showConfirm('Finish work', 'Mark this run finished? Its skids will be recorded as Used with today\'s date.', function () {
+        finishBtn.disabled = true;
+        runMutation('finishRun', [state.runId, usedMap, operator, newOpId()],
+          function () { showInfo('Work finished', 'Skids recorded as Used.', function () { openProductionReview(); }); },
+          function (err) { showModal({ title: 'Could not finish', message: err.message, confirmText: 'OK' }); finishBtn.disabled = false; });
+      }, 'Finish Work');
+    };
+  }
+
+  function renderRunReviewPicker(term) {
+    var c = document.getElementById('runReviewPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    var list = prodPickList();
+    var rows = term
+      ? list.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; })
+      : list.slice(0, 15);
+    if (!rows.length) { c.innerHTML = '<div class="sub">No skids match.</div>'; return; }
+    var html = '';
+    rows.forEach(function (q) { html += skidRowHtml(q, 'data-rpick'); });
+    c.innerHTML = html;
+    Array.prototype.forEach.call(c.querySelectorAll('[data-rpick]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-rpick');
+        var operator = currentRunOperator();
+        btn.disabled = true;
+        if (runSwapSkid) {
+          var oldSk = runSwapSkid; runSwapSkid = null;
+          runMutation('swapRunSkid', [state.runId, oldSk, sk, operator, newOpId()],
+            function () { toast('Skid swapped'); markCacheStatus(sk, 'In Production'); renderRun(); },
+            function (err) { showModal({ title: 'Could not swap', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+        } else {
+          runMutation('runAddSkid', [state.runId, sk, operator, newOpId()],
+            function () { toast('Skid added'); markCacheStatus(sk, 'In Production'); renderRun(); },
+            function (err) { showModal({ title: 'Could not add', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+        }
+      };
+    });
   }
 
   // boot
