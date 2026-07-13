@@ -710,6 +710,9 @@
     if (!container) return;
     var term = (searchTerm || '').trim().toLowerCase();
     var rows = allCache.filter(function (t) {
+      // The Litho list is the coating lifecycle only — once a skid is loaded into production
+      // (In Production) or consumed (Used) it drops off this list; it lives in Production now.
+      if (t.status === 'In Production' || t.status === 'Used') return false;
       if (term) {
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;
@@ -1858,8 +1861,10 @@
   }
 
   // ----- Add skids to the run (skids of any status except Used / already In Production) -----
+  // Skids you can load into production: Current or WIP only. Pending skids are mid-litho-job
+  // (not ready), In Production skids are already on a run, and Used skids are consumed.
   function prodPickList() {
-    return allCache.filter(function (t) { return t.status !== 'Used' && t.status !== 'In Production'; });
+    return allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
   }
 
   function renderRunAddSkids() {
@@ -2056,11 +2061,17 @@
       (run.notes ? '<div class="sub">Notes: ' + esc(run.notes) + '</div>' : '') +
       '</div>';
 
-    // Edit run details (operator / machine)
+    // One operator field for the whole review screen — used for every change here (add/remove/
+    // swap/note/finish) and saved as the run's operator when you Save details.
+    if (!finished) {
+      html += '<div class="card">' + operatorFieldHtml('runReviewOperator', 'Operator name') +
+        '<div class="sub">Used for every change on this screen.</div></div>';
+    }
+
+    // Edit run details (machine); operator comes from the field above
     if (!finished) {
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Run details</h3>' +
         '<div class="row">' +
-          operatorFieldHtml('runEditOperator') +
           selectField('runEditType', 'Line / Press', ['Line', 'Press'], mp.type) +
           '<div class="field"><label>Number</label><input type="number" id="runEditNum" min="1" value="' + esc(mp.num) + '"></div>' +
         '</div>' +
@@ -2090,7 +2101,6 @@
     if (!finished) {
       // Add / swap skids
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a skid</h3>' +
-        operatorFieldHtml('runActionOperator') +
         searchBarHtml('runReviewSearch') +
         '<div id="runReviewPicker" style="margin-top:10px"></div></div>';
 
@@ -2108,8 +2118,7 @@
             '</div>';
         });
       }
-      html += operatorFieldHtml('finishOperator') +
-        '<button class="btn success" id="finishRunBtn"' + (inProd.length ? '' : ' disabled') + '>Finish Work</button></div>';
+      html += '<button class="btn success" id="finishRunBtn"' + (inProd.length ? '' : ' disabled') + '>Finish Work</button></div>';
     }
 
     view.innerHTML = html;
@@ -2117,18 +2126,20 @@
   }
 
   function currentRunOperator() {
-    var el = document.getElementById('runActionOperator') || document.getElementById('runEditOperator') || document.getElementById('finishOperator');
-    var v = el ? el.value.trim() : '';
-    return v || '';
+    var el = document.getElementById('runReviewOperator');
+    return el ? el.value.trim() : '';
   }
 
   function wireRunReview(run, finished) {
     if (finished) return;
 
+    var opField = document.getElementById('runReviewOperator');
+    if (opField && !opField.value) opField.value = run.operator || '';
+
     // Save run details
     var saveBtn = document.getElementById('saveRunBtn');
     if (saveBtn) saveBtn.onclick = function () {
-      var operator = document.getElementById('runEditOperator').value.trim();
+      var operator = currentRunOperator();
       var type = document.getElementById('runEditType').value;
       var numv = document.getElementById('runEditNum').value.trim();
       if (!type || !numv) { toast('Pick Line/Press and a number'); return; }
@@ -2194,7 +2205,7 @@
     // Finish Work
     var finishBtn = document.getElementById('finishRunBtn');
     if (finishBtn) finishBtn.onclick = function () {
-      var operator = document.getElementById('finishOperator').value.trim();
+      var operator = currentRunOperator();
       if (!operator) { toast('Enter an operator name'); return; }
       var usedMap = {};
       Array.prototype.forEach.call(document.querySelectorAll('[data-used-skid]'), function (inp) {
