@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.5.0</span>
+      <span class="version" id="appVersion">v1.5.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1375,11 +1375,26 @@
     var html = '';
 
     var totalLitho = (job.tickets || []).reduce(function (s, t) { return s + (Number(t.litho) || 0); }, 0);
-    var coatItems = String(job.coatingsSummary || '').split(' | ').filter(Boolean);
-    var coatingsBlock = coatItems.length
+    // Look up a coating's Chem Code from the (already-loaded) rate data.
+    function coatingChem(c) {
+      var items = rateItems(c.group, c.sub) || [];
+      var m = items.filter(function (it) { return it.item === c.item; })[0];
+      if (!m && rateData.addons) m = rateData.addons.filter(function (it) { return it.item === c.item; })[0];
+      return m ? (m.chemCode || '') : '';
+    }
+    var coatingLis;
+    if (job.coatings && job.coatings.length) {
+      coatingLis = job.coatings.map(function (c) {
+        var chem = coatingChem(c);
+        return '<li>' + esc(c.item) + (c.sub ? ' (' + esc(c.sub) + ')' : '') +
+          (chem ? ' <span class="sub">&middot; Chem ' + esc(chem) + '</span>' : '') + '</li>';
+      });
+    } else {
+      coatingLis = String(job.coatingsSummary || '').split(' | ').filter(Boolean).map(function (c) { return '<li>' + esc(c) + '</li>'; });
+    }
+    var coatingsBlock = coatingLis.length
       ? '<div style="margin-top:8px"><div class="sub">Coatings</div>' +
-          '<ul style="margin:4px 0 0;padding-left:20px;font-size:15px;line-height:1.6">' +
-          coatItems.map(function (c) { return '<li>' + esc(c) + '</li>'; }).join('') + '</ul></div>'
+          '<ul style="margin:4px 0 0;padding-left:20px;font-size:15px;line-height:1.6">' + coatingLis.join('') + '</ul></div>'
       : '<div class="sub" style="margin-top:4px">Coatings: (none)</div>';
 
     html += '<div class="card">' +
