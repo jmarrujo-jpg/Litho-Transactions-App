@@ -506,9 +506,16 @@
   // Operator name field markup — a text input with a datalist of suggestions.
   // Fill OPERATOR_NAMES in Code.gs and it shows up here automatically; typing still
   // works even with an empty list so nobody's blocked in the meantime.
-  function operatorFieldHtml(id, label) {
+  function operatorFieldHtml(id, label, value) {
     return '<div class="field"><label>' + esc(label || 'Operator name') + '</label>' +
-      '<input id="' + id + '" list="operatorNamesList" placeholder="Select or type a name" autocomplete="off"></div>';
+      '<input id="' + id + '" list="operatorNamesList" value="' + esc(value || '') + '" placeholder="Select or type a name" autocomplete="off"></div>';
+  }
+
+  // Best guess at who ran/entered a skid, used to prefill the operator on edit forms so the
+  // person making a correction doesn't have to re-type it (they can still change it).
+  function whoRanIt(steel) {
+    steel = steel || {};
+    return steel['First Coated By'] || steel['Last Updated By'] || '';
   }
 
   function loadOperatorNames() {
@@ -943,7 +950,7 @@
         '<div class="field"><label>Row number</label><input id="edRow" value="' + esc(steel['Row']) + '"></div>' +
         '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="edSpoil" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
       '</div>' +
-      '<div class="row">' + operatorFieldHtml('editDetailsOperator') + '</div>' +
+      '<div class="row">' + operatorFieldHtml('editDetailsOperator', 'Operator name', whoRanIt(steel)) + '</div>' +
       '<button class="btn" id="saveTicketDetailsBtn">Save details</button>' +
       '</div>';
   }
@@ -973,7 +980,7 @@
   function coatingsEditorHtml(card) {
     var html = '<div class="card"><h3 style="margin-top:0;font-size:15px">Coatings on this ticket</h3>' +
       '<div class="sub" style="margin-bottom:8px">Change corrects the coating (cost follows the new rate); Remove voids it. The ticket stays linked to its job.</div>' +
-      '<div class="row">' + operatorFieldHtml('coatEditOperator') + '</div>';
+      '<div class="row">' + operatorFieldHtml('coatEditOperator', 'Operator name', whoRanIt(card.steel)) + '</div>';
     card.coatings.forEach(function (c) {
       html += '<div class="queue-item" data-coat-pass="' + esc(c.passNumber) + '">' +
         '<div style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(c.item) + '</span> ' +
