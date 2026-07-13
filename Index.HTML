@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.2.0</span>
+      <span class="version" id="appVersion">v1.2.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -825,10 +825,8 @@
     var view = document.getElementById('view');
     view.innerHTML =
       '<div class="card"><h3 style="margin-top:0">Add a ticket</h3>' +
-        '<div class="sub" style="margin-bottom:10px">Enter the ticket number if available, or bypass it by checking &ldquo;ticket not available&rdquo;.</div>' +
+        '<div class="sub" style="margin-bottom:10px">Enter the ticket number (required). The ticket details below are optional.</div>' +
         '<div class="field"><label>Ticket number</label><input id="atTicket" value="' + esc(prefill) + '" autocomplete="off"></div>' +
-        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">' +
-          '<input type="checkbox" id="atNoTicket" style="width:18px;height:18px"> Ticket not available</label>' +
       '</div>' +
       '<div class="card"><h3 style="margin-top:0;font-size:15px">Ticket details</h3>' +
         '<div class="sub" style="margin-bottom:10px">Fill in what you can from the steel ticket.</div>' +
@@ -837,18 +835,11 @@
       '<div class="card">' + operatorFieldHtml('atOperator') +
         '<button class="btn success" id="saveAddTicketBtn">Add Ticket</button></div>';
 
-    var noTicket = document.getElementById('atNoTicket');
     var ticketInput = document.getElementById('atTicket');
-    noTicket.onchange = function () {
-      ticketInput.disabled = noTicket.checked;
-      if (noTicket.checked) ticketInput.value = '';
-    };
-
     document.getElementById('saveAddTicketBtn').onclick = function () {
       var operator = document.getElementById('atOperator').value.trim();
-      var bypass = noTicket.checked;
-      var ticket = bypass ? '' : ticketInput.value.trim();
-      if (!bypass && !ticket) { toast('Enter a ticket number, or check "ticket not available"'); return; }
+      var ticket = ticketInput.value.trim();
+      if (!ticket) { toast('Enter a ticket number'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
       var fields = collectTicketFields('at');
       var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
