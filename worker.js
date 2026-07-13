@@ -35,6 +35,12 @@ const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
 
 const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTION: 'In Production', USED: 'Used' };
 
+// Editable steel-spec columns captured on Add Ticket and Edit ticket details (mirrors the
+// paper ticket; QTY first). B/C and Mill are new columns created on demand.
+const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill', 'BW', 'End Use', 'Supplier', 'TM', 'Width', 'Comments'];
+const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'BW', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
+const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true };
+
 export default {
   async fetch(request, env) {
     // Echo the caller's Origin so the CORS header always matches (avoids a misconfigured
@@ -54,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-2' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-3' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -87,8 +93,8 @@ async function handle(fn, args, env) {
     // ---- writes (Stage 2) ----
     case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId)
       return applyCoating(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]);
-    case 'createManualTicket': // (ticket, operator, opId)
-      return createManualTicket(sheets, args[0], args[1], args[2]);
+    case 'createManualTicket': // (ticket, fields, operator, opId)
+      return createManualTicket(sheets, args[0], args[1], args[2], args[3]);
     case 'updateWipLithoCost': // (skidId, newCost, operator, notes, opId)
       return updateWipLithoCost(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'updateTicketDetails': // (skidId, fields, operator, opId)
@@ -571,25 +577,36 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   return result;
 }
 
-// ---- createManualTicket: add a Current row for a ticket not in the master ----
-async function createManualTicket(sheets, ticket, operatorName, opId) {
+// ---- createManualTicket: add a Current row with steel specs from the paper ticket ----
+// ticket may be blank ("ticket not available" bypass); fields carries the steel specs.
+async function createManualTicket(sheets, ticket, fields, operatorName, opId) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, ticket };
   ticket = String(ticket || '').trim();
-  if (!ticket) throw new Error('Enter a ticket number.');
+  fields = fields || {};
   await normalizeMasterRows(sheets);
-  const master = await readTab(sheets, MASTER);
-  for (const o of master.rows) {
-    if (String(o['Ticket']).trim() !== ticket) continue;
-    const st = o['Status'] || STATUS.CURRENT;
-    if (st === STATUS.CURRENT) return getTicketCard(sheets, o['Skid ID']);
-    if (st === STATUS.PENDING) throw new Error('Ticket ' + ticket + ' is already active (Pending in a job, skid ' + o['Skid ID'] + '). Open it from the list.');
-    // WIP: fall through and create a fresh Current row.
+  let master = await readTab(sheets, MASTER);
+  let headers = master.headers;
+  for (const k of TICKET_DETAIL_COLS) { if (headers.indexOf(k) === -1) { const e = await ensureColumn(sheets, MASTER, headers, k); headers = e.headers; } }
+
+  // A known ticket number that's already on the floor routes to the existing skid instead of
+  // duplicating (Current -> open it; Pending -> it's tied up in a job). Bypassed tickets always
+  // make a fresh skid.
+  if (ticket) {
+    for (const o of master.rows) {
+      if (String(o['Ticket']).trim() !== ticket) continue;
+      const st = o['Status'] || STATUS.CURRENT;
+      if (st === STATUS.CURRENT) return getTicketCard(sheets, o['Skid ID']);
+      if (st === STATUS.PENDING) throw new Error('Ticket ' + ticket + ' is already active (Pending in a job, skid ' + o['Skid ID'] + '). Open it from the list.');
+      // WIP/other: fall through and create a fresh Current row.
+    }
   }
+
   const skidId = await nextSkidId(sheets);
-  await appendRowObj(sheets, MASTER, master.headers, {
-    'Ticket': ticket, 'Skid ID': skidId, 'Status': STATUS.CURRENT, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
-  });
-  await eventTx(sheets, { skidId, ticket, itemText: 'MANUAL TICKET CREATED', operator: operatorName, note: 'Ticket manually created in app (not found in Steel Tickets)', runningTotal: 0 }, opId);
+  const row = { 'Ticket': ticket, 'Skid ID': skidId, 'Status': STATUS.CURRENT, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
+  TICKET_DETAIL_COLS.forEach((k) => { if (fields.hasOwnProperty(k) && String(fields[k]).trim() !== '') row[k] = fields[k]; });
+  await appendRowObj(sheets, MASTER, headers, row);
+  await eventTx(sheets, { skidId, ticket, itemText: 'MANUAL TICKET CREATED', operator: operatorName,
+    note: ticket ? 'Ticket manually created in app' : 'Skid created without a ticket number (ticket not available)', runningTotal: 0 }, opId);
   return getTicketCard(sheets, skidId);
 }
 
@@ -640,24 +657,31 @@ async function updateWipLithoCost(sheets, skidId, newCost, operator, notes, opId
 async function updateTicketDetails(sheets, skidId, fields, operator, opId) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   await normalizeMasterRows(sheets);
+  fields = fields || {};
+  const editable = TICKET_DETAIL_COLS.concat(['Row', 'Spoilage']);
   let master = await readTab(sheets, MASTER);
-  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Row');
-  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Spoilage');
+  let headers = master.headers;
+  for (const k of editable) { if (fields.hasOwnProperty(k) && headers.indexOf(k) === -1) { const e = await ensureColumn(sheets, MASTER, headers, k); headers = e.headers; } }
   master = await readTab(sheets, MASTER);
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
-  fields = fields || {};
+
   const changes = {}, notes = [];
-  if (fields.hasOwnProperty('Row')) {
-    const nr = String(fields.Row == null ? '' : fields.Row).trim();
-    const or = String(obj['Row'] == null ? '' : obj['Row']).trim();
-    if (nr !== or) { changes['Row'] = nr; notes.push('Row ' + (or || '(blank)') + ' -> ' + (nr || '(blank)')); }
-  }
-  if (fields.hasOwnProperty('Spoilage')) {
-    const sp = Number(fields.Spoilage);
-    if (isNaN(sp) || sp < 0) throw new Error('Spoilage must be a non-negative number.');
-    const os = num(obj['Spoilage']);
-    if (os !== sp) { changes['Spoilage'] = sp; notes.push('Spoilage ' + os + ' -> ' + sp); }
+  for (const k of editable) {
+    if (!fields.hasOwnProperty(k)) continue;
+    const label = TICKET_COL_LABELS[k] || k;
+    if (TICKET_NUMERIC_COLS[k]) {
+      const raw = fields[k];
+      if (raw === '' || raw == null) continue; // leave numeric fields untouched when blank
+      const nv = Number(raw);
+      if (isNaN(nv) || nv < 0) throw new Error(label + ' must be a non-negative number.');
+      const ov = num(obj[k]);
+      if (nv !== ov) { changes[k] = nv; notes.push(label + ' ' + ov + ' -> ' + nv); }
+    } else {
+      const nv = String(fields[k] == null ? '' : fields[k]).trim();
+      const ov = String(obj[k] == null ? '' : obj[k]).trim();
+      if (nv !== ov) { changes[k] = nv; notes.push(label + ' "' + ov + '" -> "' + nv + '"'); }
+    }
   }
   if (!Object.keys(changes).length) return getTicketCard(sheets, skidId);
   changes['Last Updated At'] = nowStamp(); changes['Last Updated By'] = operator || '';

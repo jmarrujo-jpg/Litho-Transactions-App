@@ -465,6 +465,44 @@
     attempt();
   }
 
+  // Steel-spec fields captured on Add Ticket and Edit ticket details, laid out like the paper
+  // ticket (QTY first). `col` is the Steel Tickets column; `id` is the input id (prefixed).
+  var TICKET_FIELDS = [
+    { id: 'Qty', col: 'QTY/LOAD', label: 'QTY', num: true },
+    { id: 'Weight', col: 'Weight', label: 'Weight', num: true },
+    { id: 'BC', col: 'B/C', label: 'B/C' },
+    { id: 'Type', col: 'TC', label: 'Type' },
+    { id: 'Length', col: 'Length', label: 'Length' },
+    { id: 'Mill', col: 'Mill', label: 'Mill' },
+    { id: 'BW', col: 'BW', label: 'BW' },
+    { id: 'EndUse', col: 'End Use', label: 'End Use' },
+    { id: 'Supplier', col: 'Supplier', label: 'Supplier' },
+    { id: 'Temper', col: 'TM', label: 'Temper' },
+    { id: 'Width', col: 'Width', label: 'Width' },
+    { id: 'Comments', col: 'Comments', label: 'Comments', wide: true }
+  ];
+
+  // Renders the steel-spec inputs (prefix keeps Add vs Edit ids distinct); prefill from a steel row.
+  function ticketFieldsHtml(prefix, steel) {
+    steel = steel || {};
+    return TICKET_FIELDS.map(function (f) {
+      var val = steel[f.col] != null ? steel[f.col] : '';
+      return '<div class="field"' + (f.wide ? ' style="min-width:100%"' : '') + '>' +
+        '<label>' + esc(f.label) + '</label>' +
+        '<input id="' + prefix + f.id + '"' + (f.num ? ' type="number" min="0"' : '') + ' value="' + esc(val) + '"></div>';
+    }).join('');
+  }
+
+  // Collects the steel-spec inputs back into a { column: value } object for the server.
+  function collectTicketFields(prefix) {
+    var out = {};
+    TICKET_FIELDS.forEach(function (f) {
+      var el = document.getElementById(prefix + f.id);
+      if (el) out[f.col] = el.value;
+    });
+    return out;
+  }
+
   // Operator name field markup — a text input with a datalist of suggestions.
   // Fill OPERATOR_NAMES in Code.gs and it shows up here automatically; typing still
   // works even with an empty list so nobody's blocked in the meantime.
@@ -512,7 +550,7 @@
     }
     switch (state.view) {
       case 'all': renderLanding(); return;                 // litho list -> landing
-      case 'card': case 'review': case 'job': case 'createJob': openLitho(); return;
+      case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
       case 'run': openProductionReview(); return;
@@ -666,9 +704,13 @@
         '<button class="btn" id="newJobBtn" style="flex:1">+ New Job</button>' +
         '<button class="btn secondary" id="reviewJobsBtn" style="flex:1">Review Jobs</button>' +
       '</div>' +
+      '<div class="searchrow">' +
+        '<button class="btn secondary" id="addTicketBtn" style="flex:1">+ Add Ticket</button>' +
+      '</div>' +
       '<div id="allListContainer"><div class="loading">Loading tickets&hellip;</div></div>';
     document.getElementById('newJobBtn').onclick = openCreateJob;
     document.getElementById('reviewJobsBtn').onclick = openReview;
+    document.getElementById('addTicketBtn').onclick = function () { openAddTicket(''); };
     var searchInput = document.getElementById('mainSearch');
     searchInput.oninput = function () { renderAllRows(searchInput.value); };
     setActiveFilter(activeFilter);
@@ -697,7 +739,7 @@
       '</div>';
     return '<div class="queue-item" data-skid="' + esc(t.skidId) + '">' +
       '<div style="min-width:0">' +
-        '<div class="ticket-id">' + esc(t.ticket) + ' <span class="sub" style="font-weight:400">' + esc(t.skidId) + '</span></div>' + specs +
+        '<div class="ticket-id">' + esc(t.ticket || '(no ticket)') + ' <span class="sub" style="font-weight:400">' + esc(t.skidId) + '</span></div>' + specs +
       '</div>' +
       '<div style="text-align:right;white-space:nowrap">' +
         '<span class="badge ' + badgeClassFor(t.status) + '">' + esc(t.status) + '</span><br>' + right +
@@ -733,21 +775,7 @@
           '<div style="margin-top:14px"><button class="btn" id="manualAddBtn">Start ticket "' + esc(t) + '" manually</button>' +
           '<div class="sub" style="margin-top:8px">Use this only if the skid is on the floor but missing from Steel Tickets.</div></div></div>';
         var manualBtn = document.getElementById('manualAddBtn');
-        manualBtn.onclick = function () {
-          if (!t) return;
-          manualBtn.disabled = true;
-          runMutation('createManualTicket', [t, '', newOpId()], function (result) {
-            if (result && result.skidId) {
-              toast('Started ticket ' + t + ' manually');
-              openCard(result.skidId);
-            } else {
-              renderAll();
-            }
-          }, function (err) {
-            toast('Error: ' + err.message);
-            manualBtn.disabled = false;
-          });
-        };
+        manualBtn.onclick = function () { openAddTicket(t); };
       } else {
         container.innerHTML = '<div class="card empty">No tickets here yet.</div>';
       }
@@ -760,6 +788,56 @@
     Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
       el.onclick = function () { openCard(el.getAttribute('data-skid')); };
     });
+  }
+
+  // ---------------- Add a ticket (manual entry, with steel specs) ----------------
+  function openAddTicket(prefillTicket) {
+    state.view = 'addTicket';
+    enterDetailView();
+    renderAddTicket(prefillTicket || '');
+  }
+
+  function renderAddTicket(prefill) {
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Add a ticket</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Enter the ticket number if available, or bypass it by checking &ldquo;ticket not available&rdquo;.</div>' +
+        '<div class="field"><label>Ticket number</label><input id="atTicket" value="' + esc(prefill) + '" autocomplete="off"></div>' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">' +
+          '<input type="checkbox" id="atNoTicket" style="width:18px;height:18px"> Ticket not available</label>' +
+      '</div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Ticket details</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Fill in what you can from the steel ticket.</div>' +
+        '<div class="row">' + ticketFieldsHtml('at', {}) + '</div>' +
+      '</div>' +
+      '<div class="card">' + operatorFieldHtml('atOperator') +
+        '<button class="btn success" id="saveAddTicketBtn">Add Ticket</button></div>';
+
+    var noTicket = document.getElementById('atNoTicket');
+    var ticketInput = document.getElementById('atTicket');
+    noTicket.onchange = function () {
+      ticketInput.disabled = noTicket.checked;
+      if (noTicket.checked) ticketInput.value = '';
+    };
+
+    document.getElementById('saveAddTicketBtn').onclick = function () {
+      var operator = document.getElementById('atOperator').value.trim();
+      var bypass = noTicket.checked;
+      var ticket = bypass ? '' : ticketInput.value.trim();
+      if (!bypass && !ticket) { toast('Enter a ticket number, or check "ticket not available"'); return; }
+      if (!operator) { toast('Enter an operator name'); return; }
+      var fields = collectTicketFields('at');
+      var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
+      runMutation('createManualTicket', [ticket, fields, operator, newOpId()],
+        function (result) {
+          if (result && result.skidId) { toast('Ticket added'); openCard(result.skidId); }
+          else { toast('Ticket added'); openLitho(); }
+        },
+        function (err) {
+          showModal({ title: 'Could not add ticket', message: err.message, confirmText: 'OK' });
+          btn.disabled = false; btn.textContent = 'Add Ticket';
+        });
+    };
   }
 
   // ---------------- Ticket card (one detail view for every status) ----------------
@@ -799,7 +877,7 @@
     var html = '';
 
     html += '<div class="card">';
-    html += '<div class="ticket-id">' + esc(card.ticket) +
+    html += '<div class="ticket-id">' + esc(card.ticket || '(no ticket)') +
       ' <span class="badge ' + badgeClassFor(status) + '">' + esc(status) + '</span>' +
       ' <span class="sub" style="font-weight:400">' + esc(card.skidId) + '</span></div>';
     html += '<div class="steel-meta">' +
@@ -855,14 +933,15 @@
     wireTicketDetailsEditor(card);
   }
 
-  // ----- Edit a skid's Row number and Spoilage count (sheets assumed spoiled) -----
+  // ----- Edit a skid's steel details, Row number and Spoilage count -----
   function ticketDetailsEditorHtml(card) {
     var steel = card.steel || {};
     return '<div class="card"><h3 style="margin-top:0;font-size:15px">Edit ticket details</h3>' +
-      '<div class="sub" style="margin-bottom:8px">Correct the Row number, or record spoiled sheets for this skid. Changes are logged.</div>' +
+      '<div class="sub" style="margin-bottom:8px">Update this skid\'s steel details, correct the Row number, or record spoiled sheets. Changes are logged.</div>' +
+      '<div class="row">' + ticketFieldsHtml('ed', steel) + '</div>' +
       '<div class="row">' +
-        '<div class="field"><label>Row number</label><input id="editRowInput" value="' + esc(steel['Row']) + '"></div>' +
-        '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="editSpoilInput" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
+        '<div class="field"><label>Row number</label><input id="edRow" value="' + esc(steel['Row']) + '"></div>' +
+        '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="edSpoil" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
       '</div>' +
       '<div class="row">' + operatorFieldHtml('editDetailsOperator') + '</div>' +
       '<button class="btn" id="saveTicketDetailsBtn">Save details</button>' +
@@ -875,12 +954,13 @@
     btn.onclick = function () {
       var operator = document.getElementById('editDetailsOperator').value.trim();
       if (!operator) { toast('Enter an operator name'); return; }
-      var rowVal = document.getElementById('editRowInput').value;
-      var spoil = document.getElementById('editSpoilInput').value;
+      var spoil = document.getElementById('edSpoil').value;
       if (spoil !== '' && (isNaN(Number(spoil)) || Number(spoil) < 0)) { toast('Spoilage must be 0 or more'); return; }
+      var fields = collectTicketFields('ed');
+      fields['Row'] = document.getElementById('edRow').value;
+      fields['Spoilage'] = Number(spoil) || 0;
       btn.disabled = true; btn.textContent = 'Saving…';
-      runMutation('updateTicketDetails',
-        [card.skidId, { Row: rowVal, Spoilage: Number(spoil) || 0 }, operator, newOpId()],
+      runMutation('updateTicketDetails', [card.skidId, fields, operator, newOpId()],
         function () { toast('Details updated'); renderCard(); },
         function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Save details'; });
     };
