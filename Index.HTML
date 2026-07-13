@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.2.1</span>
+      <span class="version" id="appVersion">v1.3.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -197,6 +197,18 @@
   // ---------------------------------------------------------------------------------------
 
   var state = { view: 'all', listView: 'all', skid: null };
+
+  // Remembered operator for this session: the last name typed/picked in any operator field.
+  // Operator fields prefill with it (so nobody re-types their name screen to screen); a
+  // record-specific name still wins when one is passed to operatorFieldHtml.
+  var lastOperator = '';
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (t && t.getAttribute && t.getAttribute('list') === 'operatorNamesList') {
+      var v = String(t.value || '').trim();
+      if (v) lastOperator = v;
+    }
+  });
 
   // Rate/pricing data is fetched once and cached in the browser so the Group -> Sub -> Item
   // dropdowns resolve instantly with no per-selection server round trip. Ticket data is
@@ -525,7 +537,7 @@
   // works even with an empty list so nobody's blocked in the meantime.
   function operatorFieldHtml(id, label, value) {
     return '<div class="field"><label>' + esc(label || 'Operator name') + '</label>' +
-      '<input id="' + id + '" list="operatorNamesList" value="' + esc(value || '') + '" placeholder="Select or type a name" autocomplete="off"></div>';
+      '<input id="' + id + '" list="operatorNamesList" value="' + esc(value || lastOperator) + '" placeholder="Select or type a name" autocomplete="off"></div>';
   }
 
   // Best guess at who ran/entered a skid, used to prefill the operator on edit forms so the
@@ -1970,7 +1982,6 @@
     view.innerHTML =
       '<div class="card"><div class="sub">Run <strong>' + esc(currentRun.runId) + '</strong> &middot; ' + esc(currentRun.machine) +
         (currentRun.operator ? ' &middot; ' + esc(currentRun.operator) : '') + '</div></div>' +
-      '<div class="card" id="runPickedCard" style="display:none"></div>' +
       '<div class="card"><h3 style="margin-top:0;font-size:15px">Find a skid to load</h3>' +
         searchBarHtml('runSkidSearch') +
         '<div id="runSkidPicker" style="margin-top:10px"><div class="loading">Loading&hellip;</div></div></div>' +
@@ -2016,44 +2027,26 @@
     var html = '';
     rows.forEach(function (q) { html += skidRowHtml(q, 'data-pick'); });
     c.innerHTML = html;
+    // One tap: selecting a skid loads it straight onto the run (nothing else is entered here —
+    // usage is captured later at Finish), matching the Review screen's picker.
     Array.prototype.forEach.call(c.querySelectorAll('[data-pick]'), function (btn) {
       btn.onclick = function () {
         var sk = btn.getAttribute('data-pick');
-        renderRunPickedCard(sk, allCache.filter(function (q) { return q.skidId === sk; })[0]);
+        btn.disabled = true;
+        runMutation('runAddSkid', [currentRun.runId, sk, currentRun.operator, newOpId()],
+          function (result) {
+            if (result && result.duplicate) { toast('Already loaded'); btn.disabled = false; return; }
+            runAddedSkids.push(result);
+            toast('Loaded ' + (result.ticket || sk));
+            markCacheStatus(sk, 'In Production'); // drop it from the picker right away
+            var si = document.getElementById('runSkidSearch');
+            renderRunSkidPicker(si ? si.value : ''); // keep the search context
+            renderRunAddedList();
+            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+          },
+          function (err) { toast('Error: ' + err.message); btn.disabled = false; });
       };
     });
-  }
-
-  function renderRunPickedCard(skidId, entry) {
-    var card = document.getElementById('runPickedCard');
-    card.style.display = 'block';
-    var specsHtml = entry ? ('<div class="specs" style="margin:6px 0 10px">' +
-      '<span><b>BW</b> ' + esc(entry.bw) + '</span><span><b>Type</b> ' + esc(entry.type) + '</span>' +
-      '<span><b>Temper</b> ' + esc(entry.temper) + '</span><span><b>End Use</b> ' + esc(entry.endUse) + '</span></div>') : '';
-    card.innerHTML =
-      '<h3 style="margin-top:0;font-size:15px">Load skid onto ' + esc(currentRun.machine) + '</h3>' +
-      '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) +
-        (entry ? ' <span class="badge ' + badgeClassFor(entry.status) + '">' + esc(entry.status) + '</span>' : '') + '</div>' +
-      '<div class="sub" style="margin-bottom:6px">' + esc(entry ? (entry.qty || 0) : 0) + ' sheets on hand</div>' +
-      specsHtml +
-      '<button class="btn" id="addSkidToRunBtn">Add to Run</button>';
-    if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
-    document.getElementById('addSkidToRunBtn').onclick = function () {
-      var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
-      runMutation('runAddSkid', [currentRun.runId, skidId, currentRun.operator, newOpId()],
-        function (result) {
-          if (result && result.duplicate) { toast('Already loaded'); btn.disabled = false; btn.textContent = 'Add to Run'; return; }
-          runAddedSkids.push(result);
-          toast('Loaded ' + (result.ticket || skidId));
-          card.style.display = 'none';
-          document.getElementById('runSkidSearch').value = '';
-          markCacheStatus(skidId, 'In Production'); // drop it from the picker right away
-          renderRunSkidPicker('');
-          renderRunAddedList();
-          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
-        },
-        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Add to Run'; });
-    };
   }
 
   function renderRunAddedList() {
@@ -2229,7 +2222,7 @@
     if (finished) return;
 
     var opField = document.getElementById('runReviewOperator');
-    if (opField && !opField.value) opField.value = run.operator || '';
+    if (opField && run.operator) opField.value = run.operator; // the run's operator wins over the session default
 
     // Save run details
     var saveBtn = document.getElementById('saveRunBtn');
