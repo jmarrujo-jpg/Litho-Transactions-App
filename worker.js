@@ -54,7 +54,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-1' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-2' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -208,6 +208,13 @@ async function makeSheets(env) {
     async addSheet(title) {
       return call(base + ':batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }) });
+    },
+    async meta() {
+      return call(base + '?fields=' + encodeURIComponent('sheets.properties(sheetId,title,gridProperties)'), { headers: auth });
+    },
+    async appendColumns(sheetId, count) {
+      return call(base + ':batchUpdate',
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ appendDimension: { sheetId, dimension: 'COLUMNS', length: count } }] }) });
     },
   };
 }
@@ -366,11 +373,28 @@ async function appendRowObj(sheets, tab, headers, obj) {
   await sheets.append(tab, row);
 }
 
-// Ensures a column exists on a tab; returns refreshed {headers, map}.
+// Looks up a tab's sheetId and current grid width so we can widen it before writing past
+// the last column (a bare values.update past the grid edge fails with "exceeds grid limits").
+async function sheetGrid(sheets, title) {
+  const m = await sheets.meta();
+  const sh = (m.sheets || []).find((s) => s.properties && s.properties.title === title);
+  if (!sh) return null;
+  const gp = sh.properties.gridProperties || {};
+  return { sheetId: sh.properties.sheetId, columnCount: gp.columnCount || 0, rowCount: gp.rowCount || 0 };
+}
+
+// Ensures a column exists on a tab; returns refreshed {headers, map}. Widens the sheet grid
+// first if the new column would fall outside it (otherwise Sheets rejects the write).
 async function ensureColumn(sheets, tab, headers, name) {
   const map = mapOf(headers);
   if (map[name]) return { headers, map };
   const col = headers.length + 1;
+  try {
+    const grid = await sheetGrid(sheets, tab);
+    if (grid && grid.columnCount && col > grid.columnCount) {
+      await sheets.appendColumns(grid.sheetId, col - grid.columnCount);
+    }
+  } catch (e) { /* best-effort widen; fall through to the write, which surfaces any real error */ }
   await sheets.update("'" + tab + "'!" + colLetter(col) + '1', [[name]]);
   const h2 = headers.concat([name]);
   return { headers: h2, map: mapOf(h2) };
