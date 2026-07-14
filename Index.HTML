@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.5.2</span>
+      <span class="version" id="appVersion">v1.5.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2262,14 +2262,15 @@
 
       // Finish Work
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Finish work</h3>' +
-        '<div class="sub" style="margin-bottom:10px">Enter how many sheets of each skid were actually used. Anything less than on-hand is split back out as an available skid. Finishing marks them <strong>Used</strong>.</div>';
+        '<div class="sub" style="margin-bottom:10px">For each skid, enter how many sheets <strong>actually ran</strong>. If a skid didn\'t fully run, lower the number — the leftover goes back to inventory as a usable skid. Finishing marks the ran sheets <strong>Used</strong>.</div>';
       var inProd = run.skids.filter(function (s) { return s.status === 'In Production'; });
       if (!inProd.length) html += '<div class="sub">No in-production skids to finish.</div>';
       else {
         inProd.forEach(function (s) {
-          html += '<div class="field"><label>' + esc(s.ticket) + ' (' + esc(s.qty) + ' on hand)</label>' +
+          html += '<div class="field"><label>' + esc(s.ticket) + ' — sheets that ran (of ' + esc(s.qty) + ')</label>' +
             (Number(s.qty) > 0
-              ? '<input type="number" data-used-skid="' + esc(s.skidId) + '" value="' + esc(s.qty) + '" min="0" max="' + esc(s.qty) + '">'
+              ? '<input type="number" data-used-skid="' + esc(s.skidId) + '" value="' + esc(s.qty) + '" min="0" max="' + esc(s.qty) + '">' +
+                '<div class="sub" id="finishHint_' + esc(s.skidId) + '" style="margin-top:4px"></div>'
               : '<div class="sub">Whole skid (no sheet count)</div>') +
             '</div>';
         });
@@ -2358,7 +2359,23 @@
       search.oninput = function () { renderRunReviewPicker(search.value); };
     }
 
-    // Finish Work
+    // Finish Work — live hint per skid showing how many sheets return to inventory.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-used-skid]'), function (inp) {
+      function upd() {
+        var sk = inp.getAttribute('data-used-skid');
+        var hint = document.getElementById('finishHint_' + sk);
+        var max = Number(inp.getAttribute('max')) || 0;
+        var used = Number(inp.value);
+        if (max > 0 && used > max) { inp.value = max; used = max; }
+        if (!hint) return;
+        if (isNaN(used) || inp.value === '') { hint.textContent = ''; return; }
+        hint.textContent = (max > 0 && used < max)
+          ? (max - used) + ' sheet(s) return to inventory as a new skid.'
+          : 'Full skid used.';
+      }
+      inp.oninput = upd; upd();
+    });
+
     var finishBtn = document.getElementById('finishRunBtn');
     if (finishBtn) finishBtn.onclick = function () {
       var operator = currentRunOperator();
