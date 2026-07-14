@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.5.1</span>
+      <span class="version" id="appVersion">v1.5.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2023,7 +2023,14 @@
         var r = runs.filter(function (x) { return x.runId === rid; })[0];
         currentRun = { runId: r.runId, machine: r.machine, operator: r.operator };
         state.runId = r.runId; runAddedSkids = [];
-        renderRunAddSkids();
+        // Resuming: load the skids already on the run so the session list shows them (not 0).
+        btn.disabled = true; btn.textContent = 'Opening…';
+        google.script.run.withSuccessHandler(function (run) {
+          runAddedSkids = ((run && run.skids) || []).map(function (s) {
+            return { skidId: s.skidId, ticket: s.ticket, loadedOn: s.loadedOn };
+          });
+          renderRunAddSkids();
+        }).withFailureHandler(function () { renderRunAddSkids(); }).getRunDetail(rid);
       };
     });
   }
