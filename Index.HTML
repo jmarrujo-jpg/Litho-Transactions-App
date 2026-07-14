@@ -137,7 +137,7 @@
     </div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.5.3</span>
+      <span class="version" id="appVersion">v1.6.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -449,7 +449,7 @@
     function close() { if (overlay.parentNode) root.removeChild(overlay); }
     overlay.querySelector('#modalOk').onclick = function () { close(); if (opts.onConfirm) opts.onConfirm(); };
     var c = overlay.querySelector('#modalCancel');
-    if (c) c.onclick = close;
+    if (c) c.onclick = function () { close(); if (opts.onCancel) opts.onCancel(); };
     overlay.onclick = function (e) { if (e.target === overlay && opts.cancelText) close(); };
   }
 
@@ -619,6 +619,7 @@
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
+      case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
       default: renderLanding(); return;
     }
@@ -2066,11 +2067,84 @@
     renderRunAddedList();
 
     document.getElementById('submitRunBtn').onclick = function () {
-      var btn = this; btn.disabled = true; btn.textContent = 'Submitting…';
-      runMutation('submitRun', [currentRun.runId, currentRun.operator, newOpId()],
-        function () { showInfo('Submitted for review', 'Run ' + currentRun.runId + ' is ready to review and finish.', function () { openProduction(); }); },
-        function (err) { showModal({ title: 'Could not submit', message: err.message, confirmText: 'OK' }); btn.disabled = false; btn.textContent = 'Submit for Review'; });
+      showModal({
+        title: 'Any partial skids?',
+        message: 'Did any skid on this run not fully run?',
+        confirmText: 'Yes', cancelText: 'No',
+        onConfirm: function () { renderRunPartials(); },
+        onCancel: function () { doSubmitRun(); }
+      });
     };
+  }
+
+  function doSubmitRun() {
+    runMutation('submitRun', [currentRun.runId, currentRun.operator, newOpId()],
+      function () { showInfo('Submitted for review', 'Run ' + currentRun.runId + ' is ready to review and finish.', function () { openProduction(); }); },
+      function (err) { showModal({ title: 'Could not submit', message: err.message, confirmText: 'OK' }); });
+  }
+
+  // "Yes, there were partials" — pick a skid and enter the sheets that actually ran; the
+  // leftover splits back to inventory now. Then submit the run for review.
+  function renderRunPartials() {
+    state.view = 'prodPartials';
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    showTabbar(false); showBack(true);
+    view.innerHTML = '<div class="loading">Loading run&hellip;</div>';
+    google.script.run.withSuccessHandler(function (run) {
+      if (tok !== viewToken) return;
+      renderRunPartialsContent(run);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getRunDetail(currentRun.runId);
+  }
+
+  function renderRunPartialsContent(run) {
+    var view = document.getElementById('view');
+    var skids = (run.skids || []).filter(function (s) { return s.status === 'In Production'; });
+    var html = '<div class="card"><h3 style="margin-top:0">Mark partial skids</h3>' +
+      '<div class="sub" style="margin-bottom:6px">Run ' + esc(run.runId) + ' &middot; ' + esc(run.machine) + '</div>' +
+      '<div class="sub">For any skid that didn\'t fully run, enter the sheets that ran and press Save — the leftover returns to inventory. Skids you don\'t touch stay full. Then submit.</div></div>';
+    if (!skids.length) html += '<div class="card empty">No skids on this run.</div>';
+    else {
+      html += '<div class="card">';
+      skids.forEach(function (s) {
+        html += '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
+          '<div class="ticket-id" style="font-size:15px">' + esc(s.ticket) + ' <span class="sub" style="font-weight:400">' + esc(s.skidId) + '</span></div>' +
+          '<div class="sub">' + esc(s.qty) + ' sheets on hand</div></div>' +
+          '<div style="white-space:nowrap">' +
+            (Number(s.qty) > 0
+              ? '<input type="number" class="partialRan" data-skid="' + esc(s.skidId) + '" data-max="' + esc(s.qty) + '" placeholder="ran" min="1" max="' + esc(s.qty) + '" style="width:78px;padding:6px;margin-right:6px"> ' +
+                '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-savepartial="' + esc(s.skidId) + '">Save</button>'
+              : '<span class="sub">no count</span>') +
+          '</div></div>';
+      });
+      html += '</div>';
+    }
+    html += '<div class="card"><button class="btn success" id="partialsSubmitBtn" style="width:100%">Submit for Review</button></div>';
+    view.innerHTML = html;
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-savepartial]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-savepartial');
+        var inp = document.querySelector('.partialRan[data-skid="' + sk + '"]');
+        var max = Number(inp.getAttribute('data-max')) || 0;
+        var ran = Number(inp.value);
+        if (isNaN(ran) || ran <= 0) { toast('Enter how many sheets ran'); return; }
+        if (max > 0 && ran > max) { toast('Only ' + max + ' sheets on this skid'); return; }
+        if (max > 0 && ran === max) { toast('That\'s the full skid — nothing to split'); return; }
+        btn.disabled = true;
+        runMutation('runSkidPartial', [currentRun.runId, sk, ran, currentRun.operator, newOpId()],
+          function () {
+            toast('Partial recorded');
+            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            renderRunPartials();
+          },
+          function (err) { showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+      };
+    });
+    document.getElementById('partialsSubmitBtn').onclick = function () { doSubmitRun(); };
   }
 
   function skidRowHtml(q, pickAttr) {

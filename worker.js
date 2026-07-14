@@ -60,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-4' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-5' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -132,6 +132,8 @@ async function handle(fn, args, env) {
       return swapRunSkid(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'submitRun': // (runId, operator, opId)
       return submitRun(sheets, args[0], args[1], args[2]);
+    case 'runSkidPartial': // (runId, skidId, sheetsRan, operator, opId)
+      return runSkidPartial(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'finishRun': // (runId, usedMap, operator, opId)
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
     default:
@@ -1047,9 +1049,68 @@ async function submitRun(sheets, runId, operator, opId) {
   return { runId, status: 'Submitted' };
 }
 
+// Splits a skid: keep `keepSheets` on the given row (qty/weight reduced) and spin the leftover
+// off as a fresh available skid back in inventory (Current if raw, WIP if coated). Reused by
+// Finish Work and the submit-time partial entry. `master` must be a live readTab result; the
+// new row is pushed onto master.rows so repeated splits pick unique -R tickets and Skid IDs.
+async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, context) {
+  const skidId = obj['Skid ID'];
+  const ticket = obj['Ticket'];
+  const onHand = num(obj['QTY/LOAD']);
+  const weightPerSheet = onHand > 0 ? num(obj['Weight']) / onHand : 0;
+  const keepWeight = weightPerSheet > 0 ? Math.round(keepSheets * weightPerSheet * 100) / 100 : num(obj['Weight']);
+  const remQty = onHand - keepSheets;
+  const remWeight = Math.round((num(obj['Weight']) - keepWeight) * 100) / 100;
+  const remTicket = await findRemainderTicketId(master.rows, ticket);
+  const remSkid = await nextSkidId(sheets);
+  const remObj = {};
+  master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
+  delete remObj.__row;
+  Object.assign(remObj, {
+    'Ticket': remTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
+    'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
+    'QTY/LOAD': remQty, 'Weight': remWeight,
+    'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket + ' (' + context + ') on ' + todayYMD(),
+    'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
+  });
+  await appendRowObj(sheets, MASTER, master.headers, remObj);
+  master.rows.push(remObj);
+  await eventTx(sheets, { skidId: remSkid, ticket: remTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
+    note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) returned from ' + ticket + ' (' + context + ')', runningTotal: 0 }, '');
+  await stampCells(sheets, MASTER, obj.__row, master.map, { 'QTY/LOAD': keepSheets, 'Weight': keepWeight });
+  return { remSkid, remTicket, remQty, remWeight };
+}
+
+// Submit-time partial: record that a still-in-production skid ran fewer sheets than on hand.
+// Splits the leftover back to inventory now; the skid stays In Production with qty = ran, so
+// Finish Work later marks exactly what ran as Used.
+async function runSkidPartial(sheets, runId, skidId, sheetsRan, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return getRunDetail(sheets, runId);
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  if (String(run['Status']) === 'Finished') throw new Error('Run ' + runId + ' is finished and locked.');
+  let master = await readTab(sheets, MASTER);
+  const ens = await ensureColumn(sheets, MASTER, master.headers, 'Split Of');
+  master = await readTab(sheets, MASTER);
+  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+  if (!obj) throw new Error('Skid not found: ' + skidId);
+  if (String(obj['Run ID']).trim() !== String(runId).trim()) throw new Error('Skid is not on this run.');
+  if ((obj['Status'] || '') !== STATUS.IN_PRODUCTION) throw new Error('Skid is not in production.');
+  const onHand = num(obj['QTY/LOAD']);
+  const ran = Number(sheetsRan);
+  if (isNaN(ran) || ran <= 0) throw new Error('Enter how many sheets ran.');
+  if (onHand > 0 && ran > onHand) throw new Error('Sheets ran (' + ran + ') exceeds on hand (' + onHand + ').');
+  if (!(onHand > 0) || ran >= onHand) return getRunDetail(sheets, runId); // full skid — nothing to split
+  await splitSkidRemainder(sheets, master, obj, ran, operator, 'partial run: ' + ran + ' of ' + onHand);
+  await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'PARTIAL RUN', operator,
+    note: 'Ran ' + ran + ' of ' + onHand + ' sheets on ' + (run['Machine'] || '') + ' (run ' + runId + '); leftover returned to inventory', runningTotal: num(obj['Litho']) }, opId);
+  return getRunDetail(sheets, runId);
+}
+
 // Finish Work: mark the run's In-Production skids Used, stamp Finished On. Partial support —
 // usedMap = { skidId: sheetsUsed }; if used < on-hand, split the remainder off as a new
-// available skid (reuses the same split shape as applyCoating). Idempotent like approveJob.
+// available skid. Idempotent like approveJob.
 async function finishRun(sheets, runId, usedMap, operator, opId) {
   const runs = await readTab(sheets, PRODUCTION);
   const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
@@ -1073,27 +1134,7 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
     const usedFewer = onHand > 0 && used < onHand;
 
     if (usedFewer) {
-      const weightPerSheet = onHand > 0 ? num(obj['Weight']) / onHand : 0;
-      const usedWeight = weightPerSheet > 0 ? Math.round(used * weightPerSheet * 100) / 100 : num(obj['Weight']);
-      const remQty = onHand - used;
-      const remWeight = Math.round((num(obj['Weight']) - usedWeight) * 100) / 100;
-      const remTicket = await findRemainderTicketId(master.rows, ticket);
-      const remSkid = await nextSkidId(sheets);
-      const remObj = {};
-      master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
-      delete remObj.__row;
-      Object.assign(remObj, {
-        'Ticket': remTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
-        'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
-        'QTY/LOAD': remQty, 'Weight': remWeight,
-        'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket + ' (production: ' + used + ' of ' + onHand + ' used) on ' + todayYMD(),
-        'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
-      });
-      await appendRowObj(sheets, MASTER, master.headers, remObj);
-      master.rows.push(remObj);   // so a second split of the same ticket picks -R2, and nextSkidId advances
-      await eventTx(sheets, { skidId: remSkid, ticket: remTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
-        note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) returned from ' + ticket + ' after production', runningTotal: 0 }, '');
-      await stampCells(sheets, MASTER, obj.__row, master.map, { 'QTY/LOAD': used, 'Weight': usedWeight });
+      await splitSkidRemainder(sheets, master, obj, used, operator, 'production: ' + used + ' of ' + onHand + ' used');
     }
 
     await stampCells(sheets, MASTER, obj.__row, master.map, {
