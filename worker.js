@@ -60,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'production-5' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'reports-1' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -136,6 +136,11 @@ async function handle(fn, args, env) {
       return runSkidPartial(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'finishRun': // (runId, usedMap, operator, opId)
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
+    // ---- reports ----
+    case 'getLithoReport': // (startYMD, endYMD)
+      return getLithoReport(sheets, args[0], args[1]);
+    case 'getMetalsReport': // (startYMD, endYMD)
+      return getMetalsReport(sheets, args[0], args[1]);
     default:
       throw new Error('Unknown function: ' + fn);
   }
@@ -1145,4 +1150,49 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
   }
   await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Finished', 'Finished On': todayYMD() });
   return getRunDetail(sheets, runId);
+}
+
+// ================= REPORTS =========================================================
+// "What was produced" for a day or a date range, per department.
+function inRange(v, start, end) {
+  const d = toYMD(v);
+  return !!d && d >= start && d <= end;
+}
+
+// Litho produced = skids whose litho was applied (First Coated At) in the range and that got
+// past Pending (WIP / In Production / Used) — i.e. coatings that actually went through.
+async function getLithoReport(sheets, start, end) {
+  start = start || todayYMD();
+  end = end || start;
+  const { rows } = await readObjects(sheets, MASTER, true);
+  const out = [];
+  let totalLitho = 0;
+  rows.forEach((o) => {
+    const st = o['Status'] || '';
+    if (st !== STATUS.WIP && st !== STATUS.IN_PRODUCTION && st !== STATUS.USED) return;
+    if (!inRange(o['First Coated At'], start, end)) return;
+    const litho = num(o['Litho']);
+    totalLitho += litho;
+    out.push({ ticket: o['Ticket'], skidId: o['Skid ID'], litho, coatedOn: toYMD(o['First Coated At']), by: o['First Coated By'] || '', status: st });
+  });
+  out.sort((a, b) => (a.coatedOn < b.coatedOn ? -1 : a.coatedOn > b.coatedOn ? 1 : 0));
+  return { start, end, count: out.length, totalLitho: Math.round(totalLitho * 100) / 100, rows: out };
+}
+
+// Metals produced = skids marked Used (Finished On) in the range.
+async function getMetalsReport(sheets, start, end) {
+  start = start || todayYMD();
+  end = end || start;
+  const { rows } = await readObjects(sheets, MASTER, true);
+  const out = [];
+  let totalSheets = 0;
+  rows.forEach((o) => {
+    if ((o['Status'] || '') !== STATUS.USED) return;
+    if (!inRange(o['Finished On'], start, end)) return;
+    const sheetsUsed = num(o['QTY/LOAD']);
+    totalSheets += sheetsUsed;
+    out.push({ ticket: o['Ticket'], skidId: o['Skid ID'], finishedOn: toYMD(o['Finished On']), by: o['Used By'] || '', sheets: sheetsUsed });
+  });
+  out.sort((a, b) => (a.finishedOn < b.finishedOn ? -1 : a.finishedOn > b.finishedOn ? 1 : 0));
+  return { start, end, count: out.length, totalSheets, rows: out };
 }

@@ -142,7 +142,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.6.1</span>
+      <span class="version" id="appVersion">v1.7.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -622,6 +622,7 @@
     }
     switch (state.view) {
       case 'all': renderLanding(); return;                 // litho list -> landing
+      case 'reports': renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
@@ -640,12 +641,14 @@
     view.innerHTML =
       '<button class="btn secondary" id="tileSearch" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🔎&nbsp; Search for a Ticket</button>' +
       '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
-      '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px">Production</button>';
+      '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
+      '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px">📊&nbsp; Reports</button>';
     document.getElementById('tileSearch').onclick = function () {
       showInfo('Search for a Ticket', 'This is coming soon — for now, open a department and use its search.', null);
     };
     document.getElementById('tileLitho').onclick = openLitho;
     document.getElementById('tileProduction').onclick = openProduction;
+    document.getElementById('tileReports').onclick = openReports;
   }
 
   // Opens the Litho department exactly as the app worked before: the combined ticket list
@@ -655,6 +658,95 @@
     nextViewToken();
     showTabbar(true); showBack(true); setDept('Litho');
     renderAll();
+  }
+
+  // ---------------- Reports (what was produced, by day or range) ----------------
+  var reportDept = 'litho';
+  function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+
+  function openReports() {
+    state.view = 'reports';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Reports');
+    renderReports();
+  }
+
+  function renderReports() {
+    state.view = 'reports';
+    var view = document.getElementById('view');
+    var today = todayStr();
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
+        '<div class="sub" style="margin-bottom:10px">See what was produced for a day or a date range.</div>' +
+        selectField('reportDeptSel', 'Department', [{ value: 'litho', text: 'Litho' }, { value: 'metals', text: 'Metals' }], reportDept) +
+        '<div class="row">' +
+          '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
+          '<div class="field"><label>To</label><input type="date" id="reportTo" value="' + esc(today) + '"></div>' +
+        '</div>' +
+        '<div class="row" style="gap:8px;margin-bottom:10px">' +
+          '<button class="btn secondary" id="reportToday" style="flex:1">Today</button>' +
+          '<button class="btn secondary" id="reportWeek" style="flex:1">This week</button>' +
+        '</div>' +
+        '<button class="btn" id="runReportBtn" style="width:100%">Generate report</button>' +
+      '</div>' +
+      '<div id="reportResults"></div>';
+
+    var from = document.getElementById('reportFrom');
+    var to = document.getElementById('reportTo');
+    document.getElementById('reportToday').onclick = function () { from.value = todayStr(); to.value = todayStr(); };
+    document.getElementById('reportWeek').onclick = function () {
+      var d = new Date(); var sun = new Date(d); sun.setDate(d.getDate() - d.getDay());
+      var sat = new Date(sun); sat.setDate(sun.getDate() + 6);
+      from.value = ymd(sun); to.value = ymd(sat);
+    };
+    document.getElementById('runReportBtn').onclick = function () {
+      var dept = document.getElementById('reportDeptSel').value || 'litho';
+      var f = from.value, t = to.value || from.value;
+      if (!f) { toast('Pick a date'); return; }
+      if (t < f) { toast('"To" is before "From"'); return; }
+      reportDept = dept;
+      var results = document.getElementById('reportResults');
+      results.innerHTML = '<div class="loading">Building report&hellip;</div>';
+      var fn = dept === 'metals' ? 'getMetalsReport' : 'getLithoReport';
+      var runner = google.script.run
+        .withSuccessHandler(function (r) { renderReportResults(dept, r); })
+        .withFailureHandler(function (err) { results.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>'; });
+      runner[fn](f, t);
+    };
+  }
+
+  function renderReportResults(dept, r) {
+    var el = document.getElementById('reportResults');
+    if (!el) return;
+    var range = (r.start === r.end) ? r.start : (r.start + ' to ' + r.end);
+    var html = '<div class="card">';
+    if (dept === 'metals') {
+      html += '<h3 style="margin-top:0;font-size:15px">Metals produced &middot; ' + esc(range) + '</h3>' +
+        '<div class="row"><div class="stat"><div class="num">' + (r.count || 0) + '</div><div class="label">Skids used</div></div>' +
+        '<div class="stat"><div class="num">' + (r.totalSheets || 0) + '</div><div class="label">Sheets</div></div></div>';
+      if (!r.rows || !r.rows.length) html += '<div class="sub" style="margin-top:8px">Nothing in this range.</div>';
+      else {
+        html += '<table style="margin-top:8px"><thead><tr><th>Ticket</th><th>Skid</th><th>Finished</th><th>By</th><th>Sheets</th></tr></thead><tbody>';
+        r.rows.forEach(function (x) {
+          html += '<tr><td>' + esc(x.ticket || '(no ticket)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.finishedOn) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.sheets) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      }
+    } else {
+      html += '<h3 style="margin-top:0;font-size:15px">Litho produced &middot; ' + esc(range) + '</h3>' +
+        '<div class="row"><div class="stat"><div class="num">' + (r.count || 0) + '</div><div class="label">Tickets</div></div>' +
+        '<div class="stat"><div class="num">' + money(r.totalLitho) + '</div><div class="label">Total litho</div></div></div>';
+      if (!r.rows || !r.rows.length) html += '<div class="sub" style="margin-top:8px">Nothing in this range.</div>';
+      else {
+        html += '<table style="margin-top:8px"><thead><tr><th>Ticket</th><th>Skid</th><th>Coated</th><th>By</th><th>Litho</th></tr></thead><tbody>';
+        r.rows.forEach(function (x) {
+          html += '<tr><td>' + esc(x.ticket || '(no ticket)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.coatedOn) + '</td><td>' + esc(x.by) + '</td><td>' + money(x.litho) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      }
+    }
+    html += '</div>';
+    el.innerHTML = html;
   }
 
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
@@ -1955,7 +2047,7 @@
   function openProduction() {
     state.view = 'prodHome'; state.runId = null; runSwapSkid = null;
     nextViewToken();
-    showTabbar(false); showBack(true); setDept('Production');
+    showTabbar(false); showBack(true); setDept('Metals');
     renderProductionHome();
   }
 
@@ -1966,7 +2058,7 @@
     var tok = nextViewToken();
     view.innerHTML =
       '<div class="card">' +
-        '<h3 style="margin-top:0">Production — Log Work</h3>' +
+        '<h3 style="margin-top:0">Metals — Log Work</h3>' +
         '<div class="sub" style="margin-bottom:12px">Start a work session on a line or press, then load the skids you run. Submit for review when the day is done.</div>' +
         '<div class="row">' +
           operatorFieldHtml('runOperator') +
@@ -2224,7 +2316,7 @@
     var tok = nextViewToken();
     var day = prodReviewDate || todayStr();
     view.innerHTML =
-      '<div class="card"><h3 style="margin-top:0">Review production work</h3>' +
+      '<div class="card"><h3 style="margin-top:0">Review metals work</h3>' +
         '<div class="field"><label>Day</label><input type="date" id="prodReviewDay" value="' + esc(day) + '"></div>' +
         '<div class="sub">Runs submitted that day. Open one to review skids and finish the work.</div></div>' +
       '<div id="prodReviewList"><div class="loading">Loading&hellip;</div></div>';
