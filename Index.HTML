@@ -1,3 +1,4 @@
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <style>
   :root {
     --ink: #131b2e;
@@ -77,6 +78,10 @@
   .badge.wip { background: #eafaf0; color: var(--good); }
   .badge.production { background: #e8edf8; color: #1e3a8a; }
   .badge.used { background: #edeff2; color: #4b5563; }
+  .bwtag {
+    display: inline-block; background: var(--accent); color: #fff; border-radius: 6px;
+    padding: 2px 9px; font-weight: 700; font-size: 13px; margin-right: 8px; white-space: nowrap;
+  }
   .btn {
     background: var(--accent); color: white; border: none; border-radius: 10px;
     padding: 12px 18px; font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap;
@@ -131,6 +136,31 @@
   .modal h3 { margin: 0 0 8px; color: var(--ink); font-size: 19px; }
   .modal p { color: var(--muted); font-size: 15px; margin: 0 0 20px; line-height: 1.5; }
   .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+  /* Wide content (tables) scrolls inside its card instead of stretching the page. */
+  .card { overflow-x: auto; }
+
+  /* Phone-friendly: bigger text/targets, no accidental horizontal scroll, 16px inputs so
+     iOS doesn't zoom on focus. */
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    #app { padding: 10px; }
+    header h1 { font-size: 17px; }
+    .dept { font-size: 14px; }
+    .brand .logo { height: 32px; }
+    .brand { gap: 8px; }
+    .card { padding: 13px; }
+    .field select, .field input, .field textarea { font-size: 16px; padding: 12px; }
+    .btn { padding: 14px 16px; font-size: 16px; }
+    .tabbar { gap: 6px; }
+    .tabbar button { padding: 12px 4px; font-size: 13px; }
+    .ticket-id { font-size: 15px; }
+    .sub { font-size: 13px; }
+    .specs { font-size: 12px; }
+    table { font-size: 12.5px; }
+    th, td { padding: 6px 6px; }
+    .searchwrap input { font-size: 16px; }
+  }
 </style>
 
 <div id="app">
@@ -142,7 +172,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.8.0</span>
+      <span class="version" id="appVersion">v1.9.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -758,6 +788,7 @@
   var countStatus = 'Current';
   var countSort = 'bw';
   var countCache = [];
+  var countGroups = [];
 
   function cmpNumeric(a, b) {
     var na = Number(a), nb = Number(b);
@@ -789,6 +820,7 @@
       '<div class="card"><h3 style="margin-top:0">Litho Steel Count</h3>' +
         '<div class="sub" style="margin-bottom:8px">Walk the floor and check off each skid. Tap Edit to fix its location or sheet count.</div>' +
         operatorFieldHtml('countOperator') +
+        '<div style="margin-bottom:8px">' + searchBarHtml('countSearch') + '</div>' +
         '<div class="tabbar" style="margin-bottom:8px">' +
           '<button id="countCurrent">Current</button><button id="countWip">WIP</button>' +
         '</div>' +
@@ -804,6 +836,7 @@
     document.getElementById('countWip').onclick = function () { countStatus = 'WIP'; setActiveBtn(['countCurrent', 'countWip'], 'countWip'); renderCountList(); };
     document.getElementById('sortBw').onclick = function () { countSort = 'bw'; setActiveBtn(['sortBw', 'sortLoc'], 'sortBw'); renderCountList(); };
     document.getElementById('sortLoc').onclick = function () { countSort = 'loc'; setActiveBtn(['sortBw', 'sortLoc'], 'sortLoc'); renderCountList(); };
+    document.getElementById('countSearch').oninput = function () { renderCountList(); };
 
     google.script.run.withSuccessHandler(function (all) {
       if (tok !== viewToken) return;
@@ -817,7 +850,16 @@
   }
 
   function countRows() {
-    return countCache.filter(function (t) { return (t.status || 'Current') === countStatus; });
+    var term = ((document.getElementById('countSearch') || {}).value || '').trim().toLowerCase();
+    return countCache.filter(function (t) {
+      if ((t.status || 'Current') !== countStatus) return false;
+      if (term) {
+        var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
+                  String(t.skidId).toLowerCase().indexOf(term) !== -1;
+        if (!hit) return false;
+      }
+      return true;
+    });
   }
   function updateCountProgress() {
     var today = todayStr();
@@ -837,22 +879,37 @@
       var d = cmpNumeric(a.row, b.row); return d || cmpTicket(a.ticket, b.ticket);
     });
     updateCountProgress();
-    if (!rows.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel.</div>'; return; }
-    var html = '<div class="card">';
-    var lastGroup = null;
+    if (!rows.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel found.</div>'; return; }
+
+    // Group the sorted rows (already in group order) so each header can Check-all its members.
+    countGroups = [];
+    var byKey = {};
     rows.forEach(function (t) {
-      var group = countSort === 'bw' ? ('BW ' + (t.bw || '—')) : ('Location ' + (t.row || '—'));
-      if (group !== lastGroup) { html += '<div style="font-weight:700;color:var(--accent);margin:10px 0 4px">' + esc(group) + '</div>'; lastGroup = group; }
-      var checked = t.countedOn === today;
-      html += '<div class="queue-item" style="padding:6px 0">' +
-        '<label style="display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;flex:1">' +
-          '<input type="checkbox" class="countChk" data-skid="' + esc(t.skidId) + '" style="width:20px;height:20px;flex:0 0 auto"' + (checked ? ' checked' : '') + '>' +
-          '<span style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
-            '<span class="sub">BW ' + esc(t.bw) + ' &middot; Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets</span></span>' +
-        '</label>' +
-        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-countedit="' + esc(t.skidId) + '">Edit</button>' +
-      '</div>' +
-      '<div id="countEdit_' + esc(t.skidId) + '" style="display:none;padding:0 0 10px"></div>';
+      var key = countSort === 'bw' ? ('BW ' + (t.bw || '—')) : ('Location ' + (t.row || '—'));
+      if (!byKey[key]) { byKey[key] = { key: key, items: [] }; countGroups.push(byKey[key]); }
+      byKey[key].items.push(t);
+    });
+
+    var html = '<div class="card">';
+    countGroups.forEach(function (g, gi) {
+      var allDone = g.items.every(function (t) { return t.countedOn === today; });
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 4px">' +
+        '<span style="font-weight:700;color:var(--accent)">' + esc(g.key) + ' <span class="sub" style="font-weight:400">(' + g.items.length + ')</span></span>' +
+        '<button class="btn secondary" style="padding:5px 10px;font-size:12px" data-checkgroup="' + gi + '">' + (allDone ? 'Uncheck all' : 'Check all') + '</button>' +
+      '</div>';
+      g.items.forEach(function (t) {
+        var checked = t.countedOn === today;
+        html += '<div class="queue-item" style="padding:6px 0">' +
+          '<label style="display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;flex:1">' +
+            '<input type="checkbox" class="countChk" data-skid="' + esc(t.skidId) + '" style="width:22px;height:22px;flex:0 0 auto"' + (checked ? ' checked' : '') + '>' +
+            '<span style="min-width:0"><span class="bwtag">BW ' + esc(t.bw || '?') + '</span>' +
+              '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span>' +
+              '<div class="sub">Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets</div></span>' +
+          '</label>' +
+          '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-countedit="' + esc(t.skidId) + '">Edit</button>' +
+        '</div>' +
+        '<div id="countEdit_' + esc(t.skidId) + '" style="display:none;padding:0 0 10px"></div>';
+      });
     });
     html += '</div>';
     el.innerHTML = html;
@@ -880,6 +937,23 @@
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-countedit]'), function (btn) {
       btn.onclick = function () { openCountEdit(btn.getAttribute('data-countedit')); };
+    });
+    // Check / uncheck a whole group at once.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-checkgroup]'), function (btn) {
+      btn.onclick = function () {
+        var g = countGroups[Number(btn.getAttribute('data-checkgroup'))];
+        if (!g) return;
+        var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+        var today = todayStr();
+        var want = !g.items.every(function (t) { return t.countedOn === today; }); // if all done -> uncheck
+        g.items.forEach(function (t) {
+          if ((t.countedOn === today) === want) return; // already in desired state
+          t.countedOn = want ? today : '';
+          runMutation('setSkidCounted', [t.skidId, want, op, newOpId()], function () {},
+            function (err) { toast('Count not saved: ' + err.message); });
+        });
+        renderCountList();
+      };
     });
   }
 
