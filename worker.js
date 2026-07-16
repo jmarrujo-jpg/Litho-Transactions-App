@@ -60,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'reports-1' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-1' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -141,6 +141,9 @@ async function handle(fn, args, env) {
       return getLithoReport(sheets, args[0], args[1]);
     case 'getMetalsReport': // (startYMD, endYMD)
       return getMetalsReport(sheets, args[0], args[1]);
+    // ---- steel count ----
+    case 'setSkidCounted': // (skidId, counted, operator, opId)
+      return setSkidCounted(sheets, args[0], args[1], args[2], args[3]);
     default:
       throw new Error('Unknown function: ' + fn);
   }
@@ -294,6 +297,7 @@ async function getAllTickets(sheets) {
     skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
+    row: o['Row'] != null ? o['Row'] : '', countedOn: toYMD(o['Counted At']),
   }));
 }
 function activeCoatings(history) {
@@ -1150,6 +1154,23 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
   }
   await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Finished', 'Finished On': todayYMD() });
   return getRunDetail(sheets, runId);
+}
+
+// ================= STEEL COUNT =====================================================
+// Physical floor count: check a skid off (stamp Counted At today / clear it). Location and
+// sheet-count changes reuse updateTicketDetails (Row / QTY/LOAD). No tx-log spam per check.
+async function setSkidCounted(sheets, skidId, counted, operator, opId) {
+  await normalizeMasterRows(sheets);
+  let master = await readTab(sheets, MASTER);
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Counted At');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Counted By');
+  master = await readTab(sheets, MASTER);
+  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+  if (!obj) throw new Error('Skid not found: ' + skidId);
+  await stampCells(sheets, MASTER, obj.__row, master.map, counted
+    ? { 'Counted At': todayYMD(), 'Counted By': operator || '' }
+    : { 'Counted At': '', 'Counted By': '' });
+  return { skidId, countedOn: counted ? todayYMD() : '' };
 }
 
 // ================= REPORTS =========================================================

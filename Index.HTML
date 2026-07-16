@@ -142,7 +142,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.7.0</span>
+      <span class="version" id="appVersion">v1.8.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -623,6 +623,7 @@
     switch (state.view) {
       case 'all': renderLanding(); return;                 // litho list -> landing
       case 'reports': renderLanding(); return;
+      case 'count': renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
@@ -642,13 +643,15 @@
       '<button class="btn secondary" id="tileSearch" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🔎&nbsp; Search for a Ticket</button>' +
       '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
-      '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px">📊&nbsp; Reports</button>';
+      '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' +
+      '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px">🧮&nbsp; Litho Steel Count</button>';
     document.getElementById('tileSearch').onclick = function () {
       showInfo('Search for a Ticket', 'This is coming soon — for now, open a department and use its search.', null);
     };
     document.getElementById('tileLitho').onclick = openLitho;
     document.getElementById('tileProduction').onclick = openProduction;
     document.getElementById('tileReports').onclick = openReports;
+    document.getElementById('tileCount').onclick = openSteelCount;
   }
 
   // Opens the Litho department exactly as the app worked before: the combined ticket list
@@ -747,6 +750,169 @@
     }
     html += '</div>';
     el.innerHTML = html;
+  }
+
+  // ---------------- Litho Steel Count (walk-the-floor physical count) ----------------
+  // Two sort modes (BW->Ticket, Location->Ticket), split Current vs WIP. Check a skid off
+  // (persists as Counted At = today) and fix its location / sheet count inline as you go.
+  var countStatus = 'Current';
+  var countSort = 'bw';
+  var countCache = [];
+
+  function cmpNumeric(a, b) {
+    var na = Number(a), nb = Number(b);
+    var aNum = !isNaN(na) && String(a).trim() !== '';
+    var bNum = !isNaN(nb) && String(b).trim() !== '';
+    if (aNum && bNum) return na - nb;
+    if (aNum) return -1;
+    if (bNum) return 1;
+    return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true });
+  }
+  function cmpTicket(a, b) { return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true }); }
+  function setActiveBtn(ids, activeId) {
+    ids.forEach(function (id) { var b = document.getElementById(id); if (b) b.classList.toggle('active', id === activeId); });
+  }
+
+  function openSteelCount() {
+    state.view = 'count';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Steel Count');
+    countCache = [];
+    renderSteelCount();
+  }
+
+  function renderSteelCount() {
+    state.view = 'count';
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Litho Steel Count</h3>' +
+        '<div class="sub" style="margin-bottom:8px">Walk the floor and check off each skid. Tap Edit to fix its location or sheet count.</div>' +
+        operatorFieldHtml('countOperator') +
+        '<div class="tabbar" style="margin-bottom:8px">' +
+          '<button id="countCurrent">Current</button><button id="countWip">WIP</button>' +
+        '</div>' +
+        '<div class="tabbar">' +
+          '<button id="sortBw">By BW &rarr; Ticket</button><button id="sortLoc">By Location &rarr; Ticket</button>' +
+        '</div>' +
+        '<div class="sub" id="countProgress" style="margin-top:8px"></div>' +
+      '</div>' +
+      '<div id="countList"><div class="loading">Loading steel&hellip;</div></div>';
+    setActiveBtn(['countCurrent', 'countWip'], countStatus === 'WIP' ? 'countWip' : 'countCurrent');
+    setActiveBtn(['sortBw', 'sortLoc'], countSort === 'loc' ? 'sortLoc' : 'sortBw');
+    document.getElementById('countCurrent').onclick = function () { countStatus = 'Current'; setActiveBtn(['countCurrent', 'countWip'], 'countCurrent'); renderCountList(); };
+    document.getElementById('countWip').onclick = function () { countStatus = 'WIP'; setActiveBtn(['countCurrent', 'countWip'], 'countWip'); renderCountList(); };
+    document.getElementById('sortBw').onclick = function () { countSort = 'bw'; setActiveBtn(['sortBw', 'sortLoc'], 'sortBw'); renderCountList(); };
+    document.getElementById('sortLoc').onclick = function () { countSort = 'loc'; setActiveBtn(['sortBw', 'sortLoc'], 'sortLoc'); renderCountList(); };
+
+    google.script.run.withSuccessHandler(function (all) {
+      if (tok !== viewToken) return;
+      countCache = all || [];
+      renderCountList();
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('countList');
+      if (el) el.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getAllTickets();
+  }
+
+  function countRows() {
+    return countCache.filter(function (t) { return (t.status || 'Current') === countStatus; });
+  }
+  function updateCountProgress() {
+    var today = todayStr();
+    var rows = countRows();
+    var counted = rows.filter(function (t) { return t.countedOn === today; }).length;
+    var prog = document.getElementById('countProgress');
+    if (prog) prog.textContent = counted + ' of ' + rows.length + ' counted today';
+  }
+
+  function renderCountList() {
+    var el = document.getElementById('countList');
+    if (!el) return;
+    var today = todayStr();
+    var rows = countRows().slice();
+    rows.sort(function (a, b) {
+      if (countSort === 'bw') { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); }
+      var d = cmpNumeric(a.row, b.row); return d || cmpTicket(a.ticket, b.ticket);
+    });
+    updateCountProgress();
+    if (!rows.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel.</div>'; return; }
+    var html = '<div class="card">';
+    var lastGroup = null;
+    rows.forEach(function (t) {
+      var group = countSort === 'bw' ? ('BW ' + (t.bw || '—')) : ('Location ' + (t.row || '—'));
+      if (group !== lastGroup) { html += '<div style="font-weight:700;color:var(--accent);margin:10px 0 4px">' + esc(group) + '</div>'; lastGroup = group; }
+      var checked = t.countedOn === today;
+      html += '<div class="queue-item" style="padding:6px 0">' +
+        '<label style="display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;flex:1">' +
+          '<input type="checkbox" class="countChk" data-skid="' + esc(t.skidId) + '" style="width:20px;height:20px;flex:0 0 auto"' + (checked ? ' checked' : '') + '>' +
+          '<span style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+            '<span class="sub">BW ' + esc(t.bw) + ' &middot; Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets</span></span>' +
+        '</label>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-countedit="' + esc(t.skidId) + '">Edit</button>' +
+      '</div>' +
+      '<div id="countEdit_' + esc(t.skidId) + '" style="display:none;padding:0 0 10px"></div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    wireCountList();
+  }
+
+  function wireCountList() {
+    Array.prototype.forEach.call(document.querySelectorAll('.countChk'), function (chk) {
+      chk.onchange = function () {
+        var sk = chk.getAttribute('data-skid');
+        var checked = chk.checked;
+        var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+        var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
+        if (t) t.countedOn = checked ? todayStr() : ''; // optimistic
+        updateCountProgress();
+        runMutation('setSkidCounted', [sk, checked, op, newOpId()],
+          function () {},
+          function (err) {
+            toast('Count not saved: ' + err.message);
+            chk.checked = !checked;
+            if (t) t.countedOn = !checked ? todayStr() : '';
+            updateCountProgress();
+          });
+      };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-countedit]'), function (btn) {
+      btn.onclick = function () { openCountEdit(btn.getAttribute('data-countedit')); };
+    });
+  }
+
+  function openCountEdit(sk) {
+    var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
+    var form = document.getElementById('countEdit_' + sk);
+    if (!form || !t) return;
+    if (form.style.display === 'block') { form.style.display = 'none'; form.innerHTML = ''; return; }
+    form.style.display = 'block';
+    form.innerHTML =
+      '<div class="row">' +
+        '<div class="field"><label>Location</label><input id="ceLoc_' + esc(sk) + '" value="' + esc(t.row || '') + '"></div>' +
+        '<div class="field"><label>Sheets (qty)</label><input type="number" id="ceQty_' + esc(sk) + '" min="0" value="' + esc(t.qty || 0) + '"></div>' +
+      '</div>' +
+      '<button class="btn success" id="ceSave_' + esc(sk) + '">Save</button> ' +
+      '<button class="btn secondary" id="ceCancel_' + esc(sk) + '">Cancel</button>';
+    document.getElementById('ceCancel_' + sk).onclick = function () { form.style.display = 'none'; form.innerHTML = ''; };
+    document.getElementById('ceSave_' + sk).onclick = function () {
+      var loc = document.getElementById('ceLoc_' + sk).value;
+      var qty = document.getElementById('ceQty_' + sk).value;
+      var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+      if (qty !== '' && (isNaN(Number(qty)) || Number(qty) < 0)) { toast('Sheets must be 0 or more'); return; }
+      var fields = { Row: loc };
+      if (qty !== '') fields['QTY/LOAD'] = Number(qty);
+      var btn = document.getElementById('ceSave_' + sk); btn.disabled = true; btn.textContent = 'Saving…';
+      runMutation('updateTicketDetails', [sk, fields, op, newOpId()],
+        function () {
+          if (t) { t.row = loc; if (qty !== '') t.qty = Number(qty); }
+          toast('Updated');
+          renderCountList();
+        },
+        function (err) { showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' }); btn.disabled = false; btn.textContent = 'Save'; });
+    };
   }
 
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
