@@ -25,8 +25,8 @@
     border-bottom: 3px solid var(--accent); padding-bottom: 10px;
   }
   .dept {
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    font-size: 16px; font-weight: 700; color: var(--accent); pointer-events: none;
+    flex: 1; text-align: center; min-width: 0; font-size: 16px; font-weight: 700;
+    color: var(--accent); pointer-events: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .brand { display: flex; align-items: center; gap: 12px; }
   .brand .logo { height: 40px; width: auto; flex: 0 0 auto; display: block; }
@@ -161,6 +161,19 @@
     th, td { padding: 6px 6px; }
     .searchwrap input { font-size: 16px; }
   }
+
+  /* Printable count sheet (hidden on screen; shown only when printing / Save as PDF). */
+  #printArea { display: none; }
+  @media print {
+    #app, #toast, #modalRoot, datalist { display: none !important; }
+    #printArea { display: block !important; }
+    #printArea h2 { margin: 0 0 4px; font-size: 18px; }
+    #printArea .pmeta { font-size: 12px; margin-bottom: 10px; }
+    #printArea .pgroup { font-weight: 700; margin: 12px 0 2px; }
+    #printArea table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #printArea th, #printArea td { border: 1px solid #000; padding: 4px 6px; text-align: left; }
+    #printArea th:first-child, #printArea td:first-child { width: 34px; text-align: center; }
+  }
 </style>
 
 <div id="app">
@@ -172,7 +185,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.9.0</span>
+      <span class="version" id="appVersion">v1.10.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -186,6 +199,7 @@
 <datalist id="operatorNamesList"></datalist>
 <div class="toast" id="toast"></div>
 <div id="modalRoot"></div>
+<div id="printArea"></div>
 
 <script>
   // ---- Hosting shim ----------------------------------------------------------------------
@@ -819,15 +833,19 @@
     view.innerHTML =
       '<div class="card"><h3 style="margin-top:0">Litho Steel Count</h3>' +
         '<div class="sub" style="margin-bottom:8px">Walk the floor and check off each skid. Tap Edit to fix its location or sheet count.</div>' +
-        operatorFieldHtml('countOperator') +
-        '<div style="margin-bottom:8px">' + searchBarHtml('countSearch') + '</div>' +
         '<div class="tabbar" style="margin-bottom:8px">' +
           '<button id="countCurrent">Current</button><button id="countWip">WIP</button>' +
         '</div>' +
         '<div class="tabbar">' +
           '<button id="sortBw">By BW &rarr; Ticket</button><button id="sortLoc">By Location &rarr; Ticket</button>' +
         '</div>' +
-        '<div class="sub" id="countProgress" style="margin-top:8px"></div>' +
+        '<div class="row" style="align-items:center;margin-top:10px">' +
+          '<div class="sub" id="countProgress" style="flex:1"></div>' +
+          '<button class="btn secondary" id="countPrintBtn" style="padding:8px 12px;font-size:13px">🖨&nbsp; Print list</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="countSearchBar" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--line)">' +
+        searchBarHtml('countSearch') +
       '</div>' +
       '<div id="countList"><div class="loading">Loading steel&hellip;</div></div>';
     setActiveBtn(['countCurrent', 'countWip'], countStatus === 'WIP' ? 'countWip' : 'countCurrent');
@@ -837,6 +855,7 @@
     document.getElementById('sortBw').onclick = function () { countSort = 'bw'; setActiveBtn(['sortBw', 'sortLoc'], 'sortBw'); renderCountList(); };
     document.getElementById('sortLoc').onclick = function () { countSort = 'loc'; setActiveBtn(['sortBw', 'sortLoc'], 'sortLoc'); renderCountList(); };
     document.getElementById('countSearch').oninput = function () { renderCountList(); };
+    document.getElementById('countPrintBtn').onclick = printCount;
 
     google.script.run.withSuccessHandler(function (all) {
       if (tok !== viewToken) return;
@@ -869,33 +888,37 @@
     if (prog) prog.textContent = counted + ' of ' + rows.length + ' counted today';
   }
 
-  function renderCountList() {
-    var el = document.getElementById('countList');
-    if (!el) return;
-    var today = todayStr();
+  // Sorted, grouped rows for the current status/sort/search.
+  function countSortedGroups() {
     var rows = countRows().slice();
     rows.sort(function (a, b) {
       if (countSort === 'bw') { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); }
       var d = cmpNumeric(a.row, b.row); return d || cmpTicket(a.ticket, b.ticket);
     });
-    updateCountProgress();
-    if (!rows.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel found.</div>'; return; }
-
-    // Group the sorted rows (already in group order) so each header can Check-all its members.
-    countGroups = [];
-    var byKey = {};
+    var groups = [], byKey = {};
     rows.forEach(function (t) {
       var key = countSort === 'bw' ? ('BW ' + (t.bw || '—')) : ('Location ' + (t.row || '—'));
-      if (!byKey[key]) { byKey[key] = { key: key, items: [] }; countGroups.push(byKey[key]); }
+      if (!byKey[key]) { byKey[key] = { key: key, items: [] }; groups.push(byKey[key]); }
       byKey[key].items.push(t);
     });
+    return groups;
+  }
 
+  function renderCountList() {
+    var el = document.getElementById('countList');
+    if (!el) return;
+    var today = todayStr();
+    updateCountProgress();
+    countGroups = countSortedGroups();
+    if (!countGroups.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel found.</div>'; return; }
+
+    var byLoc = countSort === 'loc'; // Check-all only when counting by location
     var html = '<div class="card">';
     countGroups.forEach(function (g, gi) {
       var allDone = g.items.every(function (t) { return t.countedOn === today; });
       html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 4px">' +
         '<span style="font-weight:700;color:var(--accent)">' + esc(g.key) + ' <span class="sub" style="font-weight:400">(' + g.items.length + ')</span></span>' +
-        '<button class="btn secondary" style="padding:5px 10px;font-size:12px" data-checkgroup="' + gi + '">' + (allDone ? 'Uncheck all' : 'Check all') + '</button>' +
+        (byLoc ? '<button class="btn secondary" style="padding:5px 10px;font-size:12px" data-checkgroup="' + gi + '">' + (allDone ? 'Uncheck all' : 'Check all') + '</button>' : '') +
       '</div>';
       g.items.forEach(function (t) {
         var checked = t.countedOn === today;
@@ -921,7 +944,7 @@
       chk.onchange = function () {
         var sk = chk.getAttribute('data-skid');
         var checked = chk.checked;
-        var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+        var op = lastOperator;
         var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
         if (t) t.countedOn = checked ? todayStr() : ''; // optimistic
         updateCountProgress();
@@ -943,7 +966,7 @@
       btn.onclick = function () {
         var g = countGroups[Number(btn.getAttribute('data-checkgroup'))];
         if (!g) return;
-        var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+        var op = lastOperator;
         var today = todayStr();
         var want = !g.items.every(function (t) { return t.countedOn === today; }); // if all done -> uncheck
         g.items.forEach(function (t) {
@@ -974,7 +997,7 @@
     document.getElementById('ceSave_' + sk).onclick = function () {
       var loc = document.getElementById('ceLoc_' + sk).value;
       var qty = document.getElementById('ceQty_' + sk).value;
-      var op = ((document.getElementById('countOperator') || {}).value || '').trim();
+      var op = lastOperator;
       if (qty !== '' && (isNaN(Number(qty)) || Number(qty) < 0)) { toast('Sheets must be 0 or more'); return; }
       var fields = { Row: loc };
       if (qty !== '') fields['QTY/LOAD'] = Number(qty);
@@ -987,6 +1010,32 @@
         },
         function (err) { showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' }); btn.disabled = false; btn.textContent = 'Save'; });
     };
+  }
+
+  // Print a check sheet (like the paper WIP list): grouped, with a check next to the ones
+  // marked off. Uses the browser print dialog, where you can Save as PDF.
+  function printCount() {
+    var today = todayStr();
+    var groups = countSortedGroups();
+    var sortLabel = countSort === 'bw' ? 'BW then Ticket' : 'Location then Ticket';
+    var html = '<h2>Litho Steel Count &mdash; ' + esc(countStatus) + '</h2>' +
+      '<div class="pmeta">Sorted by ' + esc(sortLabel) + ' &middot; ' + esc(today) + '</div>';
+    if (!groups.length) {
+      html += '<div>No ' + esc(countStatus) + ' steel.</div>';
+    } else {
+      groups.forEach(function (g) {
+        html += '<div class="pgroup">' + esc(g.key) + '</div>' +
+          '<table><thead><tr><th>&#10003;</th><th>BW</th><th>Ticket</th><th>Location</th><th>Sheets</th></tr></thead><tbody>';
+        g.items.forEach(function (t) {
+          var mark = t.countedOn === today ? '&#10003;' : '';
+          html += '<tr><td>' + mark + '</td><td>' + esc(t.bw) + '</td><td>' + esc(t.ticket || '(no ticket)') +
+            '</td><td>' + esc(t.row || '') + '</td><td>' + esc(t.qty || 0) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+      });
+    }
+    document.getElementById('printArea').innerHTML = html;
+    window.print();
   }
 
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
