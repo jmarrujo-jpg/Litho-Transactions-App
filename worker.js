@@ -60,7 +60,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-1' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-2' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -144,6 +144,8 @@ async function handle(fn, args, env) {
     // ---- steel count ----
     case 'setSkidCounted': // (skidId, counted, operator, opId)
       return setSkidCounted(sheets, args[0], args[1], args[2], args[3]);
+    case 'setSkidsCounted': // (skidIds[], counted, operator, opId)
+      return setSkidsCounted(sheets, args[0], args[1], args[2], args[3]);
     default:
       throw new Error('Unknown function: ' + fn);
   }
@@ -1159,18 +1161,33 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
 // ================= STEEL COUNT =====================================================
 // Physical floor count: check a skid off (stamp Counted At today / clear it). Location and
 // sheet-count changes reuse updateTicketDetails (Row / QTY/LOAD). No tx-log spam per check.
+// Mark one or many skids counted/uncounted in a SINGLE read + SINGLE write. Kept read-light
+// on purpose: counting fires lots of these, and Sheets caps reads at 60/min/user. No
+// normalizeMasterRows (the skids already exist), and we only re-read if a column was just added.
+async function setSkidsCounted(sheets, skidIds, counted, operator, opId) {
+  skidIds = (skidIds || []).map(function (s) { return String(s).trim(); });
+  let master = await readTab(sheets, MASTER); // 1 read
+  let reread = false;
+  if (master.headers.indexOf('Counted At') === -1) { const e = await ensureColumn(sheets, MASTER, master.headers, 'Counted At'); master.headers = e.headers; reread = true; }
+  if (master.headers.indexOf('Counted By') === -1) { const e = await ensureColumn(sheets, MASTER, master.headers, 'Counted By'); master.headers = e.headers; reread = true; }
+  if (reread) master = await readTab(sheets, MASTER); // only the very first count ever
+  const map = master.map;
+  const cAt = map['Counted At'], cBy = map['Counted By'];
+  const want = {};
+  skidIds.forEach(function (id) { want[id] = true; });
+  const valAt = counted ? todayYMD() : '';
+  const valBy = counted ? (operator || '') : '';
+  const data = [];
+  master.rows.forEach(function (o) {
+    if (!want[String(o['Skid ID']).trim()]) return;
+    if (cAt) data.push({ range: "'" + MASTER + "'!" + colLetter(cAt) + o.__row, values: [[valAt]] });
+    if (cBy) data.push({ range: "'" + MASTER + "'!" + colLetter(cBy) + o.__row, values: [[valBy]] });
+  });
+  if (data.length) await sheets.batchUpdate(data); // 1 write for the whole batch
+  return { updated: skidIds.length, countedOn: counted ? todayYMD() : '' };
+}
 async function setSkidCounted(sheets, skidId, counted, operator, opId) {
-  await normalizeMasterRows(sheets);
-  let master = await readTab(sheets, MASTER);
-  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Counted At');
-  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Counted By');
-  master = await readTab(sheets, MASTER);
-  const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
-  if (!obj) throw new Error('Skid not found: ' + skidId);
-  await stampCells(sheets, MASTER, obj.__row, master.map, counted
-    ? { 'Counted At': todayYMD(), 'Counted By': operator || '' }
-    : { 'Counted At': '', 'Counted By': '' });
-  return { skidId, countedOn: counted ? todayYMD() : '' };
+  return setSkidsCounted(sheets, [skidId], counted, operator, opId);
 }
 
 // ================= REPORTS =========================================================

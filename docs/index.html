@@ -185,7 +185,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.10.0</span>
+      <span class="version" id="appVersion">v1.10.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -969,13 +969,16 @@
         var op = lastOperator;
         var today = todayStr();
         var want = !g.items.every(function (t) { return t.countedOn === today; }); // if all done -> uncheck
+        var ids = [];
         g.items.forEach(function (t) {
           if ((t.countedOn === today) === want) return; // already in desired state
           t.countedOn = want ? today : '';
-          runMutation('setSkidCounted', [t.skidId, want, op, newOpId()], function () {},
-            function (err) { toast('Count not saved: ' + err.message); });
+          ids.push(t.skidId);
         });
         renderCountList();
+        // One bulk call for the whole group (avoids a burst of per-skid reads / Sheets quota).
+        if (ids.length) runMutation('setSkidsCounted', [ids, want, op, newOpId()], function () {},
+          function (err) { toast('Count not saved: ' + err.message); });
       };
     });
   }
