@@ -185,7 +185,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.10.1</span>
+      <span class="version" id="appVersion">v1.11.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -667,7 +667,11 @@
     switch (state.view) {
       case 'all': renderLanding(); return;                 // litho list -> landing
       case 'reports': renderLanding(); return;
-      case 'count': renderLanding(); return;
+      case 'count':
+        // Within a count, Back steps back through the sub-screens before leaving.
+        if (countMode === 'reviewPromote' || countMode === 'reviewMissing') { countMode = 'walk'; renderCount(); return; }
+        if (countMode === 'missing') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
+        renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
@@ -796,13 +800,20 @@
     el.innerHTML = html;
   }
 
-  // ---------------- Litho Steel Count (walk-the-floor physical count) ----------------
-  // Two sort modes (BW->Ticket, Location->Ticket), split Current vs WIP. Check a skid off
-  // (persists as Counted At = today) and fix its location / sheet count inline as you go.
-  var countStatus = 'Current';
+  // ---------------- Steel Count (guided two-stage physical count) ----------------
+  // A count session walks the floor in two stages: Stage 1 checks every Current pallet, then the
+  // ones not found are moved to WIP; Stage 2 checks every WIP pallet, then the ones still not found
+  // are marked Missing (kept in the system + on a restorable Missing list). Session state lives on
+  // the server (Count Sessions tab) so a count can span days and resume on any device. "Found this
+  // session" = a skid's Counted At date is on/after the session's start date.
   var countSort = 'bw';
   var countCache = [];
   var countGroups = [];
+  var countSession = null;   // { sessionId, startedOn, startedBy, stage } or null when no count is running
+  var countMode = 'walk';    // walk | reviewPromote | reviewMissing | summary | missing
+  var countReviewSel = {};   // skidId -> bool selection on the review screens
+  var countPromoted = {};    // skidId -> true for pallets promoted Current->WIP this session (Stage 2 badge)
+  var countSummary = null;   // { foundCurrent, promoted, foundWip, missing, startedOn } shown after finishing
 
   function cmpNumeric(a, b) {
     var na = Number(a), nb = Number(b);
@@ -818,60 +829,90 @@
     ids.forEach(function (id) { var b = document.getElementById(id); if (b) b.classList.toggle('active', id === activeId); });
   }
 
+  // Which status the current walk is counting, and whether a skid was found in this session.
+  function countWalkStatus() { return (countSession && countSession.stage === 'WIP') ? 'WIP' : 'Current'; }
+  function countIsFound(t) { return !!(countSession && t.countedOn && t.countedOn >= countSession.startedOn); }
+  function countSetStatus(id, status) {
+    var t = countCache.filter(function (x) { return x.skidId === id; })[0];
+    if (t) t.status = status;
+  }
+
   function openSteelCount() {
-    state.view = 'count';
-    nextViewToken();
+    state.view = 'count'; nextViewToken();
     showTabbar(false); showBack(true); setDept('Steel Count');
-    countCache = [];
-    renderSteelCount();
+    countCache = []; countSession = null; countMode = 'walk'; countPromoted = {}; countSummary = null;
+    document.getElementById('view').innerHTML = '<div class="card"><div class="loading">Loading count&hellip;</div></div>';
+    refreshCount();
   }
 
-  function renderSteelCount() {
+  // Load the active session (if any) + all tickets, then render whatever mode we're in.
+  function refreshCount(after) {
+    var tok = viewToken;
+    function loadTickets() {
+      google.script.run.withSuccessHandler(function (all) {
+        if (tok !== viewToken) return;
+        countCache = all || [];
+        if (after) after(); else renderCount();
+      }).withFailureHandler(function (err) {
+        if (tok !== viewToken) return;
+        document.getElementById('view').innerHTML = '<div class="card empty">Error loading steel: ' + esc(err.message) + '</div>';
+      }).getAllTickets();
+    }
+    google.script.run.withSuccessHandler(function (sess) {
+      if (tok !== viewToken) return;
+      countSession = sess || null;
+      loadTickets();
+    }).withFailureHandler(function () {
+      // Worker without getActiveCount (not yet redeployed): degrade gracefully to no session.
+      if (tok !== viewToken) return;
+      countSession = null; loadTickets();
+    }).getActiveCount();
+  }
+
+  function renderCount() {
     state.view = 'count';
-    var view = document.getElementById('view');
-    var tok = nextViewToken();
-    view.innerHTML =
-      '<div class="card"><h3 style="margin-top:0">Litho Steel Count</h3>' +
-        '<div class="sub" style="margin-bottom:8px">Walk the floor and check off each skid. Tap Edit to fix its location or sheet count.</div>' +
-        '<div class="tabbar" style="margin-bottom:8px">' +
-          '<button id="countCurrent">Current</button><button id="countWip">WIP</button>' +
-        '</div>' +
-        '<div class="tabbar">' +
-          '<button id="sortBw">By BW &rarr; Ticket</button><button id="sortLoc">By Location &rarr; Ticket</button>' +
-        '</div>' +
-        '<div class="row" style="align-items:center;margin-top:10px">' +
-          '<div class="sub" id="countProgress" style="flex:1"></div>' +
-          '<button class="btn secondary" id="countPrintBtn" style="padding:8px 12px;font-size:13px">🖨&nbsp; Print list</button>' +
-        '</div>' +
-      '</div>' +
-      '<div id="countSearchBar" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--line)">' +
-        searchBarHtml('countSearch') +
-      '</div>' +
-      '<div id="countList"><div class="loading">Loading steel&hellip;</div></div>';
-    setActiveBtn(['countCurrent', 'countWip'], countStatus === 'WIP' ? 'countWip' : 'countCurrent');
-    setActiveBtn(['sortBw', 'sortLoc'], countSort === 'loc' ? 'sortLoc' : 'sortBw');
-    document.getElementById('countCurrent').onclick = function () { countStatus = 'Current'; setActiveBtn(['countCurrent', 'countWip'], 'countCurrent'); renderCountList(); };
-    document.getElementById('countWip').onclick = function () { countStatus = 'WIP'; setActiveBtn(['countCurrent', 'countWip'], 'countWip'); renderCountList(); };
-    document.getElementById('sortBw').onclick = function () { countSort = 'bw'; setActiveBtn(['sortBw', 'sortLoc'], 'sortBw'); renderCountList(); };
-    document.getElementById('sortLoc').onclick = function () { countSort = 'loc'; setActiveBtn(['sortBw', 'sortLoc'], 'sortLoc'); renderCountList(); };
-    document.getElementById('countSearch').oninput = function () { renderCountList(); };
-    document.getElementById('countPrintBtn').onclick = printCount;
-
-    google.script.run.withSuccessHandler(function (all) {
-      if (tok !== viewToken) return;
-      countCache = all || [];
-      renderCountList();
-    }).withFailureHandler(function (err) {
-      if (tok !== viewToken) return;
-      var el = document.getElementById('countList');
-      if (el) el.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
-    }).getAllTickets();
+    if (countMode === 'missing') return renderCountMissing();
+    if (countMode === 'summary') return renderCountSummary();
+    if (countMode === 'reviewPromote' || countMode === 'reviewMissing') return renderCountReview();
+    if (!countSession) return renderCountStart();
+    return renderCountWalk();
   }
 
+  // ----- Start / resume screen -----
+  function renderCountStart() {
+    var missing = countCache.filter(function (t) { return (t.status || '') === 'Missing'; });
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Steel Count</h3>' +
+        '<div class="sub" style="margin-bottom:10px">A count runs in two stages. First, walk the floor and check off every <strong>Current</strong> pallet. Any you can\'t find are moved to <strong>WIP</strong>, then you walk again. Whatever still isn\'t found goes on the <strong>Missing</strong> list.</div>' +
+        operatorFieldHtml('countOperator', 'Who\'s counting?') +
+        '<button class="btn" id="countStartBtn" style="width:100%;margin-top:10px;padding:16px;font-size:17px">Start count</button>' +
+      '</div>' +
+      '<div class="card"><div class="row" style="align-items:center;gap:10px">' +
+        '<div style="flex:1"><strong>Missing list</strong><div class="sub">' + missing.length + ' pallet(s) not found in past counts</div></div>' +
+        '<button class="btn secondary" id="countViewMissing" style="padding:10px 14px">View</button>' +
+      '</div></div>';
+    document.getElementById('countStartBtn').onclick = function () {
+      var op = ((document.getElementById('countOperator') || {}).value || lastOperator || '').trim();
+      if (op) lastOperator = op;
+      var btn = document.getElementById('countStartBtn'); btn.disabled = true; btn.textContent = 'Starting…';
+      runMutation('startCount', [op, newOpId()], function (sess) {
+        countSession = sess; countMode = 'walk'; countPromoted = {}; countSummary = null;
+        renderCount();
+      }, function (err) {
+        showModal({ title: 'Could not start count', message: err.message, confirmText: 'OK' });
+        btn.disabled = false; btn.textContent = 'Start count';
+      });
+    };
+    document.getElementById('countViewMissing').onclick = function () { countMode = 'missing'; renderCount(); };
+  }
+
+  // ----- The walk (Stage 1 = Current, Stage 2 = WIP) -----
   function countRows() {
     var term = ((document.getElementById('countSearch') || {}).value || '').trim().toLowerCase();
+    var st = countWalkStatus();
     return countCache.filter(function (t) {
-      if ((t.status || 'Current') !== countStatus) return false;
+      if ((t.status || 'Current') !== st) return false;
       if (term) {
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;
@@ -881,14 +922,11 @@
     });
   }
   function updateCountProgress() {
-    var today = todayStr();
     var rows = countRows();
-    var counted = rows.filter(function (t) { return t.countedOn === today; }).length;
+    var counted = rows.filter(countIsFound).length;
     var prog = document.getElementById('countProgress');
-    if (prog) prog.textContent = counted + ' of ' + rows.length + ' counted today';
+    if (prog) prog.textContent = counted + ' of ' + rows.length + ' found';
   }
-
-  // Sorted, grouped rows for the current status/sort/search.
   function countSortedGroups() {
     var rows = countRows().slice();
     rows.sort(function (a, b) {
@@ -904,28 +942,69 @@
     return groups;
   }
 
+  function renderCountWalk() {
+    var view = document.getElementById('view');
+    var stage = countWalkStatus();
+    var stageLabel = stage === 'WIP' ? 'Stage 2 of 2 — WIP count' : 'Stage 1 of 2 — Current count';
+    var help = stage === 'WIP'
+      ? 'Check off every WIP pallet you find. Highlighted pallets were just moved from Current — hunt for those. When done, tap Finish to mark whatever is left as Missing.'
+      : 'Check off every Current pallet you find. When done, tap Finish to move the not-found ones to WIP.';
+    view.innerHTML =
+      '<div class="card"><div class="row" style="align-items:center;gap:8px">' +
+          '<h3 style="margin:0;flex:1">Steel Count</h3>' +
+          '<span class="badge ' + (stage === 'WIP' ? 'wip' : 'notstarted') + '">' + esc(stageLabel) + '</span>' +
+        '</div>' +
+        '<div class="sub" style="margin:6px 0 8px">' + esc(help) + '</div>' +
+        '<div class="tabbar">' +
+          '<button id="sortBw">By BW &rarr; Ticket</button><button id="sortLoc">By Location &rarr; Ticket</button>' +
+        '</div>' +
+        '<div class="row" style="align-items:center;margin-top:10px">' +
+          '<div class="sub" id="countProgress" style="flex:1"></div>' +
+          '<button class="btn secondary" id="countPrintBtn" style="padding:8px 12px;font-size:13px">🖨&nbsp; Print list</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="countSearchBar" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;border-bottom:1px solid var(--line)">' +
+        searchBarHtml('countSearch') +
+      '</div>' +
+      '<div id="countList"></div>' +
+      '<div class="card" style="position:sticky;bottom:0;z-index:5">' +
+        '<button class="btn ' + (stage === 'WIP' ? 'danger' : '') + '" id="countFinishBtn" style="width:100%;padding:14px;font-size:16px">' +
+          (stage === 'WIP' ? 'Finish WIP count →' : 'Finish Current count →') +
+        '</button>' +
+        '<div class="sub" style="text-align:center;margin-top:6px">Count started ' + esc(countSession.startedOn) + (countSession.startedBy ? ' by ' + esc(countSession.startedBy) : '') + '</div>' +
+      '</div>';
+    setActiveBtn(['sortBw', 'sortLoc'], countSort === 'loc' ? 'sortLoc' : 'sortBw');
+    document.getElementById('sortBw').onclick = function () { countSort = 'bw'; setActiveBtn(['sortBw', 'sortLoc'], 'sortBw'); renderCountList(); };
+    document.getElementById('sortLoc').onclick = function () { countSort = 'loc'; setActiveBtn(['sortBw', 'sortLoc'], 'sortLoc'); renderCountList(); };
+    document.getElementById('countSearch').oninput = function () { renderCountList(); };
+    document.getElementById('countPrintBtn').onclick = printCount;
+    document.getElementById('countFinishBtn').onclick = finishCountStage;
+    renderCountList();
+  }
+
   function renderCountList() {
     var el = document.getElementById('countList');
     if (!el) return;
-    var today = todayStr();
     updateCountProgress();
     countGroups = countSortedGroups();
-    if (!countGroups.length) { el.innerHTML = '<div class="card empty">No ' + esc(countStatus) + ' steel found.</div>'; return; }
-
-    var byLoc = countSort === 'loc'; // Check-all only when counting by location
+    if (!countGroups.length) { el.innerHTML = '<div class="card empty">No ' + esc(countWalkStatus()) + ' steel to count.</div>'; return; }
+    var byLoc = countSort === 'loc'; // check-all only in location mode
+    var inWip = countWalkStatus() === 'WIP';
     var html = '<div class="card">';
     countGroups.forEach(function (g, gi) {
-      var allDone = g.items.every(function (t) { return t.countedOn === today; });
+      var allDone = g.items.every(countIsFound);
       html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 4px">' +
         '<span style="font-weight:700;color:var(--accent)">' + esc(g.key) + ' <span class="sub" style="font-weight:400">(' + g.items.length + ')</span></span>' +
         (byLoc ? '<button class="btn secondary" style="padding:5px 10px;font-size:12px" data-checkgroup="' + gi + '">' + (allDone ? 'Uncheck all' : 'Check all') + '</button>' : '') +
       '</div>';
       g.items.forEach(function (t) {
-        var checked = t.countedOn === today;
-        html += '<div class="queue-item" style="padding:6px 0">' +
+        var checked = countIsFound(t);
+        var promoted = inWip && countPromoted[t.skidId];
+        html += '<div class="queue-item" style="padding:6px 0' + (promoted ? ';background:var(--warnbg,rgba(255,196,0,.14));border-radius:8px;padding-left:8px;padding-right:8px' : '') + '">' +
           '<label style="display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;flex:1">' +
             '<input type="checkbox" class="countChk" data-skid="' + esc(t.skidId) + '" style="width:22px;height:22px;flex:0 0 auto"' + (checked ? ' checked' : '') + '>' +
             '<span style="min-width:0"><span class="bwtag">BW ' + esc(t.bw || '?') + '</span>' +
+              (promoted ? '<span class="badge wip" style="margin-right:6px">from Current</span>' : '') +
               '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span>' +
               '<div class="sub">Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets</div></span>' +
           '</label>' +
@@ -961,22 +1040,21 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-countedit]'), function (btn) {
       btn.onclick = function () { openCountEdit(btn.getAttribute('data-countedit')); };
     });
-    // Check / uncheck a whole group at once.
+    // Check / uncheck a whole location group in one bulk call (avoids a burst of Sheets reads).
     Array.prototype.forEach.call(document.querySelectorAll('[data-checkgroup]'), function (btn) {
       btn.onclick = function () {
         var g = countGroups[Number(btn.getAttribute('data-checkgroup'))];
         if (!g) return;
         var op = lastOperator;
-        var today = todayStr();
-        var want = !g.items.every(function (t) { return t.countedOn === today; }); // if all done -> uncheck
+        var want = !g.items.every(countIsFound); // all found -> uncheck all
+        var stamp = want ? todayStr() : '';
         var ids = [];
         g.items.forEach(function (t) {
-          if ((t.countedOn === today) === want) return; // already in desired state
-          t.countedOn = want ? today : '';
+          if (countIsFound(t) === want) return; // already in desired state
+          t.countedOn = stamp;
           ids.push(t.skidId);
         });
         renderCountList();
-        // One bulk call for the whole group (avoids a burst of per-skid reads / Sheets quota).
         if (ids.length) runMutation('setSkidsCounted', [ids, want, op, newOpId()], function () {},
           function (err) { toast('Count not saved: ' + err.message); });
       };
@@ -1015,28 +1093,219 @@
     };
   }
 
-  // Print a check sheet (like the paper WIP list): grouped, with a check next to the ones
-  // marked off. Uses the browser print dialog, where you can Save as PDF.
+  // ----- Finish a stage -> review the not-found pallets -----
+  function finishCountStage() {
+    var st = countWalkStatus();
+    var notFound = countCache.filter(function (t) { return (t.status || 'Current') === st && !countIsFound(t); });
+    countReviewSel = {};
+    notFound.forEach(function (t) { countReviewSel[t.skidId] = true; }); // pre-select all
+    countMode = (st === 'WIP') ? 'reviewMissing' : 'reviewPromote';
+    renderCount();
+  }
+  function countReviewItems() {
+    var st = (countMode === 'reviewMissing') ? 'WIP' : 'Current';
+    return countCache.filter(function (t) { return (t.status || 'Current') === st && !countIsFound(t); })
+      .sort(function (a, b) { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); });
+  }
+  function renderCountReview() {
+    var toMissing = countMode === 'reviewMissing';
+    var items = countReviewItems();
+    var view = document.getElementById('view');
+    var title = toMissing ? 'Not found in WIP' : 'Not found in Current';
+    var lead = toMissing
+      ? 'These WIP pallets weren\'t found anywhere. Un-check any you don\'t want to mark Missing, then confirm. Missing pallets stay in the system on the Missing list — you can restore one if it turns up.'
+      : 'These Current pallets weren\'t found. They were likely moved to WIP without being recorded. Un-check any you don\'t want to move, then confirm.';
+    var html =
+      '<div class="card"><h3 style="margin-top:0">' + esc(title) + '</h3>' +
+        '<div class="sub" style="margin-bottom:8px">' + esc(lead) + '</div>';
+    if (!items.length) {
+      html += '<div class="empty" style="padding:12px 0">Every pallet was found — nothing to ' + (toMissing ? 'mark Missing' : 'move') + '. 🎉</div>';
+    } else {
+      html += '<div class="row" style="gap:8px;margin-bottom:6px">' +
+        '<button class="btn secondary" id="revAll" style="padding:5px 10px;font-size:12px">Select all</button>' +
+        '<button class="btn secondary" id="revNone" style="padding:5px 10px;font-size:12px">Select none</button></div>';
+      items.forEach(function (t) {
+        html += '<div class="queue-item" style="padding:6px 0">' +
+          '<label style="display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;flex:1">' +
+            '<input type="checkbox" class="revChk" data-skid="' + esc(t.skidId) + '" style="width:22px;height:22px;flex:0 0 auto"' + (countReviewSel[t.skidId] ? ' checked' : '') + '>' +
+            '<span style="min-width:0"><span class="bwtag">BW ' + esc(t.bw || '?') + '</span>' +
+              '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span>' +
+              '<div class="sub">Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets</div></span>' +
+          '</label></div>';
+      });
+    }
+    html += '</div>' +
+      '<div class="card" style="display:flex;gap:8px;position:sticky;bottom:0;z-index:5">' +
+        '<button class="btn secondary" id="revBack" style="flex:1;padding:12px">Back to walk</button>' +
+        '<button class="btn ' + (toMissing ? 'danger' : 'success') + '" id="revConfirm" style="flex:2;padding:12px;font-size:16px">' +
+          (toMissing ? 'Mark selected Missing' : 'Move selected to WIP') +
+        '</button>' +
+      '</div>';
+    view.innerHTML = html;
+    Array.prototype.forEach.call(document.querySelectorAll('.revChk'), function (chk) {
+      chk.onchange = function () { countReviewSel[chk.getAttribute('data-skid')] = chk.checked; };
+    });
+    var all = document.getElementById('revAll'); if (all) all.onclick = function () { items.forEach(function (t) { countReviewSel[t.skidId] = true; }); renderCount(); };
+    var none = document.getElementById('revNone'); if (none) none.onclick = function () { items.forEach(function (t) { countReviewSel[t.skidId] = false; }); renderCount(); };
+    document.getElementById('revBack').onclick = function () { countMode = 'walk'; renderCount(); };
+    document.getElementById('revConfirm').onclick = function () { confirmCountReview(items, toMissing); };
+  }
+
+  function failReview(btn, toMissing, err) {
+    if (btn) { btn.disabled = false; btn.textContent = toMissing ? 'Mark selected Missing' : 'Move selected to WIP'; }
+    showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' });
+  }
+  function confirmCountReview(items, toMissing) {
+    var ids = items.filter(function (t) { return countReviewSel[t.skidId]; }).map(function (t) { return t.skidId; });
+    var op = lastOperator || (countSession && countSession.startedBy) || '';
+    var btn = document.getElementById('revConfirm'); if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    if (toMissing) {
+      // Stage 2 finish: mark selected Missing (if any), then close the session and show the summary.
+      var doDone = function () {
+        var summ = {
+          foundCurrent: countCache.filter(function (t) { return (t.status || '') === 'Current' && countIsFound(t); }).length,
+          promoted: Object.keys(countPromoted).length,
+          foundWip: countCache.filter(function (t) { return (t.status || '') === 'WIP' && countIsFound(t); }).length,
+          missing: ids.length,
+          startedOn: countSession.startedOn,
+        };
+        runMutation('endCount', [countSession.sessionId, op, newOpId()], function () {
+          countSummary = summ; countMode = 'summary'; countSession = null;
+          refreshCount(renderCount); // reload cache so Missing statuses are reflected on the Missing list
+        }, function (err) { failReview(btn, toMissing, err); });
+      };
+      if (ids.length) {
+        runMutation('markSkidsMissing', [ids, op, newOpId()], function () {
+          ids.forEach(function (id) { countSetStatus(id, 'Missing'); });
+          doDone();
+        }, function (err) { failReview(btn, toMissing, err); });
+      } else { doDone(); }
+    } else {
+      // Stage 1 finish: promote selected Current -> WIP (if any), then advance to Stage 2.
+      var advance = function () {
+        runMutation('setCountStage', [countSession.sessionId, 'WIP', op, newOpId()], function (sess) {
+          countSession = sess || countSession; countSession.stage = 'WIP';
+          countMode = 'walk';
+          renderCount();
+        }, function (err) { failReview(btn, toMissing, err); });
+      };
+      if (ids.length) {
+        runMutation('promoteUnfoundToWip', [ids, op, newOpId()], function () {
+          ids.forEach(function (id) { countSetStatus(id, 'WIP'); countPromoted[id] = true; });
+          advance();
+        }, function (err) { failReview(btn, toMissing, err); });
+      } else { advance(); }
+    }
+  }
+
+  // ----- Count-complete summary -----
+  function renderCountSummary() {
+    var s = countSummary || { foundCurrent: 0, promoted: 0, foundWip: 0, missing: 0, startedOn: '' };
+    function line(label, val) {
+      return '<div class="row" style="justify-content:space-between;padding:4px 0"><span>' + label + '</span><strong>' + val + '</strong></div>';
+    }
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="card"><h3 style="margin-top:0">Count complete ✅</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Count started ' + esc(s.startedOn || '') + '</div>' +
+        line('Current pallets found', s.foundCurrent) +
+        line('Moved Current → WIP', s.promoted) +
+        line('WIP pallets found', s.foundWip) +
+        line('Marked Missing', s.missing) +
+      '</div>' +
+      '<div class="card" style="display:flex;gap:8px">' +
+        '<button class="btn secondary" id="sumMissing" style="flex:1;padding:12px">View Missing list</button>' +
+        '<button class="btn" id="sumDone" style="flex:1;padding:12px">Done</button>' +
+      '</div>';
+    document.getElementById('sumMissing').onclick = function () { countMode = 'missing'; renderCount(); };
+    document.getElementById('sumDone').onclick = function () { countSummary = null; openSteelCount(); };
+  }
+
+  // ----- Missing list (replaces the manual missing-tickets spreadsheet) -----
+  function renderCountMissing() {
+    var view = document.getElementById('view');
+    var missing = countCache.filter(function (t) { return (t.status || '') === 'Missing'; })
+      .sort(function (a, b) { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); });
+    var html =
+      '<div class="card"><div class="row" style="align-items:center;gap:8px">' +
+          '<h3 style="margin:0;flex:1">Missing list</h3>' +
+          '<button class="btn secondary" id="missPrint" style="padding:8px 12px;font-size:13px">🖨&nbsp; Print</button>' +
+        '</div>' +
+        '<div class="sub" style="margin-top:6px">' + missing.length + ' pallet(s) not found. Restore one if it turns up — it returns to Current (raw) or WIP (coated).</div>' +
+      '</div>';
+    if (!missing.length) {
+      html += '<div class="card empty">No missing pallets. 🎉</div>';
+    } else {
+      html += '<div class="card">';
+      missing.forEach(function (t) {
+        html += '<div class="queue-item" style="padding:8px 0">' +
+          '<span style="min-width:0;flex:1"><span class="bwtag">BW ' + esc(t.bw || '?') + '</span>' +
+            '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span>' +
+            '<div class="sub">Loc ' + esc(t.row || '—') + ' &middot; ' + esc(t.qty || 0) + ' sheets &middot; missing ' + esc(t.missingOn || '') + (t.missingBy ? ' by ' + esc(t.missingBy) : '') + '</div></span>' +
+          '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-restore="' + esc(t.skidId) + '">Restore</button>' +
+        '</div>';
+      });
+      html += '</div>';
+    }
+    html += '<div class="card"><button class="btn secondary" id="missBack" style="width:100%;padding:12px">← Back</button></div>';
+    view.innerHTML = html;
+    document.getElementById('missBack').onclick = function () { countMode = countSummary ? 'summary' : 'walk'; renderCount(); };
+    var mp = document.getElementById('missPrint'); if (mp) mp.onclick = printMissing;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-restore]'), function (btn) {
+      btn.onclick = function () {
+        var sk = btn.getAttribute('data-restore');
+        var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
+        restoreMissingSkid(sk, t);
+      };
+    });
+  }
+  function restoreMissingSkid(sk, t) {
+    var coated = t && Number(t.litho) > 0;
+    var dest = coated ? 'WIP' : 'Current';
+    showConfirm('Restore pallet', 'Restore ' + (t && t.ticket ? t.ticket : sk) + ' to ' + dest + '? (' + (coated ? 'it has litho applied' : 'raw steel, no litho') + ')', function () {
+      var op = lastOperator;
+      runMutation('restoreMissing', [sk, dest, op, newOpId()], function () {
+        countSetStatus(sk, dest);
+        toast('Restored to ' + dest);
+        renderCount();
+      }, function (err) { showModal({ title: 'Could not restore', message: err.message, confirmText: 'OK' }); });
+    }, 'Restore', 'success');
+  }
+
+  // ----- Print check sheets (like the paper WIP list) -----
   function printCount() {
-    var today = todayStr();
     var groups = countSortedGroups();
+    var stage = countWalkStatus();
     var sortLabel = countSort === 'bw' ? 'BW then Ticket' : 'Location then Ticket';
-    var html = '<h2>Litho Steel Count &mdash; ' + esc(countStatus) + '</h2>' +
-      '<div class="pmeta">Sorted by ' + esc(sortLabel) + ' &middot; ' + esc(today) + '</div>';
+    var html = '<h2>Steel Count &mdash; ' + esc(stage) + '</h2>' +
+      '<div class="pmeta">Sorted by ' + esc(sortLabel) + ' &middot; count started ' + esc(countSession ? countSession.startedOn : todayStr()) + '</div>';
     if (!groups.length) {
-      html += '<div>No ' + esc(countStatus) + ' steel.</div>';
+      html += '<div>No ' + esc(stage) + ' steel.</div>';
     } else {
       groups.forEach(function (g) {
         html += '<div class="pgroup">' + esc(g.key) + '</div>' +
           '<table><thead><tr><th>&#10003;</th><th>BW</th><th>Ticket</th><th>Location</th><th>Sheets</th></tr></thead><tbody>';
         g.items.forEach(function (t) {
-          var mark = t.countedOn === today ? '&#10003;' : '';
+          var mark = countIsFound(t) ? '&#10003;' : '';
           html += '<tr><td>' + mark + '</td><td>' + esc(t.bw) + '</td><td>' + esc(t.ticket || '(no ticket)') +
             '</td><td>' + esc(t.row || '') + '</td><td>' + esc(t.qty || 0) + '</td></tr>';
         });
         html += '</tbody></table>';
       });
     }
+    document.getElementById('printArea').innerHTML = html;
+    window.print();
+  }
+  function printMissing() {
+    var missing = countCache.filter(function (t) { return (t.status || '') === 'Missing'; })
+      .sort(function (a, b) { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); });
+    var html = '<h2>Missing Steel</h2><div class="pmeta">' + esc(todayStr()) + ' &middot; ' + missing.length + ' pallet(s)</div>' +
+      '<table><thead><tr><th>BW</th><th>Ticket</th><th>Location</th><th>Sheets</th><th>Missing since</th></tr></thead><tbody>';
+    missing.forEach(function (t) {
+      html += '<tr><td>' + esc(t.bw) + '</td><td>' + esc(t.ticket || '(no ticket)') + '</td><td>' + esc(t.row || '') +
+        '</td><td>' + esc(t.qty || 0) + '</td><td>' + esc(t.missingOn || '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
     document.getElementById('printArea').innerHTML = html;
     window.print();
   }
@@ -1207,7 +1476,8 @@
     var rows = allCache.filter(function (t) {
       // The Litho list is the coating lifecycle only — once a skid is loaded into production
       // (In Production) or consumed (Used) it drops off this list; it lives in Production now.
-      if (t.status === 'In Production' || t.status === 'Used') return false;
+      // Missing skids (couldn't be found in a count) drop off too — they live in the count's Missing list.
+      if (t.status === 'In Production' || t.status === 'Used' || t.status === 'Missing') return false;
       if (term) {
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;

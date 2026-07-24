@@ -33,7 +33,12 @@ const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
   'LITHO PRINT TWO COLOR - ONE', 'LITHO PRINT TWO COLOR - TWO', 'LITHO PRINT TWO COLOR - THREE',
   'LITHO PRINT TWO COLOR - FOUR', 'LITHO PRINT TWO COLOR - FIVE', 'LITHO PRINT TWO COLOR - SIX'];
 
-const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTION: 'In Production', USED: 'Used' };
+const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTION: 'In Production', USED: 'Used', MISSING: 'Missing' };
+
+// Guided physical count: a two-stage session (Current walk -> WIP walk) tracked server-side so
+// it can span days and resume on any device. Stage is 'Current' | 'WIP' | 'Done'.
+const COUNTS = 'Count Sessions';
+const COUNT_HEADERS = ['Session ID', 'Started At', 'Started By', 'Stage', 'Ended At', 'Ended By', 'Op ID'];
 
 // Editable steel-spec columns captured on Add Ticket and Edit ticket details (mirrors the
 // paper ticket; QTY first). B/C and Mill are new columns created on demand.
@@ -60,7 +65,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-2' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-3' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -146,6 +151,20 @@ async function handle(fn, args, env) {
       return setSkidCounted(sheets, args[0], args[1], args[2], args[3]);
     case 'setSkidsCounted': // (skidIds[], counted, operator, opId)
       return setSkidsCounted(sheets, args[0], args[1], args[2], args[3]);
+    case 'getActiveCount': // ()
+      return getActiveCount(sheets);
+    case 'startCount': // (operator, opId)
+      return startCount(sheets, args[0], args[1]);
+    case 'setCountStage': // (sessionId, stage, operator, opId)
+      return setCountStage(sheets, args[0], args[1], args[2], args[3]);
+    case 'endCount': // (sessionId, operator, opId)
+      return endCount(sheets, args[0], args[1], args[2]);
+    case 'promoteUnfoundToWip': // (skidIds[], operator, opId)
+      return promoteUnfoundToWip(sheets, args[0], args[1], args[2]);
+    case 'markSkidsMissing': // (skidIds[], operator, opId)
+      return markSkidsMissing(sheets, args[0], args[1], args[2]);
+    case 'restoreMissing': // (skidId, toStatus, operator, opId)
+      return restoreMissing(sheets, args[0], args[1], args[2], args[3]);
     default:
       throw new Error('Unknown function: ' + fn);
   }
@@ -300,6 +319,7 @@ async function getAllTickets(sheets) {
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
     row: o['Row'] != null ? o['Row'] : '', countedOn: toYMD(o['Counted At']),
+    missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
 function activeCoatings(history) {
@@ -1188,6 +1208,110 @@ async function setSkidsCounted(sheets, skidIds, counted, operator, opId) {
 }
 async function setSkidCounted(sheets, skidId, counted, operator, opId) {
   return setSkidsCounted(sheets, [skidId], counted, operator, opId);
+}
+
+// ================= GUIDED COUNT SESSION ============================================
+// A count session walks Current -> WIP. "Found this session" is decided client-side by
+// comparing a skid's Counted At date to the session's Started On date (>= start = found),
+// so starting a new session naturally resets the walk and a count can span several days
+// without a mass rewrite of Counted At.
+function sessionOut(o) {
+  return {
+    sessionId: o['Session ID'], startedAt: String(o['Started At'] || ''), startedOn: toYMD(o['Started At']),
+    startedBy: o['Started By'] || '', stage: o['Stage'] || 'Current',
+    endedOn: o['Ended At'] ? toYMD(o['Ended At']) : '',
+  };
+}
+function newestOpen(rows) {
+  const open = rows.filter((o) => o['Session ID'] && String(o['Stage'] || '') !== 'Done');
+  let best = null, bestN = -1;
+  open.forEach((o) => { const n = parseInt(String(o['Session ID']).slice(4), 10) || 0; if (n > bestN) { bestN = n; best = o; } });
+  return best;
+}
+async function getActiveCount(sheets) {
+  let rows;
+  try { rows = (await readObjects(sheets, COUNTS, true)).rows; } catch (e) { return null; }
+  const best = newestOpen(rows);
+  return best ? sessionOut(best) : null;
+}
+async function startCount(sheets, operator, opId) {
+  await ensureTab(sheets, COUNTS, COUNT_HEADERS);
+  const t = await readTab(sheets, COUNTS);
+  if (opId && t.headers.indexOf('Op ID') !== -1) {
+    const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
+    if (ex) return sessionOut(ex);
+  }
+  const open = newestOpen(t.rows);           // resume a still-open session instead of stacking a new one
+  if (open) return sessionOut(open);
+  const sid = fmtId('CNT-', maxIdNumber(t.rows, 'Session ID', 'CNT-') + 1);
+  const ts = nowStamp();
+  const ens = await ensureColumn(sheets, COUNTS, t.headers, 'Op ID');
+  await appendRowObj(sheets, COUNTS, ens.headers, {
+    'Session ID': sid, 'Started At': ts, 'Started By': operator || '', 'Stage': 'Current',
+    'Ended At': '', 'Ended By': '', 'Op ID': opId || '',
+  });
+  return { sessionId: sid, startedAt: ts, startedOn: toYMD(ts), startedBy: operator || '', stage: 'Current', endedOn: '' };
+}
+async function setCountStage(sheets, sessionId, stage, operator, opId) {
+  const t = await readTab(sheets, COUNTS);
+  const o = t.rows.filter((r) => String(r['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!o) throw new Error('Count session not found: ' + sessionId);
+  const fields = { 'Stage': stage };
+  if (stage === 'Done') { fields['Ended At'] = nowStamp(); fields['Ended By'] = operator || ''; }
+  await stampCells(sheets, COUNTS, o.__row, t.map, fields);
+  return sessionOut(Object.assign({}, o, fields));
+}
+async function endCount(sheets, sessionId, operator, opId) {
+  return setCountStage(sheets, sessionId, 'Done', operator, opId);
+}
+
+// Bulk status change in ONE read + ONE batched write (kept read-light like the count check-off).
+// `fromStatus` (optional) only flips rows currently in that status; rows already at newStatus are
+// skipped so promote/mark/restore are naturally idempotent under the client retry wrapper.
+async function bulkSetStatus(sheets, skidIds, newStatus, extra, operator, fromStatus) {
+  skidIds = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
+  if (!skidIds.length) return { updated: 0, skidIds: [] };
+  extra = extra || {};
+  let master = await readTab(sheets, MASTER);
+  let reread = false;
+  for (const c of Object.keys(extra)) {
+    if (master.headers.indexOf(c) === -1) { const e = await ensureColumn(sheets, MASTER, master.headers, c); master.headers = e.headers; reread = true; }
+  }
+  if (reread) master = await readTab(sheets, MASTER);
+  const map = master.map;
+  const want = {}; skidIds.forEach((id) => { want[id] = true; });
+  const ts = nowStamp();
+  const data = [];
+  const done = [];
+  master.rows.forEach((o) => {
+    const id = String(o['Skid ID']).trim();
+    if (!want[id]) return;
+    const cur = String(o['Status'] || '');
+    if (cur === newStatus) return;                              // already there — no-op
+    if (fromStatus && cur !== fromStatus) return;              // guard against re-flipping
+    const fields = Object.assign({ 'Status': newStatus, 'Last Updated At': ts, 'Last Updated By': operator || '' }, extra);
+    Object.keys(fields).forEach((name) => { if (map[name]) data.push({ range: "'" + MASTER + "'!" + colLetter(map[name]) + o.__row, values: [[fields[name]]] }); });
+    done.push(id);
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return { updated: done.length, skidIds: done };
+}
+
+// End of the Current walk: the pallets not physically found are assumed to have been moved to
+// WIP without being recorded, so flip them Current -> WIP (they then reappear, unchecked, in the
+// WIP walk for a second physical confirmation).
+async function promoteUnfoundToWip(sheets, skidIds, operator, opId) {
+  return bulkSetStatus(sheets, skidIds, STATUS.WIP, {}, operator, STATUS.CURRENT);
+}
+// End of the WIP walk: pallets still not found anywhere are marked Missing (row kept for the
+// audit trail + Missing report; can be restored if they turn up).
+async function markSkidsMissing(sheets, skidIds, operator, opId) {
+  return bulkSetStatus(sheets, skidIds, STATUS.MISSING, { 'Missing At': todayYMD(), 'Missing By': operator || '' }, operator, null);
+}
+// A missing pallet turned up: restore it to Current (raw) or WIP (coated) and clear the Missing stamp.
+async function restoreMissing(sheets, skidId, toStatus, operator, opId) {
+  const dest = (toStatus === STATUS.WIP) ? STATUS.WIP : STATUS.CURRENT;
+  return bulkSetStatus(sheets, [skidId], dest, { 'Missing At': '', 'Missing By': '' }, operator, STATUS.MISSING);
 }
 
 // ================= REPORTS =========================================================
