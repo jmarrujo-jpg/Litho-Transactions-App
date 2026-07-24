@@ -598,23 +598,68 @@ def _get_worksheet():
     return ws, headers
 
 
+def _current_rows_by_ticket(ws, headers):
+    """Map ticket# -> (1-based row number) for existing rows whose Status is 'Current'.
+    Used so a reprint of a ticket already on the floor UPDATES that row's sheet count
+    instead of appending a duplicate. Only the FIRST Current row per ticket is used."""
+    tcol = headers.index("Ticket") if "Ticket" in headers else None
+    scol = headers.index("Status") if "Status" in headers else None
+    out = {}
+    if tcol is None or scol is None:
+        return out
+    values = ws.get_all_values()                 # includes the header row
+    for i in range(1, len(values)):              # skip header
+        r = values[i]
+        tk = (r[tcol] if tcol < len(r) else "").strip()
+        st = (r[scol] if scol < len(r) else "").strip()
+        if tk and st == "Current" and tk not in out:
+            out[tk] = i + 1                      # 1-based sheet row
+    return out
+
+
 def send_to_sheet(tickets):
-    """Best-effort: append printed tickets to the Google Sheet via a service
-    account. Assigns each new row a Skid ID + Status='Current' so it shows up as
-    inventory in the tracker. Runs in a background thread so it never delays or
-    blocks printing."""
+    """Best-effort: log printed tickets to the Google Sheet via a service account.
+
+    A ticket that is already on the floor as 'Current' is UPDATED in place (its sheet
+    count / specs change, Skid ID and Status are kept) — reprinting to fix a count no
+    longer creates a duplicate row. A genuinely new ticket (or one that's Pending / WIP /
+    In Production / Used) is appended as a fresh Current row with a new Skid ID. Runs in a
+    background thread so it never delays or blocks printing."""
     if not SHEET_ID or not tickets:
         return
 
     def _post():
         try:
+            import gspread
             with _sheet_lock:                         # one batch numbers at a time
                 ws, headers = _get_worksheet()
-                skids = _next_skid_ids(ws, headers, len(tickets))
-                # Build one row per ticket, ordered to match the sheet's headers.
+                current = _current_rows_by_ticket(ws, headers)
+                hidx = {h: i for i, h in enumerate(headers)}
+                updates, appends = [], []             # (rownum, ticket) / ticket
+                for t in tickets:
+                    tk = str(t.get("ticket", "")).strip()
+                    if tk and tk in current:
+                        updates.append((current.pop(tk), t))  # pop: don't reuse a row twice
+                    else:
+                        appends.append(t)
+
+                # Update existing Current rows in place (mapped detail columns only, so
+                # Skid ID / Status / Litho / Job ID etc. are preserved).
+                batch = []
+                for rownum, t in updates:
+                    for key, header in SHEET_HEADER_MAP.items():
+                        ci = hidx.get(header)
+                        if ci is None:
+                            continue
+                        batch.append({"range": gspread.utils.rowcol_to_a1(rownum, ci + 1),
+                                      "values": [[t.get(key, "")]]})
+                if batch:
+                    ws.batch_update(batch, value_input_option="USER_ENTERED")
+
+                # Append the genuinely new tickets with fresh Skid IDs.
+                skids = _next_skid_ids(ws, headers, len(appends))
                 rows = []
-                for t, skid in zip(tickets, skids):
-                    # value-by-header: place each mapped field under its column
+                for t, skid in zip(appends, skids):
                     by_header = {}
                     for key, header in SHEET_HEADER_MAP.items():
                         by_header[header] = t.get(key, "")
@@ -623,9 +668,10 @@ def send_to_sheet(tickets):
                     if "Status" in headers:
                         by_header["Status"] = "Current"  # new stock enters as Current
                     rows.append([by_header.get(h, "") for h in headers])
-                ws.append_rows(rows, value_input_option="USER_ENTERED")
-            tag = f" ({skids[0]}..{skids[-1]})" if skids and skids[0] else ""
-            print(f"Sheet logging succeeded: appended {len(rows)} row(s){tag}.", flush=True)
+                if rows:
+                    ws.append_rows(rows, value_input_option="USER_ENTERED")
+            print(f"Sheet logging succeeded: updated {len(updates)} existing, "
+                  f"appended {len(appends)} new.", flush=True)
         except Exception as exc:
             print("Sheet logging failed (printing was unaffected):", exc, flush=True)
 
