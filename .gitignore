@@ -1,0 +1,7 @@
+# Service-account key for the ticket printer app — NEVER commit this
+service_account.json
+printer/service_account.json
+
+# Python
+__pycache__/
+*.pyc

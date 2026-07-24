@@ -541,6 +541,7 @@ def list_printers():
 # ===========================================================================
 import os
 import json
+import re
 import threading
 from flask import Flask, request, jsonify, Response
 
@@ -557,6 +558,23 @@ SHEET_HEADER_MAP = {
 # Cache the worksheet handle so we don't re-authenticate on every print.
 _sheet_ws = None
 _sheet_headers = None
+_sheet_lock = threading.Lock()   # serialize Skid-ID read+append across users
+
+
+def _next_skid_ids(ws, headers, count):
+    """Return `count` new sequential Skid IDs (SKD-000001 format), based on the
+    highest existing SKD- number in the sheet's 'Skid ID' column. Matches the
+    tracker app's format (SKD- + 6 zero-padded digits) exactly. Returns blanks
+    if the sheet has no 'Skid ID' column, so we never write to a missing column."""
+    if "Skid ID" not in headers:
+        return [""] * count
+    col_idx = headers.index("Skid ID") + 1          # gspread columns are 1-based
+    max_n = 0
+    for v in ws.col_values(col_idx)[1:]:            # skip the header cell
+        m = re.match(r"\s*SKD-0*(\d+)\s*$", str(v), re.I)
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return [f"SKD-{max_n + i:06d}" for i in range(1, count + 1)]
 
 def _resolve_creds_path():
     p = SHEET_CREDS_FILE
@@ -582,23 +600,32 @@ def _get_worksheet():
 
 def send_to_sheet(tickets):
     """Best-effort: append printed tickets to the Google Sheet via a service
-    account. Runs in a background thread so it never delays or blocks printing."""
+    account. Assigns each new row a Skid ID + Status='Current' so it shows up as
+    inventory in the tracker. Runs in a background thread so it never delays or
+    blocks printing."""
     if not SHEET_ID or not tickets:
         return
 
     def _post():
         try:
-            ws, headers = _get_worksheet()
-            # Build one row per ticket, ordered to match the sheet's headers.
-            rows = []
-            for t in tickets:
-                # value-by-header: place each mapped field under its column
-                by_header = {}
-                for key, header in SHEET_HEADER_MAP.items():
-                    by_header[header] = t.get(key, "")
-                rows.append([by_header.get(h, "") for h in headers])
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
-            print(f"Sheet logging succeeded: appended {len(rows)} row(s).", flush=True)
+            with _sheet_lock:                         # one batch numbers at a time
+                ws, headers = _get_worksheet()
+                skids = _next_skid_ids(ws, headers, len(tickets))
+                # Build one row per ticket, ordered to match the sheet's headers.
+                rows = []
+                for t, skid in zip(tickets, skids):
+                    # value-by-header: place each mapped field under its column
+                    by_header = {}
+                    for key, header in SHEET_HEADER_MAP.items():
+                        by_header[header] = t.get(key, "")
+                    if skid:
+                        by_header["Skid ID"] = skid    # e.g. SKD-000042
+                    if "Status" in headers:
+                        by_header["Status"] = "Current"  # new stock enters as Current
+                    rows.append([by_header.get(h, "") for h in headers])
+                ws.append_rows(rows, value_input_option="USER_ENTERED")
+            tag = f" ({skids[0]}..{skids[-1]})" if skids and skids[0] else ""
+            print(f"Sheet logging succeeded: appended {len(rows)} row(s){tag}.", flush=True)
         except Exception as exc:
             print("Sheet logging failed (printing was unaffected):", exc, flush=True)
 
