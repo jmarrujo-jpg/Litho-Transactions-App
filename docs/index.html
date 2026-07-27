@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.5</span>
+      <span class="version" id="appVersion">v1.12.6</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -733,10 +733,11 @@
         if (countMode === 'missing' || countMode === 'history') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
         renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
-      case 'prodHome': renderLanding(); return;            // production home -> landing
+      case 'prodHome': renderLanding(); return;            // metals home (any tab) -> landing
       case 'prodAdd': case 'prodReview': openProduction(); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
+      case 'slitterSession': metalsTab = 'slitter'; openProduction(); return; // slitter detail -> slitter tab
       default: renderLanding(); return;
     }
   };
@@ -2987,27 +2988,49 @@
   var runAddedSkids = [];    // running display list of skids loaded this session
   var prodReviewDate = '';   // yyyy-MM-dd; '' means today
   var runSwapSkid = null;    // when set, the next picked skid replaces this one on the run
+  var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter'
+  var currentSlitter = null; // { sessionId, slitter, operator } — the slitter session being logged
+  var slitterComp = [];      // in-progress composition rows [{skidId,ticket,mill,qty}] for the next pallet
+  var slitPicked = null;     // a source skid chosen from the picker to auto-fill the next comp row
 
   function openProduction() {
     state.view = 'prodHome'; state.runId = null; runSwapSkid = null;
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Metals');
-    renderProductionHome();
+    renderMetalsHome();
   }
 
-  // ----- Log Work: start a run, resume open runs, or go to Review -----
-  function renderProductionHome() {
+  // Metals is a 3-tab department: Metal Lines and Press Department share the run flow (only the
+  // machine label differs — "Line #" vs "Press #"); Slitter is a separate log-only module.
+  function renderMetalsHome() {
     state.view = 'prodHome';
     var view = document.getElementById('view');
+    var tabs = [['lines', 'Metal Lines'], ['press', 'Press Department'], ['slitter', 'Slitter Department']].map(function (t) {
+      return '<button data-mtab="' + t[0] + '"' + (metalsTab === t[0] ? ' class="active"' : '') + '>' + esc(t[1]) + '</button>';
+    }).join('');
+    view.innerHTML = '<div class="tabbar" id="metalsTabs">' + tabs + '</div><div id="metalsBody"></div>';
+    Array.prototype.forEach.call(document.querySelectorAll('#metalsTabs button'), function (btn) {
+      btn.onclick = function () { metalsTab = btn.getAttribute('data-mtab'); renderMetalsHome(); };
+    });
+    if (metalsTab === 'slitter') renderSlitterHome();
+    else renderProductionHome(metalsTab === 'press' ? 'Press' : 'Line');
+  }
+
+  // ----- Log Work (Metal Lines / Press): start a run, resume open runs, or go to Review -----
+  // machineType is 'Line' or 'Press' (fixed by the active tab). Everything downstream (the run,
+  // add/submit/review/finish) is shared; only the label and the open/review filters differ.
+  function renderProductionHome(machineType) {
+    var body = document.getElementById('metalsBody');
+    if (!body) return;
     var tok = nextViewToken();
-    view.innerHTML =
+    var label = machineType === 'Press' ? 'Press Department' : 'Metal Lines';
+    body.innerHTML =
       '<div class="card">' +
-        '<h3 style="margin-top:0">Metals — Log Work</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Start a work session on a line or press, then load the skids you run. Submit for review when the day is done.</div>' +
+        '<h3 style="margin-top:0">' + esc(label) + ' — Log Work</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Start a work session on a ' + esc(machineType.toLowerCase()) + ', then load the skids you run. Submit for review when the day is done.</div>' +
         '<div class="row">' +
           operatorFieldHtml('runOperator') +
-          selectField('runMachineType', 'Line / Press', ['Line', 'Press'], null) +
-          '<div class="field"><label>Number</label><input type="number" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
+          '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
         '</div>' +
         '<div class="field"><label>Notes (optional)</label><input id="runNotes" placeholder="e.g. day shift"></div>' +
         '<button class="btn success" id="startRunBtn">+ Start Work</button>' +
@@ -3019,13 +3042,11 @@
     document.getElementById('reviewWorkBtn').onclick = openProductionReview;
     document.getElementById('startRunBtn').onclick = function () {
       var operator = document.getElementById('runOperator').value.trim();
-      var type = document.getElementById('runMachineType').value;
       var numv = document.getElementById('runMachineNum').value.trim();
       var notes = document.getElementById('runNotes').value;
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!type) { toast('Pick Line or Press'); return; }
-      if (!numv) { toast('Enter the line/press number'); return; }
-      var machine = type + ' ' + numv;
+      if (!numv) { toast('Enter the ' + machineType.toLowerCase() + ' number'); return; }
+      var machine = machineType + ' ' + numv;
       var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
       runMutation('createRun', [machine, operator, notes, newOpId()],
         function (result) {
@@ -3038,7 +3059,8 @@
 
     google.script.run.withSuccessHandler(function (runs) {
       if (tok !== viewToken) return;
-      renderOpenRunsList(runs);
+      // Only this tab's machine type (Line vs Press) belongs on this screen.
+      renderOpenRunsList((runs || []).filter(function (r) { return machineParts(r.machine).type === machineType; }));
     }).withFailureHandler(function (err) {
       if (tok !== viewToken) return;
       var el = document.getElementById('openRunsList');
@@ -3259,15 +3281,17 @@
     var view = document.getElementById('view');
     var tok = nextViewToken();
     var day = prodReviewDate || todayStr();
+    var reviewType = metalsTab === 'press' ? 'Press' : 'Line';
+    var label = reviewType === 'Press' ? 'Press Department' : 'Metal Lines';
     view.innerHTML =
-      '<div class="card"><h3 style="margin-top:0">Review metals work</h3>' +
+      '<div class="card"><h3 style="margin-top:0">Review ' + esc(label) + ' work</h3>' +
         '<div class="field"><label>Day</label><input type="date" id="prodReviewDay" value="' + esc(day) + '"></div>' +
-        '<div class="sub">Runs submitted that day. Open one to review skids and finish the work.</div></div>' +
+        '<div class="sub">' + esc(reviewType) + ' runs submitted that day. Open one to review skids and finish the work.</div></div>' +
       '<div id="prodReviewList"><div class="loading">Loading&hellip;</div></div>';
     document.getElementById('prodReviewDay').onchange = function () { prodReviewDate = this.value; renderProductionReview(); };
     google.script.run.withSuccessHandler(function (runs) {
       if (tok !== viewToken) return;
-      renderProdReviewList(runs);
+      renderProdReviewList((runs || []).filter(function (r) { return machineParts(r.machine).type === reviewType; }));
     }).withFailureHandler(function (err) {
       if (tok !== viewToken) return;
       var el = document.getElementById('prodReviewList');
@@ -3536,6 +3560,245 @@
             function () { toast('Skid added'); markCacheStatus(sk, 'In Production'); renderRun(); },
             function (err) { showModal({ title: 'Could not add', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
         }
+      };
+    });
+  }
+
+  // ---------------- Slitter Department (log-only mixed-mill tracking) ----------------
+  // Renders inside the Metals tab body. A session groups output pallets cut on one Slitter #;
+  // each pallet records an operator-entered count and a composition of source mills. No skid
+  // inventory is touched — this is a traceability log for mixed-mill pallets.
+  function renderSlitterHome() {
+    var body = document.getElementById('metalsBody');
+    if (!body) return;
+    var tok = nextViewToken();
+    body.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Slitter Department — Log</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Record what the slitter cut. Each output pallet keeps its own mill composition (which source steel + mill # went into it). This does not change any skid\'s inventory.</div>' +
+        '<div class="row">' +
+          operatorFieldHtml('slitOperator') +
+          '<div class="field"><label>Slitter #</label><input type="number" id="slitNum" min="1" placeholder="e.g. 2"></div>' +
+        '</div>' +
+        '<div class="field"><label>Notes (optional)</label><input id="slitNotes" placeholder="e.g. day shift"></div>' +
+        '<button class="btn success" id="startSlitBtn">+ Start Slitter Session</button>' +
+      '</div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Open slitter sessions</h3>' +
+        '<div id="openSlitList"><div class="loading">Loading&hellip;</div></div></div>';
+
+    document.getElementById('startSlitBtn').onclick = function () {
+      var operator = document.getElementById('slitOperator').value.trim();
+      var numv = document.getElementById('slitNum').value.trim();
+      var notes = document.getElementById('slitNotes').value;
+      if (!operator) { toast('Enter an operator name'); return; }
+      if (!numv) { toast('Enter the slitter number'); return; }
+      var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
+      runMutation('createSlitterSession', ['Slitter ' + numv, operator, notes, newOpId()],
+        function (result) {
+          currentSlitter = { sessionId: result.sessionId, slitter: result.slitter, operator: operator };
+          slitterComp = []; slitPicked = null;
+          renderSlitterSession();
+        },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '+ Start Slitter Session'; });
+    };
+
+    ensureAllCache(function () {}); // warm the skid cache for the composition picker
+    google.script.run.withSuccessHandler(function (sessions) {
+      if (tok !== viewToken) return;
+      renderOpenSlitList(sessions);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('openSlitList');
+      if (el) el.innerHTML = '<div class="sub">Error: ' + esc(err.message) + '</div>';
+    }).getSlitterSessions('', 'open');
+  }
+
+  function renderOpenSlitList(sessions) {
+    var el = document.getElementById('openSlitList');
+    if (!el) return;
+    if (!sessions || !sessions.length) { el.innerHTML = '<div class="sub">No open sessions. Start one above.</div>'; return; }
+    var html = '';
+    sessions.forEach(function (s) {
+      html += '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
+        '<div class="ticket-id" style="font-size:15px">' + esc(s.slitter) + ' <span class="sub" style="font-weight:400">' + esc(s.sessionId) + '</span></div>' +
+        '<div class="sub">' + (s.palletCount || 0) + ' pallet(s) &middot; by ' + esc(s.operator) + ' &middot; ' + esc(s.createdOn) + '</div></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-slresume="' + esc(s.sessionId) + '">Resume</button></div>';
+    });
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-slresume]'), function (btn) {
+      btn.onclick = function () {
+        var sid = btn.getAttribute('data-slresume');
+        var s = sessions.filter(function (x) { return x.sessionId === sid; })[0];
+        currentSlitter = { sessionId: s.sessionId, slitter: s.slitter, operator: s.operator };
+        slitterComp = []; slitPicked = null;
+        renderSlitterSession();
+      };
+    });
+  }
+
+  function renderSlitterSession() {
+    state.view = 'slitterSession';
+    showTabbar(false); showBack(true); setDept('Metals');
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    view.innerHTML = '<div class="loading">Loading session&hellip;</div>';
+    ensureAllCache(function () {});
+    google.script.run.withSuccessHandler(function (detail) {
+      if (tok !== viewToken) return;
+      renderSlitterSessionContent(view, detail);
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getSlitterDetail(currentSlitter.sessionId);
+  }
+
+  function renderSlitterSessionContent(view, detail) {
+    var isOpen = (detail.status || 'Open') !== 'Finished';
+    var html = '<div class="card"><div class="ticket-id">' + esc(detail.slitter) +
+      ' <span class="badge ' + (isOpen ? 'inprogress' : 'used') + '">' + esc(detail.status || 'Open') + '</span>' +
+      ' <span class="sub" style="font-weight:400">' + esc(detail.sessionId) + '</span></div>' +
+      '<div class="sub">by ' + esc(detail.operator) + ' &middot; ' + esc(detail.createdOn) +
+      (detail.notes ? ' &middot; ' + esc(detail.notes) : '') + '</div></div>';
+
+    if (isOpen) {
+      html += '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">Add an output pallet</h3>' +
+        '<div class="sub" style="margin-bottom:8px">List each source steel that went into this pallet — a pallet can mix 2–3 mill numbers. Pick a skid to auto-fill its mill, or type a mill number.</div>' +
+        '<div class="searchrow">' + searchBarHtml('slitSkidSearch') + '</div>' +
+        '<div id="slitSkidPicker" style="margin-bottom:8px"></div>' +
+        '<div class="row">' +
+          '<div class="field"><label>Mill #</label><input id="slitMillInput" placeholder="e.g. M-1234"></div>' +
+          '<div class="field"><label>Qty (sheets)</label><input type="number" id="slitQtyInput" min="1"></div>' +
+        '</div>' +
+        '<button class="btn secondary" id="addSourceBtn" style="margin-bottom:6px">+ Add source mill</button>' +
+        '<div id="slitCompList" style="margin:8px 0"></div>' +
+        '<div class="field"><label>Output pallet count (pieces / blanks)</label><input type="number" id="slitOutputCount" min="1"></div>' +
+        '<div class="field"><label>Pallet notes (optional)</label><input id="slitPalletNotes"></div>' +
+        '<button class="btn success" id="addPalletBtn">Add pallet to session</button>' +
+      '</div>';
+    }
+
+    var pallets = detail.pallets || [];
+    var pHtml = '';
+    if (!pallets.length) {
+      pHtml = '<div class="sub">No pallets logged yet.</div>';
+    } else {
+      pallets.forEach(function (p) {
+        var comp = (p.composition || []).map(function (c) { return 'Mill ' + esc(c.mill) + ' (' + esc(c.qty) + (c.ticket ? ', ' + esc(c.ticket) : '') + ')'; }).join(', ');
+        var mixed = (p.composition || []).length > 1 ? ' <span class="badge wip">mixed mill</span>' : '';
+        pHtml += '<div class="queue-item"><div style="min-width:0">' +
+          '<div class="ticket-id" style="font-size:14px">' + esc(p.palletId) + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' pieces</span>' + mixed + '</div>' +
+          '<div class="sub">' + (comp || 'no sources') + '</div></div>' +
+          (isOpen ? '<button class="btn danger" style="padding:6px 10px;font-size:13px" data-pdel="' + esc(p.palletId) + '">Remove</button>' : '') +
+          '</div>';
+      });
+    }
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Pallets in this session (' + pallets.length + ')</h3>' + pHtml + '</div>';
+
+    if (isOpen) {
+      html += '<div class="card"><button class="btn secondary" id="finishSlitBtn" style="width:100%">Finish session</button></div>';
+    }
+
+    view.innerHTML = html;
+    if (!isOpen) return;
+
+    renderSlitCompList();
+    var search = document.getElementById('slitSkidSearch');
+    if (search) search.oninput = function () { renderSlitSkidPicker(search.value); };
+
+    document.getElementById('addSourceBtn').onclick = function () {
+      var mill = document.getElementById('slitMillInput').value.trim();
+      var qty = Number(document.getElementById('slitQtyInput').value) || 0;
+      if (!mill) { toast('Enter or pick a mill number'); return; }
+      if (qty <= 0) { toast('Enter the sheets from this source'); return; }
+      var src = slitPicked || {};
+      slitterComp.push({ skidId: src.skidId || '', ticket: src.ticket || '', mill: mill, qty: qty });
+      slitPicked = null;
+      document.getElementById('slitMillInput').value = '';
+      document.getElementById('slitQtyInput').value = '';
+      if (search) search.value = '';
+      renderSlitSkidPicker('');
+      renderSlitCompList();
+    };
+
+    document.getElementById('addPalletBtn').onclick = function () {
+      var outputCount = Number(document.getElementById('slitOutputCount').value) || 0;
+      var notes = document.getElementById('slitPalletNotes').value;
+      if (!slitterComp.length) { toast('Add at least one source mill'); return; }
+      if (outputCount <= 0) { toast('Enter the output pallet count'); return; }
+      var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
+      runMutation('addSlitterPallet', [currentSlitter.sessionId, outputCount, slitterComp.slice(), notes, currentSlitter.operator, newOpId()],
+        function (updated) {
+          if (updated && updated.duplicate) { toast('Already added'); btn.disabled = false; btn.textContent = 'Add pallet to session'; return; }
+          toast('Pallet added');
+          slitterComp = []; slitPicked = null;
+          renderSlitterSessionContent(document.getElementById('view'), updated);
+        },
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Add pallet to session'; });
+    };
+
+    document.getElementById('finishSlitBtn').onclick = function () {
+      showConfirm('Finish slitter session', 'Finish ' + currentSlitter.sessionId + '? You can still view it, but no more pallets can be added.', function () {
+        runMutation('finishSlitterSession', [currentSlitter.sessionId, currentSlitter.operator, newOpId()],
+          function () { toast('Session finished'); metalsTab = 'slitter'; openProduction(); },
+          function (err) { toast('Error: ' + err.message); });
+      }, 'Finish');
+    };
+
+    Array.prototype.forEach.call(view.querySelectorAll('[data-pdel]'), function (btn) {
+      btn.onclick = function () {
+        var pid = btn.getAttribute('data-pdel');
+        showConfirm('Remove pallet', 'Remove ' + pid + ' from this session?', function () {
+          runMutation('removeSlitterPallet', [currentSlitter.sessionId, pid, currentSlitter.operator, newOpId()],
+            function (updated) { toast('Pallet removed'); renderSlitterSessionContent(document.getElementById('view'), updated); },
+            function (err) { toast('Error: ' + err.message); });
+        }, 'Remove', 'danger');
+      };
+    });
+  }
+
+  function renderSlitCompList() {
+    var el = document.getElementById('slitCompList');
+    if (!el) return;
+    if (!slitterComp.length) { el.innerHTML = '<div class="sub">No sources added to this pallet yet.</div>'; return; }
+    var html = '';
+    slitterComp.forEach(function (r, i) {
+      html += '<div class="queue-item" style="padding:4px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:14px">Mill ' + esc(r.mill) + '</span> ' +
+        '<span class="sub">' + esc(r.qty) + ' sheets' + (r.ticket ? ' &middot; from ' + esc(r.ticket) : '') + '</span></div>' +
+        '<button class="btn danger" style="padding:4px 8px;font-size:12px" data-cdel="' + i + '">&times;</button></div>';
+    });
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-cdel]'), function (b) {
+      b.onclick = function () { slitterComp.splice(Number(b.getAttribute('data-cdel')), 1); renderSlitCompList(); };
+    });
+  }
+
+  function renderSlitSkidPicker(term) {
+    var c = document.getElementById('slitSkidPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    if (!term) { c.innerHTML = ''; return; }
+    var rows = allCache.filter(function (t) {
+      return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1;
+    }).slice(0, 8);
+    if (!rows.length) { c.innerHTML = '<div class="sub">No skids match.</div>'; return; }
+    var html = '';
+    rows.forEach(function (t) {
+      html += '<div class="queue-item" style="padding:4px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:13px">' + esc(t.ticket) + '</span> ' +
+        '<span class="sub">Mill ' + esc(t.mill || '?') + ' &middot; ' + esc(t.qty || 0) + ' sheets</span></div>' +
+        '<button class="btn secondary" style="padding:4px 8px;font-size:12px" data-suse="' + esc(t.skidId) + '">Use</button></div>';
+    });
+    c.innerHTML = html;
+    Array.prototype.forEach.call(c.querySelectorAll('[data-suse]'), function (b) {
+      b.onclick = function () {
+        var sk = b.getAttribute('data-suse');
+        var t = allCache.filter(function (x) { return x.skidId === sk; })[0];
+        if (!t) return;
+        slitPicked = { skidId: sk, ticket: t.ticket, mill: t.mill || '' };
+        var mi = document.getElementById('slitMillInput'); if (mi) mi.value = t.mill || '';
+        toast('Using ' + t.ticket + (t.mill ? ' (Mill ' + t.mill + ')' : ''));
       };
     });
   }

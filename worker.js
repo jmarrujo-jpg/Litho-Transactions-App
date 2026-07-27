@@ -25,6 +25,15 @@ const RATE = 'Litho Rate Table';
 const PRODUCTION = 'Production Runs';
 const PRODUCTION_HEADERS = ['Run ID', 'Created On', 'Operator', 'Machine', 'Status', 'Skid Count', 'Notes', 'Submitted On', 'Finished On', 'Op ID'];
 
+// Slitter Department: a log-only traceability module. A session is one cutting sitting on a
+// Slitter #; each output pallet is its own row carrying an operator-entered count and a
+// Composition (JSON [{skidId,ticket,mill,qty}]) so a pallet cut from 2-3 source skids records
+// its mixed mill numbers. NOTHING here touches Steel Tickets inventory.
+const SLITTER_SESSIONS = 'Slitter Sessions';
+const SLITTER_SESSION_HEADERS = ['Session ID', 'Slitter', 'Operator', 'Created On', 'Status', 'Pallet Count', 'Notes', 'Op ID'];
+const SLITTER_PALLETS = 'Slitter Pallets';
+const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output Count', 'Composition', 'Notes', 'Op ID'];
+
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
   'VARNISH WET-STANDARD', 'VARNISH WET-PEBBLE', 'VARNISH DRY-STANDARD', 'VARNISH DRY-PEBBLE', 'WAX ONLY',
@@ -67,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-9' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-10' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -144,6 +153,19 @@ async function handle(fn, args, env) {
       return runSkidPartial(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'finishRun': // (runId, usedMap, operator, opId)
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
+    // ---- slitter (log-only) ----
+    case 'getSlitterSessions': // (dateStr, scope)
+      return getSlitterSessions(sheets, args[0], args[1]);
+    case 'getSlitterDetail': // (sessionId)
+      return getSlitterDetail(sheets, args[0]);
+    case 'createSlitterSession': // (slitter, operator, notes, opId)
+      return createSlitterSession(sheets, args[0], args[1], args[2], args[3]);
+    case 'addSlitterPallet': // (sessionId, outputCount, composition, notes, operator, opId)
+      return addSlitterPallet(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
+    case 'removeSlitterPallet': // (sessionId, palletId, operator, opId)
+      return removeSlitterPallet(sheets, args[0], args[1], args[2], args[3]);
+    case 'finishSlitterSession': // (sessionId, operator, opId)
+      return finishSlitterSession(sheets, args[0], args[1], args[2]);
     // ---- reports ----
     case 'getLithoReport': // (startYMD, endYMD)
       return getLithoReport(sheets, args[0], args[1]);
@@ -327,7 +349,7 @@ async function getAllTickets(sheets) {
     skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
-    row: o['Row'] != null ? o['Row'] : '', countedOn: toYMD(o['Counted At']),
+    row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', countedOn: toYMD(o['Counted At']),
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
@@ -1279,6 +1301,122 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
   }
   await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Finished', 'Finished On': todayYMD() });
   return getRunDetail(sheets, runId);
+}
+
+// ================= SLITTER (log-only mixed-mill tracking) ============================
+// Sessions live in 'Slitter Sessions'; each output pallet is a row in 'Slitter Pallets' with a
+// Composition JSON [{skidId,ticket,mill,qty}]. No Steel Tickets rows are read or written here.
+
+function parseComposition(v) {
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+
+async function getSlitterSessions(sheets, dateStr, scope) {
+  let rows;
+  try { rows = (await readObjects(sheets, SLITTER_SESSIONS, true)).rows; } catch (e) { return []; }
+  const target = dateStr || todayYMD();
+  return rows.filter((o) => o['Session ID']).filter((o) => {
+    const st = o['Status'] || 'Open';
+    if (scope === 'open') return st === 'Open';                                   // open sessions always visible
+    if (scope === 'finished') return st === 'Finished' && toYMD(o['Created On']) === target;
+    return toYMD(o['Created On']) === target;
+  }).map((o) => ({
+    sessionId: o['Session ID'], slitter: o['Slitter'], operator: o['Operator'], createdOn: toYMD(o['Created On']),
+    status: o['Status'] || 'Open', palletCount: o['Pallet Count'], notes: o['Notes'],
+  }));
+}
+
+async function slitterPalletsOf(sheets, sessionId) {
+  let rows;
+  try { rows = (await readObjects(sheets, SLITTER_PALLETS, true)).rows; } catch (e) { return []; }
+  return rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim()).map((o) => ({
+    palletId: o['Pallet ID'], sessionId: o['Session ID'], createdOn: toYMD(o['Created On']),
+    outputCount: num(o['Output Count']), composition: parseComposition(o['Composition']), notes: o['Notes'] || '',
+  }));
+}
+
+async function getSlitterDetail(sheets, sessionId) {
+  const sessions = await readObjects(sheets, SLITTER_SESSIONS, true);
+  const s = sessions.rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!s) throw new Error('Slitter session not found: ' + sessionId);
+  const pallets = await slitterPalletsOf(sheets, sessionId);
+  return { sessionId: s['Session ID'], slitter: s['Slitter'], operator: s['Operator'], createdOn: toYMD(s['Created On']),
+    status: s['Status'] || 'Open', notes: s['Notes'], palletCount: pallets.length, pallets };
+}
+
+async function createSlitterSession(sheets, slitter, operator, notes, opId) {
+  slitter = String(slitter || '').trim();
+  if (!slitter) throw new Error('Enter a Slitter number.');
+  await ensureTab(sheets, SLITTER_SESSIONS, SLITTER_SESSION_HEADERS);
+  const s0 = await readTab(sheets, SLITTER_SESSIONS);
+  if (opId && s0.headers.indexOf('Op ID') !== -1) {
+    const ex = s0.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
+    if (ex) return { duplicate: true, sessionId: ex['Session ID'], slitter: ex['Slitter'], operator: ex['Operator'], status: ex['Status'] || 'Open' };
+  }
+  const sessionId = fmtId('SLT-', maxIdNumber(s0.rows, 'Session ID', 'SLT-') + 1);
+  const ens = await ensureColumn(sheets, SLITTER_SESSIONS, s0.headers, 'Op ID');
+  await appendRowObj(sheets, SLITTER_SESSIONS, ens.headers, {
+    'Session ID': sessionId, 'Slitter': slitter, 'Operator': operator || '', 'Created On': todayYMD(),
+    'Status': 'Open', 'Pallet Count': 0, 'Notes': notes || '', 'Op ID': opId || '',
+  });
+  return { sessionId, slitter, operator: operator || '', status: 'Open' };
+}
+
+async function recountSlitter(sheets, sessionId) {
+  const sessions = await readTab(sheets, SLITTER_SESSIONS);
+  const s = sessions.rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!s) return 0;
+  let count = 0;
+  try { count = (await readObjects(sheets, SLITTER_PALLETS, true)).rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim()).length; } catch (e) { count = 0; }
+  await stampCells(sheets, SLITTER_SESSIONS, s.__row, sessions.map, { 'Pallet Count': count });
+  return count;
+}
+
+async function addSlitterPallet(sheets, sessionId, outputCount, composition, notes, operator, opId) {
+  await ensureTab(sheets, SLITTER_PALLETS, SLITTER_PALLET_HEADERS);
+  const p0 = await readTab(sheets, SLITTER_PALLETS);
+  if (opId && p0.headers.indexOf('Op ID') !== -1) {
+    const ex = p0.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
+    if (ex) return { duplicate: true, palletId: ex['Pallet ID'], sessionId };
+  }
+  const sessions = await readTab(sheets, SLITTER_SESSIONS);
+  const s = sessions.rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!s) throw new Error('Slitter session not found: ' + sessionId);
+  if (String(s['Status']) === 'Finished') throw new Error('Session ' + sessionId + ' is finished and locked.');
+  const comp = Array.isArray(composition) ? composition : parseComposition(composition);
+  if (!comp.length) throw new Error('Add at least one source (mill) to the pallet.');
+  // Pallet ID = session + "-P" + (next index unused on this session), collision-safe.
+  const existing = p0.rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim());
+  let n = existing.length + 1;
+  while (existing.some((o) => String(o['Pallet ID']).trim() === sessionId + '-P' + n)) n++;
+  const palletId = sessionId + '-P' + n;
+  const ens = await ensureColumn(sheets, SLITTER_PALLETS, p0.headers, 'Op ID');
+  await appendRowObj(sheets, SLITTER_PALLETS, ens.headers, {
+    'Pallet ID': palletId, 'Session ID': sessionId, 'Created On': todayYMD(),
+    'Output Count': num(outputCount), 'Composition': JSON.stringify(comp), 'Notes': notes || '', 'Op ID': opId || '',
+  });
+  await recountSlitter(sheets, sessionId);
+  return getSlitterDetail(sheets, sessionId);
+}
+
+async function removeSlitterPallet(sheets, sessionId, palletId, operator, opId) {
+  const p = await readTab(sheets, SLITTER_PALLETS);
+  const row = p.rows.filter((o) => String(o['Pallet ID']).trim() === String(palletId).trim())[0];
+  if (!row) return getSlitterDetail(sheets, sessionId);
+  // Blank the row's identity so it drops out of the session (kept simple: no physical row delete).
+  await stampCells(sheets, SLITTER_PALLETS, row.__row, p.map, { 'Pallet ID': '', 'Session ID': '', 'Composition': '', 'Output Count': '' });
+  await recountSlitter(sheets, sessionId);
+  return getSlitterDetail(sheets, sessionId);
+}
+
+async function finishSlitterSession(sheets, sessionId, operator, opId) {
+  const sessions = await readTab(sheets, SLITTER_SESSIONS);
+  const s = sessions.rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!s) throw new Error('Slitter session not found: ' + sessionId);
+  if (String(s['Status']) !== 'Finished') {
+    await stampCells(sheets, SLITTER_SESSIONS, s.__row, sessions.map, { 'Status': 'Finished' });
+  }
+  return getSlitterDetail(sheets, sessionId);
 }
 
 // ================= STEEL COUNT =====================================================
