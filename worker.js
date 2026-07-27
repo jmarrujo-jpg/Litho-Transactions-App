@@ -67,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-7' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-8' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -93,6 +93,7 @@ async function handle(fn, args, env) {
   switch (fn) {
     case 'getRateTree': return getRateTree(sheets);
     case 'getAllTickets': return getAllTickets(sheets);
+    case 'getUsedTickets': return getUsedTickets(sheets);
     case 'getOperatorNames': return [];
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
@@ -330,6 +331,49 @@ async function getAllTickets(sheets) {
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
+
+// Only the skids that have gone through production — Used (consumed) or In Production (on a
+// machine now). Loaded on demand by the global search screen's "Used in production" section
+// so the day-to-day active-inventory fetch never has to carry this ever-growing history.
+async function getUsedTickets(sheets) {
+  const { rows } = await readObjects(sheets, MASTER);
+  return rows.filter((o) => {
+    const s = o['Status'] || '';
+    return s === STATUS.USED || s === STATUS.IN_PRODUCTION;
+  }).map((o) => ({
+    skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
+    width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
+    bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || STATUS.USED,
+    row: o['Row'] != null ? o['Row'] : '', runId: o['Run ID'] || '',
+    finishedOn: toYMD(o['Finished On']), usedBy: o['Used By'] || '',
+  })).sort((a, b) => String(b.finishedOn).localeCompare(String(a.finishedOn)));
+}
+
+// The "split family" of a ticket: every skid that traces back to the same original ticket
+// (the original plus all -LR#/-MR# remainders), so from any one skid you can see the parent
+// and every piece that came off it, and what became of each. Grouped by base ticket number,
+// which baseTicketOf() strips remainder suffixes down to; Split Of carries the exact parent.
+function familyOf(rows, ticket) {
+  const base = baseTicketOf(ticket);
+  if (!base) return { base: '', members: [] };
+  const members = rows.filter((o) => (o['Ticket'] || o['Skid ID']) && baseTicketOf(o['Ticket']) === base)
+    .map((o) => {
+      const tk = o['Ticket'] || '';
+      return {
+        skidId: o['Skid ID'] || '', ticket: tk, status: o['Status'] || STATUS.CURRENT,
+        qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '', weight: o['Weight'] != null ? o['Weight'] : '',
+        litho: num(o['Litho']), splitOf: o['Split Of'] || '', isOriginal: String(tk).trim() === String(base).trim(),
+        runId: o['Run ID'] || '', finishedOn: toYMD(o['Finished On']), usedBy: o['Used By'] || '',
+        missingOn: toYMD(o['Missing At']),
+      };
+    });
+  // Original first, then remainders in ticket order (…-LR1, …-LR2, …-MR1).
+  members.sort((a, b) => (a.isOriginal === b.isOriginal)
+    ? String(a.ticket).localeCompare(String(b.ticket))
+    : (a.isOriginal ? -1 : 1));
+  return { base, members };
+}
+
 function activeCoatings(history) {
   const voided = {};
   (history || []).forEach((h) => { const m = /^VOID#(\d+):/.exec(String(h.notes || '')); if (m) voided[m[1]] = true; });
@@ -357,7 +401,8 @@ async function getTicketCard(sheets, skidId) {
   const active = activeCoatings(history);
   const groups = await rateGroups(sheets);
   return { skidId, ticket: obj['Ticket'], status: obj['Status'] || 'Current', steel: obj, litho: num(obj['Litho']),
-    passCount: active.length, suggestedGroup: guessGroupForEndUse(obj['End Use'], groups), coatings: active, transactions: history };
+    passCount: active.length, suggestedGroup: guessGroupForEndUse(obj['End Use'], groups), coatings: active, transactions: history,
+    family: familyOf(rows, obj['Ticket']) };
 }
 async function getJobsForDate(sheets, dateStr) {
   const { rows } = await readObjects(sheets, JOBS, true);

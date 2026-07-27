@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.3</span>
+      <span class="version" id="appVersion">v1.12.4</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -680,8 +680,15 @@
       openJob(jid);
       return;
     }
+    // Drilled into a ticket from the global Search screen? Back returns to Search.
+    if (state.view === 'card' && state.returnToSearch) {
+      state.returnToSearch = false;
+      openSearch();
+      return;
+    }
     switch (state.view) {
       case 'all': renderLanding(); return;                 // litho list -> landing
+      case 'search': renderLanding(); return;              // global search -> landing
       case 'reports': renderLanding(); return;
       case 'count':
         // Within a count, Back steps back through the sub-screens before leaving.
@@ -709,9 +716,7 @@
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
       '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' +
       '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px">🧮&nbsp; Litho Steel Count</button>';
-    document.getElementById('tileSearch').onclick = function () {
-      showInfo('Search for a Ticket', 'This is coming soon — for now, open a department and use its search.', null);
-    };
+    document.getElementById('tileSearch').onclick = openSearch;
     document.getElementById('tileLitho').onclick = openLitho;
     document.getElementById('tileProduction').onclick = openProduction;
     document.getElementById('tileReports').onclick = openReports;
@@ -725,6 +730,126 @@
     nextViewToken();
     showTabbar(true); showBack(true); setDept('Litho');
     renderAll();
+  }
+
+  // ---------------- Global "Search for a Ticket" (across every department) ----------------
+  // "All" covers the live inventory (Current / WIP / Pending). Skids that have gone through
+  // production (Used / In Production) are their own ever-growing history, so they load only
+  // when the operator taps "Used in production" — keeping the everyday search fast as the
+  // Used pile grows over the years.
+  var searchFilter = 'all';        // all | current | wip | pending
+  var usedCache = null;            // null = not fetched yet; [] or [...] once loaded
+  var searchUsedOpen = false;
+
+  function openSearch() {
+    state.view = 'search'; state.skid = null;
+    enterDetailView(); setDept('Search');
+    searchFilter = 'all';
+    renderSearch();
+  }
+
+  function renderSearch() {
+    state.view = 'search';
+    var view = document.getElementById('view');
+    var tok = nextViewToken();
+    var chips = [['all', 'All'], ['current', 'Current'], ['wip', 'WIP'], ['pending', 'Pending']].map(function (c) {
+      return '<button data-sfilter="' + c[0] + '"' + (searchFilter === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+    view.innerHTML =
+      '<div class="searchrow">' + searchBarHtml('globalSearch') + '</div>' +
+      '<div class="tabbar" id="searchChips">' + chips + '</div>' +
+      '<div class="sub" style="margin-bottom:8px">Live steel — Current, WIP and Pending.</div>' +
+      '<div id="searchActiveList"><div class="loading">Loading tickets&hellip;</div></div>' +
+      '<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">' +
+        '<button class="btn secondary" id="loadUsedBtn" style="width:100%">' +
+          (searchUsedOpen ? '📦 Used in production' : '📦 Used in production — tap to load') + '</button>' +
+        '<div class="sub" style="margin-top:6px">Skids consumed or on a machine now. Loaded on demand — this list grows over time.</div>' +
+      '</div>' +
+      '<div id="searchUsedList"></div>';
+
+    var searchInput = document.getElementById('globalSearch');
+    searchInput.oninput = function () { renderSearchActive(); if (searchUsedOpen) renderSearchUsed(); };
+    Array.prototype.forEach.call(document.querySelectorAll('#searchChips button'), function (btn) {
+      btn.onclick = function () {
+        searchFilter = btn.getAttribute('data-sfilter');
+        Array.prototype.forEach.call(document.querySelectorAll('#searchChips button'), function (b) {
+          b.classList.toggle('active', b.getAttribute('data-sfilter') === searchFilter);
+        });
+        renderSearchActive();
+      };
+    });
+    document.getElementById('loadUsedBtn').onclick = function () {
+      searchUsedOpen = true;
+      var btn = document.getElementById('loadUsedBtn');
+      btn.textContent = '📦 Used in production';
+      if (usedCache === null) {
+        document.getElementById('searchUsedList').innerHTML = '<div class="loading">Loading used skids&hellip;</div>';
+        google.script.run.withSuccessHandler(function (used) {
+          usedCache = used || [];
+          if (tok === viewToken) renderSearchUsed();
+        }).withFailureHandler(function (err) {
+          if (tok !== viewToken) return;
+          document.getElementById('searchUsedList').innerHTML = '<div class="card empty">Error loading used skids: ' + esc(err.message) + '</div>';
+        }).getUsedTickets();
+      } else {
+        renderSearchUsed();
+      }
+    };
+
+    ensureAllCache(function () { if (tok === viewToken) renderSearchActive(); });
+    if (allCache.length) renderSearchActive();
+    if (searchUsedOpen && usedCache !== null) renderSearchUsed();
+  }
+
+  function searchTermMatch(t, term) {
+    if (!term) return true;
+    return String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
+           String(t.skidId).toLowerCase().indexOf(term) !== -1;
+  }
+
+  function renderSearchActive() {
+    var container = document.getElementById('searchActiveList');
+    if (!container) return;
+    var si = document.getElementById('globalSearch');
+    var term = (si ? si.value : '').trim().toLowerCase();
+    var rows = allCache.filter(function (t) {
+      if (t.status !== 'Current' && t.status !== 'WIP' && t.status !== 'Pending') return false;
+      if (searchFilter === 'current' && t.status !== 'Current') return false;
+      if (searchFilter === 'wip' && t.status !== 'WIP') return false;
+      if (searchFilter === 'pending' && t.status !== 'Pending') return false;
+      return searchTermMatch(t, term);
+    });
+    if (!rows.length) {
+      container.innerHTML = '<div class="card empty">' + (term ? 'No live tickets match "' + esc(si.value) + '".' : 'No live tickets.') + '</div>';
+      return;
+    }
+    var html = '<div class="card">';
+    rows.forEach(function (t) { html += ticketRowHtml(t); });
+    html += '</div>';
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
+      el.onclick = function () { openCardFromSearch(el.getAttribute('data-skid')); };
+    });
+  }
+
+  function renderSearchUsed() {
+    var container = document.getElementById('searchUsedList');
+    if (!container || usedCache === null) return;
+    var si = document.getElementById('globalSearch');
+    var term = (si ? si.value : '').trim().toLowerCase();
+    var rows = usedCache.filter(function (t) { return searchTermMatch(t, term); });
+    if (!rows.length) {
+      container.innerHTML = '<div class="card empty" style="margin-top:10px">' +
+        (term ? 'No used skids match "' + esc(si.value) + '".' : 'No used skids yet.') + '</div>';
+      return;
+    }
+    var html = '<div class="card" style="margin-top:10px">';
+    rows.forEach(function (t) { html += ticketRowHtml(t); });
+    html += '</div>';
+    container.innerHTML = html;
+    Array.prototype.forEach.call(container.querySelectorAll('.queue-item'), function (el) {
+      el.onclick = function () { openCardFromSearch(el.getAttribute('data-skid')); };
+    });
   }
 
   // ---------------- Reports (what was produced, by day or range) ----------------
@@ -1683,7 +1808,7 @@
 
   // ---------------- Ticket card (one detail view for every status) ----------------
   function openCard(skidId) {
-    state.view = 'card'; state.listView = 'all'; state.skid = skidId; state.returnToJobId = null;
+    state.view = 'card'; state.listView = 'all'; state.skid = skidId; state.returnToJobId = null; state.returnToSearch = false;
     enterDetailView();
     renderCard();
   }
@@ -1692,6 +1817,12 @@
   function openTicketFromJob(skidId, jobId) {
     openCard(skidId);
     state.returnToJobId = jobId;
+  }
+
+  // Open a ticket from the global Search screen so Back returns to Search (not the Litho list).
+  function openCardFromSearch(skidId) {
+    openCard(skidId);
+    state.returnToSearch = true;
   }
 
   function renderCard() {
@@ -1710,6 +1841,41 @@
   function fmtStamp(at, by) {
     if (!at) return '';
     return esc(at) + (by ? ' by ' + esc(by) : '');
+  }
+
+  // Plain-English "what became of this piece" line for a split-family member.
+  function familyWhatHappened(m) {
+    var q = (m.qty !== '' && m.qty != null) ? (m.qty + ' sheets') : '';
+    if (m.status === 'Used') return 'Used' + (m.usedBy ? ' by ' + m.usedBy : '') + (m.finishedOn ? ' on ' + m.finishedOn : '') + (m.runId ? ' · run ' + m.runId : '');
+    if (m.status === 'In Production') return 'On production run ' + (m.runId || '?') + (q ? ' · ' + q : '');
+    if (m.status === 'Missing') return 'Missing' + (m.missingOn ? ' since ' + m.missingOn : '') + (q ? ' · ' + q : '');
+    if (m.status === 'Pending') return 'Pending approval' + (q ? ' · ' + q : '');
+    if (m.status === 'WIP') return 'In WIP' + (q ? ' · ' + q : '') + (m.litho ? ' · litho ' + money(m.litho) : '');
+    return 'In Current steel' + (q ? ' · ' + q : '');
+  }
+
+  // The split-history card: shows the original ticket plus every -LR#/-MR# piece that came
+  // off it and what happened to each, so any partial can be traced back to its parent skid.
+  // Only shown when there's actually a family (more than one skid on the base ticket).
+  function familyCardHtml(card) {
+    var fam = card.family;
+    if (!fam || !fam.members || fam.members.length < 2) return '';
+    var html = '<div class="card"><h3 style="margin-top:0;font-size:15px">Split history — where this steel went</h3>' +
+      '<div class="sub" style="margin-bottom:8px">Every skid from original ticket <strong>' + esc(fam.base) + '</strong>. Tap any to open it.</div>';
+    fam.members.forEach(function (m) {
+      var isSelf = m.skidId === card.skidId;
+      html += '<div class="queue-item" data-fam="' + esc(m.skidId) + '"' + (isSelf ? ' style="border:1px solid var(--accent)"' : '') + '>' +
+        '<div style="min-width:0">' +
+          '<div class="ticket-id">' + esc(m.ticket || '(no ticket)') +
+            (m.isOriginal ? ' <span class="sub" style="font-weight:400">· original</span>' : '') +
+            ' <span class="sub" style="font-weight:400">' + esc(m.skidId) + (isSelf ? ' · this skid' : '') + '</span></div>' +
+          '<div class="sub">' + esc(familyWhatHappened(m)) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;white-space:nowrap"><span class="badge ' + badgeClassFor(m.status) + '">' + esc(m.status) + '</span></div>' +
+      '</div>';
+    });
+    html += '</div>';
+    return html;
   }
 
   function renderCardContent(view, card) {
@@ -1760,12 +1926,25 @@
 
     html += ticketDetailsEditorHtml(card);
 
+    html += familyCardHtml(card);
+
     if (card.transactions && card.transactions.length) {
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">History</h3>' +
         renderHistoryTable(card.transactions) + '</div>';
     }
 
     view.innerHTML = html;
+    Array.prototype.forEach.call(view.querySelectorAll('[data-fam]'), function (el) {
+      var sk = el.getAttribute('data-fam');
+      if (sk === card.skidId) return; // the current skid isn't a link to itself
+      el.style.cursor = 'pointer';
+      // Keep the same Back destination (Search or the job) when hopping between family members.
+      el.onclick = function () {
+        var rs = state.returnToSearch, rj = state.returnToJobId;
+        openCard(sk);
+        state.returnToSearch = rs; state.returnToJobId = rj;
+      };
+    });
     if (status === 'Current') wireCurrentActions(card);
     if (status === 'WIP') wireWipActions(card);
     if ((status === 'WIP' || status === 'Pending') && card.coatings && card.coatings.length) {
