@@ -67,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-6' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-7' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -565,10 +565,15 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   const result = { skidId, ticket, sheetsRun: null, estimatedWeightUsed: null, isPartial: false,
     remainderTicket: null, remainderSheets: 0, remainderWeight: 0, scrapSheets: 0, scrapWeight: 0 };
 
-  // Another coat on a Pending/WIP skid: just add cost.
+  // Another coat on a Pending/WIP skid: stack the cost on top of what it already has. When this
+  // happens inside a job (jobId provided) — i.e. an already-coated WIP skid is added to a job for
+  // another pass — also ATTACH it: move it into the job as Pending so it rides the normal
+  // review/approve flow (approve -> WIP). Ad-hoc re-coats from the card pass no jobId and just add cost.
   if (status === STATUS.WIP || status === STATUS.PENDING) {
     const newTotal = Math.round(((num(obj['Litho'])) + match.totalCost) * 100) / 100;
-    await stampCells(sheets, MASTER, row, map, { 'Litho': newTotal, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' });
+    const stamp = { 'Litho': newTotal, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
+    if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; }
+    await stampCells(sheets, MASTER, row, map, stamp);
     await appendLithoNote(lithoNoteClean);
     await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName }, opId);
     result.litho = newTotal;

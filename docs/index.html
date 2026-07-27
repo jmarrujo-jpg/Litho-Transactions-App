@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.2</span>
+      <span class="version" id="appVersion">v1.12.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1467,7 +1467,7 @@
 
   // ---------------- Combined ticket list (every status, from Steel Tickets) ----------------
   var allCache = [];
-  var queueCache = []; // Current-only subset, for the New Job picker
+  var queueCache = []; // Current + WIP subset, for the job pickers (WIP = re-coat / another pass)
 
   function searchBarHtml(id) {
     return '<div class="searchwrap">' +
@@ -1509,7 +1509,7 @@
 
   function setCaches(all) {
     allCache = all || [];
-    queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
+    queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
   }
 
   // After a skid is added to a job it's no longer Current, so drop it from the picker source
@@ -1528,7 +1528,7 @@
   }
 
   // Loads the combined ticket list into allCache once, then runs cb. Used by the New Job /
-  // production pickers which need every-status skids (queueCache is Current-only).
+  // production pickers which need every-status skids (queueCache is Current + WIP).
   function ensureAllCache(cb) {
     if (allCache.length) { cb(); return; }
     google.script.run.withSuccessHandler(function (all) { setCaches(all); cb(); })
@@ -1539,7 +1539,7 @@
   // before the background getAllTickets refresh lands.
   function markCacheStatus(skidId, status) {
     allCache.forEach(function (t) { if (t.skidId === skidId) t.status = status; });
-    queueCache = allCache.filter(function (t) { return t.status === 'Current'; });
+    queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
   }
 
   function renderAll() {
