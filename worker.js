@@ -67,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-4' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-5' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -466,12 +466,24 @@ async function nextSkidId(sheets) {
   return fmtId('SKD-', maxIdNumber(rows, 'Skid ID', 'SKD-') + 1);
 }
 
-async function findRemainderTicketId(masterRows, baseTicket) {
-  for (let i = 1; i <= 20; i++) {
-    const cand = baseTicket + (i === 1 ? '-R' : '-R' + i);
+// Strip any remainder suffix back to the ORIGINAL ticket, so a remainder of a remainder is
+// named off the base (e.g. 042426-207-LR1 -> base 042426-207), never stacked (…-R-R-R).
+// Handles the legacy "-R"/"-R2" suffixes as well as the current "-LR#"/"-MR#".
+function baseTicketOf(ticket) {
+  let t = String(ticket || '').trim(), prev;
+  do { prev = t; t = t.replace(/-(R\d*|LR\d+|MR\d+)$/, ''); } while (t !== prev);
+  return t;
+}
+// Next free remainder ticket for a base + kind. kind 'LR' = litho partial, 'MR' = metals/production
+// partial. Numbered per base+kind (LR1, LR2, … / MR1, MR2, …) and checked unique on the sheet.
+async function findRemainderTicketId(masterRows, ticket, kind) {
+  const base = baseTicketOf(ticket);
+  const pre = kind === 'MR' ? 'MR' : 'LR';
+  for (let i = 1; i <= 999; i++) {
+    const cand = base + '-' + pre + i;
     if (!masterRows.some((o) => String(o['Ticket']).trim() === cand)) return cand;
   }
-  throw new Error('Too many existing splits of ticket ' + baseTicket + '. Rename manually.');
+  throw new Error('Too many existing splits of ticket ' + base + '. Rename manually.');
 }
 
 // opId dedup via an "Op ID" column on Litho Transactions (strongly consistent; catches the
@@ -583,7 +595,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
 
   let scrapNote = '';
   if (usedFewer && isPartialSkid) {
-    result.remainderTicket = await findRemainderTicketId(master.rows, ticket);
+    result.remainderTicket = await findRemainderTicketId(master.rows, ticket, 'LR');
     result.remainderSheets = originalQty - sheets_;
     result.remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
     const remainderSkid = await nextSkidId(sheets);
@@ -1089,7 +1101,7 @@ async function submitRun(sheets, runId, operator, opId) {
 // Splits a skid: keep `keepSheets` on the given row (qty/weight reduced) and spin the leftover
 // off as a fresh available skid back in inventory (Current if raw, WIP if coated). Reused by
 // Finish Work and the submit-time partial entry. `master` must be a live readTab result; the
-// new row is pushed onto master.rows so repeated splits pick unique -R tickets and Skid IDs.
+// new row is pushed onto master.rows so repeated splits pick unique remainder tickets and Skid IDs.
 async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, context) {
   const skidId = obj['Skid ID'];
   const ticket = obj['Ticket'];
@@ -1098,7 +1110,7 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
   const keepWeight = weightPerSheet > 0 ? Math.round(keepSheets * weightPerSheet * 100) / 100 : num(obj['Weight']);
   const remQty = onHand - keepSheets;
   const remWeight = Math.round((num(obj['Weight']) - keepWeight) * 100) / 100;
-  const remTicket = await findRemainderTicketId(master.rows, ticket);
+  const remTicket = await findRemainderTicketId(master.rows, ticket, 'MR');
   const remSkid = await nextSkidId(sheets);
   const remObj = {};
   master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
