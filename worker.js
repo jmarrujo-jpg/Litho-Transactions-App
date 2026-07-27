@@ -67,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-5' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-6' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -274,7 +274,9 @@ function todayYMD() {
 }
 
 // ---------------- backend reads (ported from Code.gs) ----------------
-function num(v) { return Number(v) || 0; }
+// Tolerates thousands-separator commas ("4,405" -> 4405) which appear in some weight cells;
+// plain Number() would read those as NaN and silently treat the weight as 0.
+function num(v) { return Number(String(v == null ? '' : v).replace(/,/g, '')) || 0; }
 async function readObjects(sheets, tab, unformatted) {
   const values = await sheets.read(tab, unformatted);
   if (!values.length) return { headers: [], rows: [] };
@@ -1105,29 +1107,39 @@ async function submitRun(sheets, runId, operator, opId) {
 async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, context) {
   const skidId = obj['Skid ID'];
   const ticket = obj['Ticket'];
+  const base = baseTicketOf(ticket);
   const onHand = num(obj['QTY/LOAD']);
-  const weightPerSheet = onHand > 0 ? num(obj['Weight']) / onHand : 0;
-  const keepWeight = weightPerSheet > 0 ? Math.round(keepSheets * weightPerSheet * 100) / 100 : num(obj['Weight']);
+  const totalWeight = num(obj['Weight']);
+  const weightPerSheet = onHand > 0 ? totalWeight / onHand : 0;
+  const keepWeight = weightPerSheet > 0 ? Math.round(keepSheets * weightPerSheet * 100) / 100 : totalWeight;
   const remQty = onHand - keepSheets;
-  const remWeight = Math.round((num(obj['Weight']) - keepWeight) * 100) / 100;
-  const remTicket = await findRemainderTicketId(master.rows, ticket, 'MR');
+  const remWeight = Math.round((totalWeight - keepWeight) * 100) / 100;
+  // The consumed portion (this skid — it's what ran / is being produced) takes the -MR# suffix.
+  const usedTicket = await findRemainderTicketId(master.rows, ticket, 'MR');
+  // The leftover that returns to inventory KEEPS the original bare ticket so it stays findable on
+  // the floor (it's the pallet that still carries the paper ticket). Only if some other live row
+  // already holds that bare ticket does the leftover fall back to its own unique -MR# id.
+  const baseFree = !master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === base);
+  const leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': usedTicket }]), ticket, 'MR');
   const remSkid = await nextSkidId(sheets);
   const remObj = {};
   master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
   delete remObj.__row;
   Object.assign(remObj, {
-    'Ticket': remTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
+    'Ticket': leftoverTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
     'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
-    'QTY/LOAD': remQty, 'Weight': remWeight,
-    'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket + ' (' + context + ') on ' + todayYMD(),
+    'QTY/LOAD': remQty, 'Weight': remWeight, 'Counted At': '', 'Counted By': '',
+    'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' (' + context + ') on ' + todayYMD(),
     'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
   });
   await appendRowObj(sheets, MASTER, master.headers, remObj);
   master.rows.push(remObj);
-  await eventTx(sheets, { skidId: remSkid, ticket: remTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
-    note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) returned from ' + ticket + ' (' + context + ')', runningTotal: 0 }, '');
-  await stampCells(sheets, MASTER, obj.__row, master.map, { 'QTY/LOAD': keepSheets, 'Weight': keepWeight });
-  return { remSkid, remTicket, remQty, remWeight };
+  await eventTx(sheets, { skidId: remSkid, ticket: leftoverTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
+    note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) of ' + base + ' returned to inventory (' + context + ')', runningTotal: 0 }, '');
+  // Rename the consumed portion to the -MR# suffix and shrink it to what was kept/used.
+  await stampCells(sheets, MASTER, obj.__row, master.map, { 'Ticket': usedTicket, 'QTY/LOAD': keepSheets, 'Weight': keepWeight });
+  obj['Ticket'] = usedTicket; obj['QTY/LOAD'] = keepSheets; obj['Weight'] = keepWeight; // keep in-memory row consistent
+  return { remSkid, remTicket: leftoverTicket, usedTicket, remQty, remWeight };
 }
 
 // Submit-time partial: record that a still-in-production skid ran fewer sheets than on hand.
