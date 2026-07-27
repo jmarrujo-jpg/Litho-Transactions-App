@@ -38,7 +38,9 @@ const STATUS = { CURRENT: 'Current', PENDING: 'Pending', WIP: 'WIP', IN_PRODUCTI
 // Guided physical count: a two-stage session (Current walk -> WIP walk) tracked server-side so
 // it can span days and resume on any device. Stage is 'Current' | 'WIP' | 'Done'.
 const COUNTS = 'Count Sessions';
-const COUNT_HEADERS = ['Session ID', 'Started At', 'Started By', 'Stage', 'Ended At', 'Ended By', 'Op ID'];
+const COUNT_HEADERS = ['Session ID', 'Started At', 'Started By', 'Stage', 'Ended At', 'Ended By',
+  'Current Found', 'Promoted', 'WIP Found', 'Missing Marked', 'Op ID'];
+const COUNT_TALLY_COLS = ['Current Found', 'Promoted', 'WIP Found', 'Missing Marked'];
 
 // Editable steel-spec columns captured on Add Ticket and Edit ticket details (mirrors the
 // paper ticket; QTY first). B/C and Mill are new columns created on demand.
@@ -65,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-3' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-4' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -157,8 +159,12 @@ async function handle(fn, args, env) {
       return startCount(sheets, args[0], args[1]);
     case 'setCountStage': // (sessionId, stage, operator, opId)
       return setCountStage(sheets, args[0], args[1], args[2], args[3]);
-    case 'endCount': // (sessionId, operator, opId)
-      return endCount(sheets, args[0], args[1], args[2]);
+    case 'endCount': // (sessionId, operator, summary, opId)
+      return endCount(sheets, args[0], args[1], args[2], args[3]);
+    case 'clearAllCounts': // (operator, opId)
+      return clearAllCounts(sheets, args[0], args[1]);
+    case 'getCountHistory': // ()
+      return getCountHistory(sheets);
     case 'promoteUnfoundToWip': // (skidIds[], operator, opId)
       return promoteUnfoundToWip(sheets, args[0], args[1], args[2]);
     case 'markSkidsMissing': // (skidIds[], operator, opId)
@@ -1219,7 +1225,9 @@ function sessionOut(o) {
   return {
     sessionId: o['Session ID'], startedAt: String(o['Started At'] || ''), startedOn: toYMD(o['Started At']),
     startedBy: o['Started By'] || '', stage: o['Stage'] || 'Current',
-    endedOn: o['Ended At'] ? toYMD(o['Ended At']) : '',
+    endedOn: o['Ended At'] ? toYMD(o['Ended At']) : '', endedBy: o['Ended By'] || '',
+    currentFound: num(o['Current Found']), promoted: num(o['Promoted']),
+    wipFound: num(o['WIP Found']), missing: num(o['Missing Marked']),
   };
 }
 function newestOpen(rows) {
@@ -1261,10 +1269,52 @@ async function setCountStage(sheets, sessionId, stage, operator, opId) {
   await stampCells(sheets, COUNTS, o.__row, t.map, fields);
   return sessionOut(Object.assign({}, o, fields));
 }
-async function endCount(sheets, sessionId, operator, opId) {
-  return setCountStage(sheets, sessionId, 'Done', operator, opId);
+// Finish a count: save the tallies as a permanent record on the session row, then clear every
+// Counted At/By on the master so the next count starts with a clean slate. `summary` carries the
+// client's running tallies { currentFound, promoted, wipFound, missing }.
+async function endCount(sheets, sessionId, operator, summary, opId) {
+  summary = summary || {};
+  let t = await readTab(sheets, COUNTS);
+  let re = false;
+  for (const c of COUNT_TALLY_COLS) { if (t.headers.indexOf(c) === -1) { const e = await ensureColumn(sheets, COUNTS, t.headers, c); t.headers = e.headers; re = true; } }
+  if (re) t = await readTab(sheets, COUNTS);
+  const o = t.rows.filter((r) => String(r['Session ID']).trim() === String(sessionId).trim())[0];
+  if (!o) throw new Error('Count session not found: ' + sessionId);
+  const fields = {
+    'Stage': 'Done', 'Ended At': nowStamp(), 'Ended By': operator || '',
+    'Current Found': num(summary.currentFound), 'Promoted': num(summary.promoted),
+    'WIP Found': num(summary.wipFound), 'Missing Marked': num(summary.missing),
+  };
+  await stampCells(sheets, COUNTS, o.__row, t.map, fields);
+  const cleared = await clearAllCounts(sheets, operator, opId);
+  return Object.assign(sessionOut(Object.assign({}, o, fields)), { cleared: cleared.cleared });
 }
 
+// Blank every Counted At / Counted By on the master in ONE read + ONE batched write.
+async function clearAllCounts(sheets, operator, opId) {
+  const master = await readTab(sheets, MASTER);
+  const cAt = master.map['Counted At'], cBy = master.map['Counted By'];
+  if (!cAt && !cBy) return { cleared: 0 };
+  const data = [];
+  let n = 0;
+  master.rows.forEach(function (o) {
+    const has = (cAt && String(o['Counted At'] || '').trim()) || (cBy && String(o['Counted By'] || '').trim());
+    if (!has) return;
+    n++;
+    if (cAt) data.push({ range: "'" + MASTER + "'!" + colLetter(cAt) + o.__row, values: [['']] });
+    if (cBy) data.push({ range: "'" + MASTER + "'!" + colLetter(cBy) + o.__row, values: [['']] });
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return { cleared: n };
+}
+
+// Past counts (newest first) for the Count History view.
+async function getCountHistory(sheets) {
+  let rows;
+  try { rows = (await readObjects(sheets, COUNTS, true)).rows; } catch (e) { return []; }
+  return rows.filter((o) => o['Session ID']).map(sessionOut)
+    .sort((a, b) => (a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0));
+}
 // Bulk status change in ONE read + ONE batched write (kept read-light like the count check-off).
 // `fromStatus` (optional) only flips rows currently in that status; rows already at newStatus are
 // skipped so promote/mark/restore are naturally idempotent under the client retry wrapper.

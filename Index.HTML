@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.11.1</span>
+      <span class="version" id="appVersion">v1.12.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -686,7 +686,7 @@
       case 'count':
         // Within a count, Back steps back through the sub-screens before leaving.
         if (countMode === 'reviewPromote' || countMode === 'reviewMissing') { countMode = 'walk'; renderCount(); return; }
-        if (countMode === 'missing') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
+        if (countMode === 'missing' || countMode === 'history') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
         renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'prodHome': renderLanding(); return;            // production home -> landing
@@ -888,6 +888,7 @@
   function renderCount() {
     state.view = 'count';
     if (countMode === 'missing') return renderCountMissing();
+    if (countMode === 'history') return renderCountHistory();
     if (countMode === 'summary') return renderCountSummary();
     if (countMode === 'reviewPromote' || countMode === 'reviewMissing') return renderCountReview();
     if (!countSession) return renderCountStart();
@@ -907,7 +908,14 @@
       '<div class="card"><div class="row" style="align-items:center;gap:10px">' +
         '<div style="flex:1"><strong>Missing list</strong><div class="sub">' + missing.length + ' pallet(s) not found in past counts</div></div>' +
         '<button class="btn secondary" id="countViewMissing" style="padding:10px 14px">View</button>' +
-      '</div></div>';
+      '</div></div>' +
+      '<div class="card"><div class="row" style="align-items:center;gap:10px">' +
+        '<div style="flex:1"><strong>Past counts</strong><div class="sub">See saved counts and their tallies</div></div>' +
+        '<button class="btn secondary" id="countViewHistory" style="padding:10px 14px">History</button>' +
+      '</div>' +
+        '<button class="btn secondary" id="countClearBtn" style="width:100%;margin-top:10px">Clear all checkmarks now</button>' +
+        '<div class="sub" style="margin-top:6px">Finishing a count clears these automatically — use this only to reset a count you abandoned.</div>' +
+      '</div>';
     document.getElementById('countStartBtn').onclick = function () {
       var op = ((document.getElementById('countOperator') || {}).value || lastOperator || '').trim();
       if (op) lastOperator = op;
@@ -921,6 +929,15 @@
       });
     };
     document.getElementById('countViewMissing').onclick = function () { countMode = 'missing'; renderCount(); };
+    document.getElementById('countViewHistory').onclick = function () { countMode = 'history'; renderCount(); };
+    document.getElementById('countClearBtn').onclick = function () {
+      showConfirm('Clear all checkmarks', 'This blanks every checkmark across all steel so the next count starts fresh. Continue?', function () {
+        runMutation('clearAllCounts', [lastOperator, newOpId()], function (r) {
+          countCache.forEach(function (t) { t.countedOn = ''; });
+          toast('Cleared ' + ((r && r.cleared) || 0) + ' checkmark(s)');
+        }, function (err) { showModal({ title: 'Could not clear', message: err.message, confirmText: 'OK' }); });
+      }, 'Clear', 'danger');
+    };
   }
 
   // ----- The walk (Stage 1 = Current, Stage 2 = WIP) -----
@@ -1185,8 +1202,11 @@
           missing: ids.length,
           startedOn: countSession.startedOn,
         };
-        runMutation('endCount', [countSession.sessionId, op, newOpId()], function () {
+        // Save the tallies on the session record + clear every checkmark for the next count.
+        var serverSumm = { currentFound: summ.foundCurrent, promoted: summ.promoted, wipFound: summ.foundWip, missing: summ.missing };
+        runMutation('endCount', [countSession.sessionId, op, serverSumm, newOpId()], function () {
           countSummary = summ; countMode = 'summary'; countSession = null;
+          countCache.forEach(function (t) { t.countedOn = ''; }); // checkmarks cleared server-side too
           refreshCount(renderCount); // reload cache so Missing statuses are reflected on the Missing list
         }, function (err) { failReview(btn, toMissing, err); });
       };
@@ -1228,13 +1248,47 @@
         line('Moved Current → WIP', s.promoted) +
         line('WIP pallets found', s.foundWip) +
         line('Marked Missing', s.missing) +
+        '<div class="sub" style="margin-top:10px">Saved to history. All checkmarks were cleared — ready for the next count.</div>' +
       '</div>' +
-      '<div class="card" style="display:flex;gap:8px">' +
-        '<button class="btn secondary" id="sumMissing" style="flex:1;padding:12px">View Missing list</button>' +
-        '<button class="btn" id="sumDone" style="flex:1;padding:12px">Done</button>' +
+      '<div class="card" style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button class="btn secondary" id="sumMissing" style="flex:1;padding:12px;min-width:130px">Missing list</button>' +
+        '<button class="btn secondary" id="sumHistory" style="flex:1;padding:12px;min-width:130px">History</button>' +
+        '<button class="btn" id="sumDone" style="flex:1;padding:12px;min-width:130px">Done</button>' +
       '</div>';
     document.getElementById('sumMissing').onclick = function () { countMode = 'missing'; renderCount(); };
+    document.getElementById('sumHistory').onclick = function () { countMode = 'history'; renderCount(); };
     document.getElementById('sumDone').onclick = function () { countSummary = null; openSteelCount(); };
+  }
+
+  // ----- Count history (saved past counts + their tallies) -----
+  function renderCountHistory() {
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="card"><h3 style="margin-top:0">Past counts</h3>' +
+      '<div id="countHistList"><div class="loading">Loading&hellip;</div></div></div>' +
+      '<div class="card"><button class="btn secondary" id="histBack" style="width:100%;padding:12px">← Back</button></div>';
+    document.getElementById('histBack').onclick = function () { countMode = countSummary ? 'summary' : 'walk'; renderCount(); };
+    var tok = viewToken;
+    google.script.run.withSuccessHandler(function (list) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('countHistList');
+      if (!el) return;
+      list = (list || []).filter(function (s) { return s.stage === 'Done'; });
+      if (!list.length) { el.innerHTML = '<div class="empty" style="padding:10px 0">No finished counts yet.</div>'; return; }
+      var html = '';
+      list.forEach(function (s) {
+        html += '<div class="queue-item" style="display:block;padding:10px 0">' +
+          '<div><strong>' + esc(s.endedOn || s.startedOn || s.sessionId) + '</strong>' +
+            (s.endedBy ? ' <span class="sub">by ' + esc(s.endedBy) + '</span>' : '') + '</div>' +
+          '<div class="sub">Found ' + s.currentFound + ' Current &middot; moved ' + s.promoted + ' to WIP &middot; found ' +
+            s.wipFound + ' WIP &middot; ' + s.missing + ' marked Missing</div>' +
+          '<div class="sub">Started ' + esc(s.startedOn || '') + (s.startedBy ? ' by ' + esc(s.startedBy) : '') + ' &middot; ' + esc(s.sessionId) + '</div>' +
+        '</div>';
+      });
+      el.innerHTML = html;
+    }).withFailureHandler(function (err) {
+      var el = document.getElementById('countHistList');
+      if (el) el.innerHTML = '<div class="empty">Could not load history: ' + esc(err.message) + '</div>';
+    }).getCountHistory();
   }
 
   // ----- Missing list (replaces the manual missing-tickets spreadsheet) -----
