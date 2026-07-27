@@ -162,17 +162,33 @@
     .searchwrap input { font-size: 16px; }
   }
 
-  /* Printable count sheet (hidden on screen; shown only when printing / Save as PDF). */
+  /* Printable check sheet (hidden on screen; shown only when printing / Save as PDF).
+     Styled to mirror the Container Supply paper check sheet: company header, right-aligned
+     title, BW color-coded packed columns, a center check column. print-color-adjust:exact
+     keeps the BW colors + navy header from being stripped by the browser's print engine. */
   #printArea { display: none; }
   @media print {
+    @page { size: letter portrait; margin: 0.5in; }
     #app, #toast, #modalRoot, datalist { display: none !important; }
-    #printArea { display: block !important; }
-    #printArea h2 { margin: 0 0 4px; font-size: 18px; }
-    #printArea .pmeta { font-size: 12px; margin-bottom: 10px; }
-    #printArea .pgroup { font-weight: 700; margin: 12px 0 2px; }
-    #printArea table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    #printArea th, #printArea td { border: 1px solid #000; padding: 4px 6px; text-align: left; }
-    #printArea th:first-child, #printArea td:first-child { width: 34px; text-align: center; }
+    #printArea { display: block !important; color: #000; }
+    #printArea .cs-date { font-size: 8pt; color: #646464; }
+    #printArea .cs-head { display: flex; align-items: baseline; justify-content: space-between; margin-top: 3px; }
+    #printArea .cs-co { font-size: 14pt; font-weight: bold; color: #141414; }
+    #printArea .cs-title { font-size: 11pt; color: #323232; }
+    #printArea .cs-rule { border: 0; border-top: 0.75pt solid #505050; margin: 4px 0 8px; }
+    #printArea table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    #printArea th { background: #193264; color: #fff; font-size: 7pt; font-weight: bold; text-align: center;
+      padding: 3px 2px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    #printArea td { font-size: 8pt; border: 0.5pt solid #cfcfcf; padding: 2px 3px; text-align: center;
+      overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    #printArea td.tk, #printArea th.tk { text-align: left; }
+    #printArea td.bw { font-weight: bold; }
+    #printArea .cs-sep { border-left: 1.5pt solid #9fb0cc; }
+    #printArea .ckbox { display: inline-block; width: 12px; height: 12px; border: 1px solid #777;
+      line-height: 11px; font-size: 9pt; color: #0a7a26; font-weight: bold; }
+    #printArea h2 { margin: 0 0 4px; font-size: 16pt; }
+    #printArea .pmeta { font-size: 9pt; color: #555; margin-bottom: 8px; }
   }
 </style>
 
@@ -185,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.11.0</span>
+      <span class="version" id="appVersion">v1.11.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1272,41 +1288,98 @@
     }, 'Restore', 'success');
   }
 
-  // ----- Print check sheets (like the paper WIP list) -----
+  // ----- Print check sheets (mirrors the Container Supply paper WIP/Current check sheet) -----
+  // Each Basis Weight gets a stable color from this palette (sorted smallest->largest), so the
+  // sheet reads the same way the paper one does.
+  var BW_PALETTE = [[198,224,180],[155,194,230],[255,217,102],[255,200,80],[146,208,80],[0,176,240],
+                    [112,173,71],[255,160,80],[100,160,220],[218,130,130],[180,140,210],[80,200,160]];
+  function bwPaletteMap(records) {
+    var bws = [];
+    records.forEach(function (r) { var v = parseFloat(r.bw); if (!isNaN(v) && bws.indexOf(v) === -1) bws.push(v); });
+    bws.sort(function (a, b) { return a - b; });
+    var map = {};
+    bws.forEach(function (bw, i) { map[bw] = BW_PALETTE[i % BW_PALETTE.length]; });
+    return map;
+  }
+  function csDateStr() {
+    return new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  }
+  function csHeader(title) {
+    return '<div class="cs-date">' + esc(csDateStr()) + '</div>' +
+      '<div class="cs-head"><div class="cs-co">Container Supply Company, Inc.</div>' +
+      '<div class="cs-title">' + esc(title) + '</div></div><hr class="cs-rule">';
+  }
+  // Footer (title left, page number right) via CSS paged-media margin boxes; harmless where unsupported.
+  function csFooterStyle(title) {
+    return '<style>@page { @bottom-left { content: "' + title + '"; font-size: 7pt; color: #646464; }' +
+      ' @bottom-right { content: "Page " counter(page); font-size: 7pt; color: #646464; } }</style>';
+  }
+
   function printCount() {
-    var groups = countSortedGroups();
     var stage = countWalkStatus();
-    var sortLabel = countSort === 'bw' ? 'BW then Ticket' : 'Location then Ticket';
-    var html = '<h2>Steel Count &mdash; ' + esc(stage) + '</h2>' +
-      '<div class="pmeta">Sorted by ' + esc(sortLabel) + ' &middot; count started ' + esc(countSession ? countSession.startedOn : todayStr()) + '</div>';
-    if (!groups.length) {
-      html += '<div>No ' + esc(stage) + ' steel.</div>';
-    } else {
-      groups.forEach(function (g) {
-        html += '<div class="pgroup">' + esc(g.key) + '</div>' +
-          '<table><thead><tr><th>&#10003;</th><th>BW</th><th>Ticket</th><th>Location</th><th>Sheets</th></tr></thead><tbody>';
-        g.items.forEach(function (t) {
-          var mark = countIsFound(t) ? '&#10003;' : '';
-          html += '<tr><td>' + mark + '</td><td>' + esc(t.bw) + '</td><td>' + esc(t.ticket || '(no ticket)') +
-            '</td><td>' + esc(t.row || '') + '</td><td>' + esc(t.qty || 0) + '</td></tr>';
-        });
-        html += '</tbody></table>';
-      });
+    var title = (stage === 'WIP' ? 'WIP' : 'Current') + ' Steel Check Sheet';
+    // Whole list for this stage (ignore the on-screen search), in the current sort order.
+    var records = countCache.filter(function (t) { return (t.status || 'Current') === stage; });
+    records.sort(function (a, b) {
+      if (countSort === 'bw') { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); }
+      var d = cmpNumeric(a.row, b.row); return d || cmpTicket(a.ticket, b.ticket);
+    });
+    var cmap = bwPaletteMap(records);
+    var SETS = 3, R = Math.ceil(records.length / SETS) || 1;    // fill column-major into 3 sets
+
+    var head = '<tr>';
+    for (var s = 0; s < SETS; s++) {
+      var sep = s ? ' cs-sep' : '';
+      head += '<th class="bw' + sep + '">BW</th><th class="tk">Ticket</th><th>&#10003;</th><th>Loc</th>';
     }
-    document.getElementById('printArea').innerHTML = html;
+    head += '</tr>';
+
+    var rowsHtml = '';
+    for (var i = 0; i < R; i++) {
+      rowsHtml += '<tr>';
+      for (var col = 0; col < SETS; col++) {
+        var rec = records[i + col * R];
+        var sep2 = col ? ' cs-sep' : '';
+        if (rec) {
+          var c2 = cmap[parseFloat(rec.bw)];
+          var bg = c2 ? 'background:rgb(' + c2[0] + ',' + c2[1] + ',' + c2[2] + ')' : '';
+          var chk = countIsFound(rec) ? '&#10003;' : '';
+          rowsHtml += '<td class="bw' + sep2 + '" style="' + bg + '">' + esc(rec.bw || '') + '</td>' +
+            '<td class="tk">' + esc(rec.ticket || '') + '</td>' +
+            '<td><span class="ckbox">' + chk + '</span></td>' +
+            '<td>' + esc(rec.row || '') + '</td>';
+        } else {
+          rowsHtml += '<td class="bw' + sep2 + '"></td><td></td><td></td><td></td>';
+        }
+      }
+      rowsHtml += '</tr>';
+    }
+
+    var table = records.length
+      ? '<table><thead>' + head + '</thead><tbody>' + rowsHtml + '</tbody></table>'
+      : '<div>No ' + esc(stage) + ' steel to print.</div>';
+    document.getElementById('printArea').innerHTML = csFooterStyle(title) + csHeader(title) + table;
     window.print();
   }
+
   function printMissing() {
+    var title = 'Missing Steel List';
     var missing = countCache.filter(function (t) { return (t.status || '') === 'Missing'; })
       .sort(function (a, b) { var c = cmpNumeric(a.bw, b.bw); return c || cmpTicket(a.ticket, b.ticket); });
-    var html = '<h2>Missing Steel</h2><div class="pmeta">' + esc(todayStr()) + ' &middot; ' + missing.length + ' pallet(s)</div>' +
-      '<table><thead><tr><th>BW</th><th>Ticket</th><th>Location</th><th>Sheets</th><th>Missing since</th></tr></thead><tbody>';
+    var cmap = bwPaletteMap(missing);
+    var head = '<tr><th class="bw">BW</th><th class="tk">Ticket</th><th>Loc</th><th>Sheets</th><th>Missing Since</th></tr>';
+    var rows = '';
     missing.forEach(function (t) {
-      html += '<tr><td>' + esc(t.bw) + '</td><td>' + esc(t.ticket || '(no ticket)') + '</td><td>' + esc(t.row || '') +
-        '</td><td>' + esc(t.qty || 0) + '</td><td>' + esc(t.missingOn || '') + '</td></tr>';
+      var c = cmap[parseFloat(t.bw)];
+      var bg = c ? 'background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')' : '';
+      rows += '<tr><td class="bw" style="' + bg + '">' + esc(t.bw || '') + '</td>' +
+        '<td class="tk">' + esc(t.ticket || '') + '</td><td>' + esc(t.row || '') + '</td>' +
+        '<td>' + esc(t.qty || 0) + '</td><td>' + esc(t.missingOn || '') + '</td></tr>';
     });
-    html += '</tbody></table>';
-    document.getElementById('printArea').innerHTML = html;
+    var table = missing.length
+      ? '<table><thead>' + head + '</thead><tbody>' + rows + '</tbody></table>'
+      : '<div>No missing pallets.</div>';
+    document.getElementById('printArea').innerHTML = csFooterStyle(title) + csHeader(title) + table;
     window.print();
   }
 
