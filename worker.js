@@ -67,7 +67,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-8' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-9' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -99,8 +99,8 @@ async function handle(fn, args, env) {
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
     // ---- writes (Stage 2) ----
-    case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId)
-      return applyCoating(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]);
+    case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, coatedTicket)
+      return applyCoating(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], undefined, undefined, args[11]);
     case 'createManualTicket': // (ticket, fields, operator, opId)
       return createManualTicket(sheets, args[0], args[1], args[2], args[3]);
     case 'updateWipLithoCost': // (skidId, newCost, operator, notes, opId)
@@ -113,8 +113,8 @@ async function handle(fn, args, env) {
       return removeTicketCoating(sheets, args[0], args[1], args[2], args[3]);
     case 'createJob': // (description, operator, coatings, notes, opId)
       return createJob(sheets, args[0], args[1], args[2], args[3], args[4]);
-    case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId)
-      return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+    case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket)
+      return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
@@ -581,7 +581,7 @@ async function normalizeMasterRows(sheets) {
 async function ticketCardResult(sheets, skidId) { return getTicketCard(sheets, skidId); }
 
 // ---- applyCoating: the core write (Current -> WIP/Pending, or add a coat to WIP/Pending) ----
-async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId) {
+async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId, coatedTicket) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
   const match = await findRate(sheets, group, sub, itemName);
@@ -640,14 +640,37 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   isPartialSkid = usedFewer && !!isPartialSkid;
   const estimatedWeightUsed = weightPerSheet > 0 ? Math.round(sheets_ * weightPerSheet * 100) / 100 : originalWeight;
 
+  // Partial-skid split (litho): the COATED portion becomes a new "-LR#" ticket and moves to WIP;
+  // the leftover KEEPS the original ticket and stays in Current. The operator can name the -LR#
+  // (coatedTicket) in the prompt; otherwise we auto-assign the next free suffix. This mirrors the
+  // physical reality — the pallet still on the floor carries the original paper ticket, and each
+  // coated batch is a new derived piece. baseTicketOf ties every piece back to the original.
+  const base = baseTicketOf(ticket);
+  let coatedTicketFinal = ticket;   // full skid / scrap: ticket is unchanged
+  let leftoverTicket = null;
+  if (usedFewer && isPartialSkid) {
+    coatedTicketFinal = String(coatedTicket || '').trim() || await findRemainderTicketId(master.rows, ticket, 'LR');
+    const pref = base + '-LR';
+    const okName = coatedTicketFinal.indexOf(pref) === 0 && /^\d+$/.test(coatedTicketFinal.slice(pref.length));
+    if (!okName) throw new Error('New ticket must look like ' + base + '-LR1 (the original number plus -LR and a number).');
+    if (master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === coatedTicketFinal)) {
+      throw new Error('Ticket ' + coatedTicketFinal + ' is already in use — pick a different number.');
+    }
+    // Leftover keeps the bare original ticket, unless some other live row already holds it.
+    const baseFree = !master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === base);
+    leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': coatedTicketFinal }]), ticket, 'LR');
+  }
+
   const stamp = { 'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost,
     'First Coated At': nowStamp(), 'First Coated By': operatorName || '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
   if (usedFewer) { stamp['QTY/LOAD'] = sheets_; stamp['Weight'] = estimatedWeightUsed; }
+  if (usedFewer && isPartialSkid) { stamp['Ticket'] = coatedTicketFinal; } // this record becomes the coated -LR# piece
   await stampCells(sheets, MASTER, row, map, stamp);
 
   let scrapNote = '';
   if (usedFewer && isPartialSkid) {
-    result.remainderTicket = await findRemainderTicketId(master.rows, ticket, 'LR');
+    result.remainderTicket = leftoverTicket;   // the ORIGINAL ticket, returned to Current
+    result.coatedTicket = coatedTicketFinal;
     result.remainderSheets = originalQty - sheets_;
     result.remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
     const remainderSkid = await nextSkidId(sheets);
@@ -655,13 +678,13 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
     master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
     delete remObj.__row;
     Object.assign(remObj, {
-      'Ticket': result.remainderTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT, 'Job ID': '', 'Split Of': skidId,
+      'Ticket': leftoverTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT, 'Job ID': '', 'Split Of': skidId,
       'QTY/LOAD': result.remainderSheets, 'Weight': result.remainderWeight, 'Litho': '',
-      'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Split remainder from ' + ticket + ' (partial skid, ' + sheets_ + ' of ' + originalQty + ' sheets run) on ' + nowStamp().slice(0, 10),
+      'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' after coating ' + sheets_ + ' of ' + originalQty + ' sheets (coated batch is ' + coatedTicketFinal + ') on ' + nowStamp().slice(0, 10),
       'First Coated At': '', 'First Coated By': '', 'Litho Notes': '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
     });
     await appendRowObj(sheets, MASTER, master.headers, remObj);
-    await eventTx(sheets, { skidId: remainderSkid, ticket: result.remainderTicket, itemText: 'SPLIT REMAINDER CREATED', operator: operatorName, note: result.remainderSheets + ' sheets (~' + result.remainderWeight + ' lbs, estimated) returned to Current from ' + ticket, runningTotal: 0 }, '');
+    await eventTx(sheets, { skidId: remainderSkid, ticket: leftoverTicket, itemText: 'SPLIT REMAINDER CREATED', operator: operatorName, note: result.remainderSheets + ' sheets (~' + result.remainderWeight + ' lbs, estimated) of ' + base + ' left in Current; coated ' + sheets_ + ' became ' + coatedTicketFinal, runningTotal: 0 }, '');
   } else if (usedFewer) {
     result.scrapSheets = originalQty - sheets_;
     result.scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
@@ -670,8 +693,9 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   }
 
   await appendLithoNote([lithoNoteClean, scrapNote].filter(Boolean).join(' | '));
-  await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName }, opId);
+  await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName }, opId);
 
+  result.ticket = coatedTicketFinal;   // the coated piece now carries the -LR# ticket (obj kept its SKD)
   result.sheetsRun = sheets_;
   result.estimatedWeightUsed = estimatedWeightUsed;
   result.isPartial = isPartialSkid;
@@ -856,7 +880,7 @@ async function createJob(sheets, description, operator, coatings, notes, opId) {
   return { jobId, description: description || '', coatings, status: 'Pending' };
 }
 
-async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId) {
+async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket) {
   await normalizeMasterRows(sheets);
   const jobs = await readTab(sheets, JOBS);
   const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
@@ -875,7 +899,7 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
     const c = recipe[i];
     const r = await applyCoating(sheets, skidId, c.group, c.sub, c.item, operator, '',
       i === 0 ? sheetsRun : '', i === 0 ? isPartialSkid : false, i === 0 ? lithoNote : '',
-      desc, i === 0 ? opId : '', STATUS.PENDING, jobId);
+      desc, i === 0 ? opId : '', STATUS.PENDING, jobId, i === 0 ? coatedTicket : '');
     if (i === 0) { if (r && r.duplicate) return { duplicate: true, skidId }; result = r; }
     else if (r && r.litho !== undefined) result.litho = r.litho;
   }
@@ -1164,19 +1188,18 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
   const keepWeight = weightPerSheet > 0 ? Math.round(keepSheets * weightPerSheet * 100) / 100 : totalWeight;
   const remQty = onHand - keepSheets;
   const remWeight = Math.round((totalWeight - keepWeight) * 100) / 100;
-  // The consumed portion (this skid — it's what ran / is being produced) takes the -MR# suffix.
-  const usedTicket = await findRemainderTicketId(master.rows, ticket, 'MR');
-  // The leftover that returns to inventory KEEPS the original bare ticket so it stays findable on
-  // the floor (it's the pallet that still carries the paper ticket). Only if some other live row
-  // already holds that bare ticket does the leftover fall back to its own unique -MR# id.
-  const baseFree = !master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === base);
-  const leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': usedTicket }]), ticket, 'MR');
+  // No suffix on the consumed portion. The SKD number is the real primary key, and Run ID +
+  // Finished On already record exactly which skid ran which day — so the piece that ran keeps its
+  // original ticket, and the leftover returning to inventory (a distinct new SKD) also carries the
+  // original ticket. Both trace back through the shared base ticket and the Split Of link. This is
+  // intentionally different from litho's -LR#: a ran metals skid is terminal (it goes to Used and
+  // drops out of every active picker), so there's no active duplicate to disambiguate.
   const remSkid = await nextSkidId(sheets);
   const remObj = {};
   master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
   delete remObj.__row;
   Object.assign(remObj, {
-    'Ticket': leftoverTicket, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
+    'Ticket': base, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
     'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
     'QTY/LOAD': remQty, 'Weight': remWeight, 'Counted At': '', 'Counted By': '',
     'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' (' + context + ') on ' + todayYMD(),
@@ -1184,12 +1207,12 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
   });
   await appendRowObj(sheets, MASTER, master.headers, remObj);
   master.rows.push(remObj);
-  await eventTx(sheets, { skidId: remSkid, ticket: leftoverTicket, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
+  await eventTx(sheets, { skidId: remSkid, ticket: base, itemText: 'PRODUCTION SPLIT REMAINDER', operator,
     note: remQty + ' sheets (~' + remWeight + ' lbs, estimated) of ' + base + ' returned to inventory (' + context + ')', runningTotal: 0 }, '');
-  // Rename the consumed portion to the -MR# suffix and shrink it to what was kept/used.
-  await stampCells(sheets, MASTER, obj.__row, master.map, { 'Ticket': usedTicket, 'QTY/LOAD': keepSheets, 'Weight': keepWeight });
-  obj['Ticket'] = usedTicket; obj['QTY/LOAD'] = keepSheets; obj['Weight'] = keepWeight; // keep in-memory row consistent
-  return { remSkid, remTicket: leftoverTicket, usedTicket, remQty, remWeight };
+  // The consumed skid keeps its ticket; just shrink it to what actually ran.
+  await stampCells(sheets, MASTER, obj.__row, master.map, { 'QTY/LOAD': keepSheets, 'Weight': keepWeight });
+  obj['QTY/LOAD'] = keepSheets; obj['Weight'] = keepWeight; // keep in-memory row consistent
+  return { remSkid, remTicket: base, usedTicket: obj['Ticket'], remQty, remWeight };
 }
 
 // Submit-time partial: record that a still-in-production skid ran fewer sheets than on hand.

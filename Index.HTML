@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.4</span>
+      <span class="version" id="appVersion">v1.12.5</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -525,6 +525,43 @@
   function showConfirm(title, message, onConfirm, confirmText, variant) {
     showModal({ title: title, message: message, onConfirm: onConfirm,
       confirmText: confirmText || 'Confirm', cancelText: 'Cancel', variant: variant || 'success' });
+  }
+
+  // Confirm dialog with a single editable text field (e.g. name the coated -LR# ticket before a
+  // partial split). onConfirm(value) fires with the trimmed input; Cancel does nothing.
+  function showPromptModal(opts) {
+    var root = document.getElementById('modalRoot');
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = '<div class="modal">' +
+      '<h3>' + esc(opts.title || '') + '</h3>' +
+      '<p>' + esc(opts.message || '') + '</p>' +
+      '<div class="field" style="text-align:left;margin-bottom:10px"><label>' + esc(opts.inputLabel || '') + '</label>' +
+        '<input id="modalPromptInput" value="' + esc(opts.inputValue || '') + '" placeholder="' + esc(opts.placeholder || '') + '"></div>' +
+      '<div class="modal-actions">' +
+        '<button class="btn secondary" id="modalCancel">Cancel</button>' +
+        '<button class="btn ' + (opts.variant || 'success') + '" id="modalOk">' + esc(opts.confirmText || 'Confirm') + '</button>' +
+      '</div></div>';
+    root.appendChild(overlay);
+    function close() { if (overlay.parentNode) root.removeChild(overlay); }
+    var input = overlay.querySelector('#modalPromptInput');
+    overlay.querySelector('#modalOk').onclick = function () { var v = (input.value || '').trim(); close(); if (opts.onConfirm) opts.onConfirm(v); };
+    overlay.querySelector('#modalCancel').onclick = function () { close(); if (opts.onCancel) opts.onCancel(); };
+    overlay.onclick = function (e) { if (e.target === overlay) close(); };
+    input.onkeydown = function (e) { if (e.key === 'Enter') overlay.querySelector('#modalOk').click(); };
+    setTimeout(function () { if (input) { input.focus(); input.select(); } }, 30);
+  }
+
+  // Strip remainder suffixes back to the original ticket (mirrors the worker's baseTicketOf).
+  function clientBaseTicket(t) { var s = String(t || ''), p; do { p = s; s = s.replace(/-(R\d*|LR\d+|MR\d+)$/, ''); } while (s !== p); return s; }
+
+  // Suggest the next free "-LR#" ticket for a coated partial skid, based on what's already cached.
+  function suggestLrTicket(ticket) {
+    var base = clientBaseTicket(ticket);
+    var re = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-LR(\\d+)$');
+    var max = 0;
+    allCache.forEach(function (t) { var m = re.exec(String(t.ticket)); if (m) max = Math.max(max, Number(m[1])); });
+    return base + '-LR' + (max + 1);
   }
 
   // ---- retry-safe server mutations (for weak Wi-Fi) ----
@@ -2144,8 +2181,8 @@
         preview.textContent = 'Full skid: ' + sheets + ' sheets (~' + estWeight + ' lbs, estimated).';
       } else if (partialToggle.checked) {
         var remWeight = Math.round((origWeight - estWeight) * 100) / 100;
-        preview.textContent = sheets + ' sheets run (~' + estWeight + ' lbs). Remainder ' + rem +
-          ' sheets (~' + remWeight + ' lbs) returns to Current Steel as a new ticket.';
+        preview.textContent = sheets + ' sheets coated (~' + estWeight + ' lbs) become a new -LR# ticket in WIP. The other ' +
+          rem + ' sheets (~' + remWeight + ' lbs) stay as ' + clientBaseTicket(card.ticket) + ' in Current.';
       } else {
         preview.textContent = sheets + ' sheets run. ' + rem + ' leftover sheets will be scrapped (not returned).';
       }
@@ -2167,20 +2204,40 @@
       if (!operator) { toast('Enter an operator name'); return; }
       var sErr = sheetsError(sheetsRun, origQty);
       if (sErr) { toast(sErr); return; }
-      logCoatingBtn.disabled = true;
-      runMutation('applyCoating',
-        [state.skid, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '', newOpId()],
-        function (result) {
-          if (result && result.duplicate) { toast('Already recorded'); renderCard(); return; }
-          var msg = 'Ticket ' + result.ticket + ' moved to WIP. Litho cost so far: ' + money(result.litho) + '.';
-          if (result.remainderTicket) msg += ' Remainder returned to Current Steel as ' + result.remainderTicket + '.';
-          else if (result.scrapSheets) msg += ' ' + result.scrapSheets + ' sheets scrapped.';
-          showInfo('Sent to WIP', msg, function () { renderCard(); });
-        },
-        function (err) {
-          showModal({ title: 'Could not log coating', message: err.message, confirmText: 'OK' });
-          logCoatingBtn.disabled = false;
+
+      function submit(coatedTicket) {
+        logCoatingBtn.disabled = true;
+        runMutation('applyCoating',
+          [state.skid, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, '', newOpId(), coatedTicket || ''],
+          function (result) {
+            if (result && result.duplicate) { toast('Already recorded'); renderCard(); return; }
+            var msg = 'Ticket ' + result.ticket + ' moved to WIP. Litho cost so far: ' + money(result.litho) + '.';
+            if (result.remainderTicket) msg += ' The remaining ' + result.remainderSheets + ' sheets stay in Current as ' + result.remainderTicket + '.';
+            else if (result.scrapSheets) msg += ' ' + result.scrapSheets + ' sheets scrapped.';
+            showInfo('Sent to WIP', msg, function () { renderCard(); });
+          },
+          function (err) {
+            showModal({ title: 'Could not log coating', message: err.message, confirmText: 'OK' });
+            logCoatingBtn.disabled = false;
+          });
+      }
+
+      // Partial skid: let the operator name the coated batch's new -LR# ticket before it writes.
+      if (isPartialSkid) {
+        var base = clientBaseTicket(card.ticket);
+        var ran = Number(sheetsRun) || 0;
+        showPromptModal({
+          title: 'Name the coated skid',
+          message: 'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch gets this ticket and moves to WIP; the remaining ' + (origQty - ran) + ' sheets stay as ' + base + ' in Current.',
+          inputLabel: 'New ticket # for the coated batch',
+          inputValue: suggestLrTicket(card.ticket),
+          placeholder: base + '-LR1',
+          confirmText: 'Coat & send to WIP',
+          onConfirm: function (v) { submit(v); }
         });
+      } else {
+        submit('');
+      }
     };
   }
 
@@ -2839,8 +2896,8 @@
         preview.textContent = 'Full skid: ' + sheets + ' sheets (~' + estWeight + ' lbs, estimated).';
       } else if (partialToggle.checked) {
         var remWeight = Math.round((origWeight - estWeight) * 100) / 100;
-        preview.textContent = 'Partial skid: ' + sheets + ' sheets run (~' + estWeight + ' lbs, estimated). ' +
-          remSheets + ' sheets (~' + remWeight + ' lbs) returned to Current Steel as a new ticket.';
+        preview.textContent = 'Partial skid: ' + sheets + ' sheets coated (~' + estWeight + ' lbs) become a new -LR# ticket. The other ' +
+          remSheets + ' sheets (~' + remWeight + ' lbs) stay as ' + clientBaseTicket(entry ? entry.ticket : '') + ' in Current.';
       } else {
         preview.textContent = sheets + ' sheets run. ' + remSheets +
           ' leftover sheets will be scrapped (not returned to Current Steel).';
@@ -2858,29 +2915,48 @@
       var sErr = sheetsError(sheetsRun, origQty);
       if (sErr) { toast(sErr); return; }
       var btn = document.getElementById('addTicketToJobBtn');
-      btn.disabled = true; btn.textContent = 'Adding&hellip;';
-      runMutation('jobAddTicket',
-        [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, currentJob.operator, newOpId()],
-        function (result) {
-          if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
-          jobAddedTickets.push(result);
-          var msg = 'Added ' + result.ticket;
-          if (result.isPartial && result.remainderTicket) msg += ' — remainder returned as ' + result.remainderTicket;
-          else if (result.scrapSheets) msg += ' — ' + result.scrapSheets + ' sheets scrapped';
-          else msg += ' to job';
-          toast(msg);
-          card.style.display = 'none';
-          document.getElementById('jobTicketSearch').value = '';
-          dropFromQueueCache(skidId); // no longer Current — remove from picker right away
-          renderJobQueuePicker('');
-          renderJobAddedList();
-          // Refresh caches in the background so qty/status reflect the change next pick
-          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
-        },
-        function (err) {
-          toast('Error: ' + err.message);
-          btn.disabled = false; btn.textContent = 'Add to Job';
+
+      function submit(coatedTicket) {
+        btn.disabled = true; btn.textContent = 'Adding&hellip;';
+        runMutation('jobAddTicket',
+          [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, currentJob.operator, newOpId(), coatedTicket || ''],
+          function (result) {
+            if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
+            jobAddedTickets.push(result);
+            var msg = 'Added ' + result.ticket;
+            if (result.isPartial && result.remainderTicket) msg += ' — ' + result.remainderSheets + ' sheets stay as ' + result.remainderTicket;
+            else if (result.scrapSheets) msg += ' — ' + result.scrapSheets + ' sheets scrapped';
+            else msg += ' to job';
+            toast(msg);
+            card.style.display = 'none';
+            document.getElementById('jobTicketSearch').value = '';
+            dropFromQueueCache(skidId); // no longer Current — remove from picker right away
+            renderJobQueuePicker('');
+            renderJobAddedList();
+            // Refresh caches in the background so qty/status reflect the change next pick
+            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+          },
+          function (err) {
+            toast('Error: ' + err.message);
+            btn.disabled = false; btn.textContent = 'Add to Job';
+          });
+      }
+
+      if (isPartialSkid) {
+        var baseTk = clientBaseTicket(entry ? entry.ticket : '');
+        var ran = Number(sheetsRun) || 0;
+        showPromptModal({
+          title: 'Name the coated skid',
+          message: 'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch gets this ticket and joins the job; the remaining ' + (origQty - ran) + ' sheets stay as ' + baseTk + ' in Current.',
+          inputLabel: 'New ticket # for the coated batch',
+          inputValue: suggestLrTicket(entry ? entry.ticket : ''),
+          placeholder: baseTk + '-LR1',
+          confirmText: 'Add to Job',
+          onConfirm: function (v) { submit(v); }
         });
+      } else {
+        submit('');
+      }
     };
   }
 
