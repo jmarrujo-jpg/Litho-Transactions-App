@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-13' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-14' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1399,11 +1399,20 @@ async function recountSlitter(sheets, sessionId) {
 
 // Cut/child pallets get a short, app-generated Load # (starts at 1001) that an operator can write
 // on the physical pallet; it becomes the pallet's primary ticket number. Sequenced off the max
-// existing Load # so it never collides, independent of the SKD- / SLT- id spaces.
+// existing load number so it never collides, independent of the SKD- / SLT- id spaces.
+// Source of truth is the cut skid's Ticket (column A — always read cleanly and it IS the load
+// number); the 'Load #' column is honored too but only as a secondary signal, since it can sit far
+// to the right where a ragged header read might miss it.
 function nextLoadNumber(rows) {
   let max = 1000;
   for (const o of rows) {
-    const v = parseInt(String((o && o['Load #']) || '').replace(/[^0-9]/g, ''), 10);
+    if (!o) continue;
+    // A cut pallet's numeric Ticket is its load number (old SLT-xxxxxx-P# ids are ignored here).
+    if (o['Cut Type'] && /^\d+$/.test(String(o['Ticket'] || '').trim())) {
+      const t = parseInt(String(o['Ticket']).trim(), 10);
+      if (!isNaN(t) && t > max) max = t;
+    }
+    const v = parseInt(String(o['Load #'] || '').replace(/[^0-9]/g, ''), 10);
     if (!isNaN(v) && v > max) max = v;
   }
   return max + 1;
@@ -1441,7 +1450,10 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   if (src) {
     ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'Coil/Sheet'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
   }
-  await appendRowObj(sheets, MASTER, ens.headers, row);
+  // Append against the freshly re-read sheet header (not the concatenated ens.headers): if the live
+  // header row is wider/narrower than the pre-ensure copy, ens.headers can be misaligned and the
+  // 'Load #' cell would land in the wrong column, which is what made every pallet read back as 1001.
+  await appendRowObj(sheets, MASTER, master.headers, row);
   return { skidId: skidId, loadNo: loadNo };
 }
 
