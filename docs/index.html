@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.7</span>
+      <span class="version" id="appVersion">v1.12.8</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1688,6 +1688,7 @@
     if (status === 'WIP') return 'wip';
     if (status === 'In Production') return 'production';
     if (status === 'Used') return 'used';
+    if (status === 'Cut') return 'wip';
     return 'notstarted';
   }
 
@@ -1767,8 +1768,9 @@
     var rows = allCache.filter(function (t) {
       // The Litho list is the coating lifecycle only — once a skid is loaded into production
       // (In Production) or consumed (Used) it drops off this list; it lives in Production now.
-      // Missing skids (couldn't be found in a count) drop off too — they live in the count's Missing list.
-      if (t.status === 'In Production' || t.status === 'Used' || t.status === 'Missing') return false;
+      // Missing skids drop off too (they live in the count's Missing list); Cut pallets are metals
+      // stock (they belong to the Slitter/Metals side), so they never appear in the Litho list.
+      if (t.status === 'In Production' || t.status === 'Used' || t.status === 'Missing' || t.status === 'Cut') return false;
       if (term) {
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;
@@ -2990,7 +2992,9 @@
   var prodReviewDate = '';   // yyyy-MM-dd; '' means today
   var runSwapSkid = null;    // when set, the next picked skid replaces this one on the run
   var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter'
-  var currentSlitter = null; // { sessionId, slitter, operator } — the slitter session being logged
+  var currentSlitter = null; // { sessionId, slitter, kind, operator } — the cutting session being logged
+  var slitKind = 'Slitter';  // Slitter Department sub-tab: 'Slitter' | 'Scroll'
+  var reviewRunMachineType = null; // machine type of the run open in Review (scopes its picker)
   var slitterComp = [];      // in-progress composition rows [{skidId,ticket,mill,qty}] for the next pallet
   var slitPicked = null;     // a source skid chosen from the picker to auto-fill the next comp row
 
@@ -3113,10 +3117,16 @@
   }
 
   // ----- Add skids to the run (skids of any status except Used / already In Production) -----
-  // Skids you can load into production: Current or WIP only. Pending skids are mid-litho-job
-  // (not ready), In Production skids are already on a run, and Used skids are consumed.
-  function prodPickList() {
-    return allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
+  // Loadable: raw steel (Current/WIP) plus cut pallets for THIS machine — slit pallets on a Line,
+  // scroll pallets on a Press. machineType ('Line'|'Press') scopes which cut pallets show; when
+  // omitted (unknown), all cut pallets are allowed.
+  function prodPickList(machineType) {
+    var cutFor = machineType === 'Press' ? 'Scroll' : (machineType === 'Line' ? 'Slit' : null);
+    return allCache.filter(function (t) {
+      if (t.status === 'Current' || t.status === 'WIP') return true;
+      if (t.status === 'Cut') return cutFor ? (t.cutType === cutFor) : true;
+      return false;
+    });
   }
 
   function renderRunAddSkids() {
@@ -3237,7 +3247,7 @@
     var c = document.getElementById('runSkidPicker');
     if (!c) return;
     term = (term || '').trim().toLowerCase();
-    var list = prodPickList();
+    var list = prodPickList(currentRun ? machineParts(currentRun.machine).type : null);
     var rows = term
       ? list.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; })
       : list.slice(0, 15);
@@ -3357,6 +3367,7 @@
   function renderRunContent(view, run) {
     var finished = run.status === 'Finished';
     var mp = machineParts(run.machine);
+    reviewRunMachineType = mp.type; // scope the review add/swap picker to this run's machine (Line/Press)
     var html = '';
 
     html += '<div class="card">' +
@@ -3549,7 +3560,7 @@
     var c = document.getElementById('runReviewPicker');
     if (!c) return;
     term = (term || '').trim().toLowerCase();
-    var list = prodPickList();
+    var list = prodPickList(reviewRunMachineType);
     var rows = term
       ? list.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; })
       : list.slice(0, 15);
@@ -3576,43 +3587,61 @@
     });
   }
 
-  // ---------------- Slitter Department (log-only mixed-mill tracking) ----------------
-  // Renders inside the Metals tab body. A session groups output pallets cut on one Slitter #;
-  // each pallet records an operator-entered count and a composition of source mills. No skid
-  // inventory is touched — this is a traceability log for mixed-mill pallets.
+  // ---------------- Slitter Department (Slitters + Scrolls; mixed-mill cutting log) --------
+  // Two sub-tabs: Slitters (typed #) and Scrolls (1-SS/2-SS/3-SS dropdown) — operators move
+  // between those machines in the same area. Each output pallet becomes a runnable "Cut" skid
+  // carrying its mill composition, so slit pallets run on the Metal Lines and scroll pallets on
+  // the Press. Source skids are not drawn down yet (value tracking deferred).
   function renderSlitterHome() {
     state.view = 'slitterHome';
     var view = document.getElementById('view');
     if (!view) return;
+    nextViewToken();
+    var chips = [['Slitter', 'Slitters'], ['Scroll', 'Scrolls']].map(function (k) {
+      return '<button data-slkind="' + k[0] + '"' + (slitKind === k[0] ? ' class="active"' : '') + '>' + esc(k[1]) + '</button>';
+    }).join('');
+    view.innerHTML = '<div class="tabbar" id="slitKindTabs">' + chips + '</div><div id="slitBody"></div>';
+    Array.prototype.forEach.call(document.querySelectorAll('#slitKindTabs button'), function (btn) {
+      btn.onclick = function () { slitKind = btn.getAttribute('data-slkind'); renderSlitterHome(); };
+    });
+    renderSlitterKindBody();
+  }
+
+  function renderSlitterKindBody() {
+    var body = document.getElementById('slitBody');
+    if (!body) return;
     var tok = nextViewToken();
-    view.innerHTML =
+    var isScroll = slitKind === 'Scroll';
+    var machineField = isScroll
+      ? selectField('slitMachineSel', 'Scroll machine', ['1-SS', '2-SS', '3-SS'], null)
+      : '<div class="field"><label>Slitter #</label><input type="number" id="slitNum" min="1" placeholder="e.g. 2"></div>';
+    var feeds = isScroll ? 'Press' : 'Metal Lines';
+    body.innerHTML =
       '<div class="card">' +
-        '<h3 style="margin-top:0">Slitter Department — Log</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Record what the slitter cut. Each output pallet keeps its own mill composition (which source steel + mill # went into it). This does not change any skid\'s inventory.</div>' +
-        '<div class="row">' +
-          operatorFieldHtml('slitOperator') +
-          '<div class="field"><label>Slitter #</label><input type="number" id="slitNum" min="1" placeholder="e.g. 2"></div>' +
-        '</div>' +
+        '<h3 style="margin-top:0">' + (isScroll ? 'Scrolls' : 'Slitters') + ' — Log</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Record what the ' + (isScroll ? 'scroll' : 'slitter') + ' cut. Each output pallet becomes a runnable skid that carries its mill composition, so it can be run through the <b>' + feeds + '</b>.</div>' +
+        '<div class="row">' + operatorFieldHtml('slitOperator') + machineField + '</div>' +
         '<div class="field"><label>Notes (optional)</label><input id="slitNotes" placeholder="e.g. day shift"></div>' +
-        '<button class="btn success" id="startSlitBtn">+ Start Slitter Session</button>' +
+        '<button class="btn success" id="startSlitBtn">+ Start ' + (isScroll ? 'Scroll' : 'Slitter') + ' Session</button>' +
       '</div>' +
-      '<div class="card"><h3 style="margin-top:0;font-size:15px">Open slitter sessions</h3>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Open ' + (isScroll ? 'scroll' : 'slitter') + ' sessions</h3>' +
         '<div id="openSlitList"><div class="loading">Loading&hellip;</div></div></div>';
 
     document.getElementById('startSlitBtn').onclick = function () {
       var operator = document.getElementById('slitOperator').value.trim();
-      var numv = document.getElementById('slitNum').value.trim();
+      var machine = isScroll ? (document.getElementById('slitMachineSel').value) : ('Slitter ' + document.getElementById('slitNum').value.trim());
+      var picked = isScroll ? document.getElementById('slitMachineSel').value : document.getElementById('slitNum').value.trim();
       var notes = document.getElementById('slitNotes').value;
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!numv) { toast('Enter the slitter number'); return; }
+      if (!picked) { toast(isScroll ? 'Pick a scroll machine' : 'Enter the slitter number'); return; }
       var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
-      runMutation('createSlitterSession', ['Slitter ' + numv, operator, notes, newOpId()],
+      runMutation('createSlitterSession', [slitKind, machine, operator, notes, newOpId()],
         function (result) {
-          currentSlitter = { sessionId: result.sessionId, slitter: result.slitter, operator: operator };
+          currentSlitter = { sessionId: result.sessionId, slitter: result.slitter, kind: slitKind, operator: operator };
           slitterComp = []; slitPicked = null;
           renderSlitterSession();
         },
-        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '+ Start Slitter Session'; });
+        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '+ Start ' + (isScroll ? 'Scroll' : 'Slitter') + ' Session'; });
     };
 
     ensureAllCache(function () {}); // warm the skid cache for the composition picker
@@ -3623,7 +3652,7 @@
       if (tok !== viewToken) return;
       var el = document.getElementById('openSlitList');
       if (el) el.innerHTML = '<div class="sub">Error: ' + esc(err.message) + '</div>';
-    }).getSlitterSessions('', 'open');
+    }).getSlitterSessions(slitKind, '', 'open');
   }
 
   function renderOpenSlitList(sessions) {
@@ -3642,7 +3671,7 @@
       btn.onclick = function () {
         var sid = btn.getAttribute('data-slresume');
         var s = sessions.filter(function (x) { return x.sessionId === sid; })[0];
-        currentSlitter = { sessionId: s.sessionId, slitter: s.slitter, operator: s.operator };
+        currentSlitter = { sessionId: s.sessionId, slitter: s.slitter, kind: s.kind || slitKind, operator: s.operator };
         slitterComp = []; slitPicked = null;
         renderSlitterSession();
       };
@@ -3699,9 +3728,10 @@
       pallets.forEach(function (p) {
         var comp = (p.composition || []).map(function (c) { return 'Mill ' + esc(c.mill) + ' (' + esc(c.qty) + (c.ticket ? ', ' + esc(c.ticket) : '') + ')'; }).join(', ');
         var mixed = (p.composition || []).length > 1 ? ' <span class="badge wip">mixed mill</span>' : '';
+        var runnable = p.skidId ? ' &middot; runnable skid <b>' + esc(p.skidId) + '</b>' : '';
         pHtml += '<div class="queue-item"><div style="min-width:0">' +
           '<div class="ticket-id" style="font-size:14px">' + esc(p.palletId) + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' pieces</span>' + mixed + '</div>' +
-          '<div class="sub">' + (comp || 'no sources') + '</div></div>' +
+          '<div class="sub">' + (comp || 'no sources') + runnable + '</div></div>' +
           (isOpen ? '<button class="btn danger" style="padding:6px 10px;font-size:13px" data-pdel="' + esc(p.palletId) + '">Remove</button>' : '') +
           '</div>';
       });
@@ -3745,6 +3775,8 @@
           if (updated && updated.duplicate) { toast('Already added'); btn.disabled = false; btn.textContent = 'Add pallet to session'; return; }
           toast('Pallet added');
           slitterComp = []; slitPicked = null;
+          // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.
+          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
           renderSlitterSessionContent(document.getElementById('view'), updated);
         },
         function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Add pallet to session'; });
