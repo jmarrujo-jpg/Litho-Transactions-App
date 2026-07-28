@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.6</span>
+      <span class="version" id="appVersion">v1.12.7</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -733,11 +733,12 @@
         if (countMode === 'missing' || countMode === 'history') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
         renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
-      case 'prodHome': renderLanding(); return;            // metals home (any tab) -> landing
-      case 'prodAdd': case 'prodReview': openProduction(); return;
+      case 'metalsHome': renderLanding(); return;          // department chooser -> landing
+      case 'prodHome': case 'slitterHome': openProduction(); return; // a section home -> chooser
+      case 'prodAdd': case 'prodReview': openMetalsSection(metalsTab); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
-      case 'slitterSession': metalsTab = 'slitter'; openProduction(); return; // slitter detail -> slitter tab
+      case 'slitterSession': openMetalsSection('slitter'); return; // slitter detail -> slitter home
       default: renderLanding(); return;
     }
   };
@@ -2994,37 +2995,48 @@
   var slitPicked = null;     // a source skid chosen from the picker to auto-fill the next comp row
 
   function openProduction() {
-    state.view = 'prodHome'; state.runId = null; runSwapSkid = null;
+    state.view = 'metalsHome'; state.runId = null; runSwapSkid = null;
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Metals');
-    renderMetalsHome();
+    renderMetalsChooser();
   }
 
-  // Metals is a 3-tab department: Metal Lines and Press Department share the run flow (only the
-  // machine label differs — "Line #" vs "Press #"); Slitter is a separate log-only module.
-  function renderMetalsHome() {
-    state.view = 'prodHome';
+  // Metals is 3 departments. The chooser is a screen of BIG buttons (like the landing tiles) —
+  // pick one and you go fully into that section. Metal Lines and Press Department share the run
+  // flow (only "Line #" vs "Press #" differs); Slitter is a separate log-only module.
+  function renderMetalsChooser() {
+    state.view = 'metalsHome';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Metals');
     var view = document.getElementById('view');
-    var tabs = [['lines', 'Metal Lines'], ['press', 'Press Department'], ['slitter', 'Slitter Department']].map(function (t) {
-      return '<button data-mtab="' + t[0] + '"' + (metalsTab === t[0] ? ' class="active"' : '') + '>' + esc(t[1]) + '</button>';
-    }).join('');
-    view.innerHTML = '<div class="tabbar" id="metalsTabs">' + tabs + '</div><div id="metalsBody"></div>';
-    Array.prototype.forEach.call(document.querySelectorAll('#metalsTabs button'), function (btn) {
-      btn.onclick = function () { metalsTab = btn.getAttribute('data-mtab'); renderMetalsHome(); };
-    });
-    if (metalsTab === 'slitter') renderSlitterHome();
-    else renderProductionHome(metalsTab === 'press' ? 'Press' : 'Line');
+    view.innerHTML =
+      '<div class="sub" style="margin:4px 0 16px;font-size:16px">Which department are you working in?</div>' +
+      '<button class="btn" id="metalsPickLines" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
+      '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
+      '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px">✂️&nbsp; Slitter Department</button>';
+    document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
+    document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
+    document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
+  }
+
+  // Enter a chosen department full-screen. Back from a section home returns to the chooser.
+  function openMetalsSection(tab) {
+    metalsTab = tab;
+    showTabbar(false); showBack(true); setDept('Metals');
+    if (tab === 'slitter') { state.view = 'slitterHome'; renderSlitterHome(); }
+    else { state.view = 'prodHome'; renderProductionHome(tab === 'press' ? 'Press' : 'Line'); }
   }
 
   // ----- Log Work (Metal Lines / Press): start a run, resume open runs, or go to Review -----
-  // machineType is 'Line' or 'Press' (fixed by the active tab). Everything downstream (the run,
-  // add/submit/review/finish) is shared; only the label and the open/review filters differ.
+  // machineType is 'Line' or 'Press' (fixed by the chosen section). Everything downstream (the
+  // run, add/submit/review/finish) is shared; only the label and the open/review filters differ.
   function renderProductionHome(machineType) {
-    var body = document.getElementById('metalsBody');
-    if (!body) return;
+    state.view = 'prodHome';
+    var view = document.getElementById('view');
+    if (!view) return;
     var tok = nextViewToken();
     var label = machineType === 'Press' ? 'Press Department' : 'Metal Lines';
-    body.innerHTML =
+    view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">' + esc(label) + ' — Log Work</h3>' +
         '<div class="sub" style="margin-bottom:12px">Start a work session on a ' + esc(machineType.toLowerCase()) + ', then load the skids you run. Submit for review when the day is done.</div>' +
@@ -3143,7 +3155,7 @@
 
   function doSubmitRun() {
     runMutation('submitRun', [currentRun.runId, currentRun.operator, newOpId()],
-      function () { showInfo('Submitted for review', 'Run ' + currentRun.runId + ' is ready to review and finish.', function () { openProduction(); }); },
+      function () { showInfo('Submitted for review', 'Run ' + currentRun.runId + ' is ready to review and finish.', function () { openMetalsSection(metalsTab); }); },
       function (err) { showModal({ title: 'Could not submit', message: err.message, confirmText: 'OK' }); });
   }
 
@@ -3569,10 +3581,11 @@
   // each pallet records an operator-entered count and a composition of source mills. No skid
   // inventory is touched — this is a traceability log for mixed-mill pallets.
   function renderSlitterHome() {
-    var body = document.getElementById('metalsBody');
-    if (!body) return;
+    state.view = 'slitterHome';
+    var view = document.getElementById('view');
+    if (!view) return;
     var tok = nextViewToken();
-    body.innerHTML =
+    view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Slitter Department — Log</h3>' +
         '<div class="sub" style="margin-bottom:12px">Record what the slitter cut. Each output pallet keeps its own mill composition (which source steel + mill # went into it). This does not change any skid\'s inventory.</div>' +
@@ -3740,7 +3753,7 @@
     document.getElementById('finishSlitBtn').onclick = function () {
       showConfirm('Finish slitter session', 'Finish ' + currentSlitter.sessionId + '? You can still view it, but no more pallets can be added.', function () {
         runMutation('finishSlitterSession', [currentSlitter.sessionId, currentSlitter.operator, newOpId()],
-          function () { toast('Session finished'); metalsTab = 'slitter'; openProduction(); },
+          function () { toast('Session finished'); openMetalsSection('slitter'); },
           function (err) { toast('Error: ' + err.message); });
       }, 'Finish');
     };
