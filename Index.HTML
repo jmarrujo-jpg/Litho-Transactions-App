@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.9</span>
+      <span class="version" id="appVersion">v1.13.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2995,8 +2995,8 @@
   var currentSlitter = null; // { sessionId, slitter, kind, operator } — the cutting session being logged
   var slitKind = 'Slitter';  // Slitter Department sub-tab: 'Slitter' | 'Scroll'
   var reviewRunMachineType = null; // machine type of the run open in Review (scopes its picker)
-  var slitterComp = [];      // in-progress composition rows [{skidId,ticket,mill,qty}] for the next pallet
-  var slitPicked = null;     // a source skid chosen from the picker to auto-fill the next comp row
+  var slitPickMode = null;   // when set, the session screen shows a skid picker: 'load' | 'switch'
+  var slitPendingStrips = 0; // pieces-on-pallet count captured before a switch, passed to slitterSwitchSkid
 
   function openProduction() {
     state.view = 'metalsHome'; state.runId = null; runSwapSkid = null;
@@ -3641,7 +3641,7 @@
       runMutation('createSlitterSession', [slitKind, machine, operator, notes, newOpId()],
         function (result) {
           currentSlitter = { sessionId: result.sessionId, slitter: result.slitter, kind: slitKind, operator: operator };
-          slitterComp = []; slitPicked = null;
+          slitPickMode = null; slitPendingStrips = 0;
           renderSlitterSession();
         },
         function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '+ Start ' + (isScroll ? 'Scroll' : 'Slitter') + ' Session'; });
@@ -3675,7 +3675,7 @@
         var sid = btn.getAttribute('data-slresume');
         var s = sessions.filter(function (x) { return x.sessionId === sid; })[0];
         currentSlitter = { sessionId: s.sessionId, slitter: s.slitter, kind: s.kind || slitKind, operator: s.operator };
-        slitterComp = []; slitPicked = null;
+        slitPickMode = null; slitPendingStrips = 0;
         renderSlitterSession();
       };
     });
@@ -3705,42 +3705,57 @@
       '<div class="sub">by ' + esc(detail.operator) + ' &middot; ' + esc(detail.createdOn) +
       (detail.notes ? ' &middot; ' + esc(detail.notes) : '') + '</div></div>';
 
+    var unit = detail.unit || (detail.kind === 'Scroll' ? 'Strips' : 'Body Blanks');
+
     if (isOpen) {
-      html += '<div class="card">' +
-        '<h3 style="margin-top:0;font-size:15px">Add an output pallet</h3>' +
-        '<div class="sub" style="margin-bottom:8px">List each source steel that went into this pallet — a pallet can mix 2–3 mill numbers. Pick a skid to auto-fill its mill, or type a mill number.</div>' +
-        '<div class="searchrow">' + searchBarHtml('slitSkidSearch') + '</div>' +
-        '<div id="slitSkidPicker" style="margin-bottom:8px"></div>' +
-        '<div class="row">' +
-          '<div class="field"><label>Mill #</label><input id="slitMillInput" placeholder="e.g. M-1234"></div>' +
-          '<div class="field"><label>Qty (sheets)</label><input type="number" id="slitQtyInput" min="1"></div>' +
-        '</div>' +
-        '<button class="btn secondary" id="addSourceBtn" style="margin-bottom:6px">+ Add source mill</button>' +
-        '<div id="slitCompList" style="margin:8px 0"></div>' +
-        '<div class="field"><label>Output pallet count (pieces / blanks)</label><input type="number" id="slitOutputCount" min="1"></div>' +
-        '<div class="field"><label>Pallet notes (optional)</label><input id="slitPalletNotes"></div>' +
-        '<button class="btn success" id="addPalletBtn">Add pallet to session</button>' +
-      '</div>';
+      var active = detail.activeSkid;
+      var coils = detail.palletCoils || [];
+      var soFar = detail.palletStripsSoFar || 0;
+      var coilsLine = coils.length
+        ? '<div class="sub" style="margin-top:8px">On this pallet so far: ' + coils.map(function (c) { return esc(c.ticket || ('Mill ' + c.mill)) + ' (' + esc(c.strips) + ')'; }).join(' + ') + ' = <b>' + esc(soFar) + '</b> ' + esc(unit) + '</div>'
+        : '';
+      if (!active || slitPickMode === 'switch') {
+        // ---- skid picker: initial load, or switching to the next skid mid-pallet ----
+        var isSwitch = !!active && slitPickMode === 'switch';
+        html += '<div class="card">' +
+          '<h3 style="margin-top:0;font-size:16px">' + (isSwitch ? 'Load the next skid' : 'Load the skid you are cutting') + '</h3>' +
+          (isSwitch ? '<div class="sub" style="margin-bottom:8px">Recorded <b>' + esc(slitPendingStrips) + '</b> ' + esc(unit) + ' on the pallet. Pick the next skid to keep cutting into the same pallet.</div>'
+                    : '<div class="sub" style="margin-bottom:8px">Search the ticket or skid number you are cutting from.</div>') +
+          '<div class="searchrow">' + searchBarHtml('slitSkidSearch') + '</div>' +
+          '<div id="slitSkidPicker"></div>' +
+          (isSwitch ? '<button class="btn secondary" id="cancelSwitchBtn" style="margin-top:10px">Cancel</button>' : '') +
+        '</div>';
+      } else {
+        // ---- the two big buttons ----
+        html += '<div class="card">' +
+          '<div class="sub">Cutting from</div>' +
+          '<div class="ticket-id" style="font-size:22px">' + esc(detail.activeTicket || active) +
+            (detail.activeMill ? ' <span class="sub" style="font-weight:400">Mill ' + esc(detail.activeMill) + '</span>' : '') + '</div>' +
+          coilsLine +
+          '<button class="btn success" id="palletFullBtn" style="width:100%;padding:22px;font-size:20px;margin-top:16px">✅ PALLET FULL</button>' +
+          '<button class="btn secondary" id="skidEmptyBtn" style="width:100%;padding:18px;font-size:17px;margin-top:10px">🔄 SKID EMPTY / SWITCH</button>' +
+        '</div>';
+      }
     }
 
     var pallets = detail.pallets || [];
     var pHtml = '';
     if (!pallets.length) {
-      pHtml = '<div class="sub">No pallets logged yet.</div>';
+      pHtml = '<div class="sub">No pallets made yet.</div>';
     } else {
       pallets.forEach(function (p) {
-        var comp = (p.composition || []).map(function (c) { return 'Mill ' + esc(c.mill) + ' (' + esc(c.qty) + (c.ticket ? ', ' + esc(c.ticket) : '') + ')'; }).join(', ');
-        var mixed = (p.composition || []).length > 1 ? ' <span class="badge wip">mixed mill</span>' : '';
+        var comp = (p.composition || []).map(function (c) { var st = (c.strips != null ? c.strips : c.qty); return esc(c.ticket || ('Mill ' + c.mill)) + ' (' + esc(st) + ')'; }).join(' + ');
+        var mixed = (p.composition || []).length > 1 ? ' <span class="badge wip">mixed</span>' : '';
         var runnable = p.skidId ? ' &middot; runnable skid <b>' + esc(p.skidId) + '</b>' : '';
         var head = p.loadNo ? 'LOAD ' + esc(p.loadNo) : esc(p.palletId);
         pHtml += '<div class="queue-item"><div style="min-width:0">' +
-          '<div class="ticket-id" style="font-size:16px">' + head + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' pieces</span>' + mixed + '</div>' +
-          '<div class="sub">' + (comp || 'no sources') + runnable + '</div></div>' +
+          '<div class="ticket-id" style="font-size:16px">' + head + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' ' + esc(unit) + '</span>' + mixed + '</div>' +
+          '<div class="sub">' + (comp ? 'from ' + comp : 'no sources') + runnable + '</div></div>' +
           (isOpen ? '<button class="btn danger" style="padding:6px 10px;font-size:13px" data-pdel="' + esc(p.palletId) + '">Remove</button>' : '') +
           '</div>';
       });
     }
-    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Pallets in this session (' + pallets.length + ')</h3>' + pHtml + '</div>';
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Pallets made this session (' + pallets.length + ')</h3>' + pHtml + '</div>';
 
     if (isOpen) {
       html += '<div class="card"><button class="btn secondary" id="finishSlitBtn" style="width:100%">Finish session</button></div>';
@@ -3749,47 +3764,57 @@
     view.innerHTML = html;
     if (!isOpen) return;
 
-    renderSlitCompList();
     var search = document.getElementById('slitSkidSearch');
-    if (search) search.oninput = function () { renderSlitSkidPicker(search.value); };
-
-    document.getElementById('addSourceBtn').onclick = function () {
-      var mill = document.getElementById('slitMillInput').value.trim();
-      var qty = Number(document.getElementById('slitQtyInput').value) || 0;
-      if (!mill) { toast('Enter or pick a mill number'); return; }
-      if (qty <= 0) { toast('Enter the sheets from this source'); return; }
-      var src = slitPicked || {};
-      slitterComp.push({ skidId: src.skidId || '', ticket: src.ticket || '', mill: mill, qty: qty });
-      slitPicked = null;
-      document.getElementById('slitMillInput').value = '';
-      document.getElementById('slitQtyInput').value = '';
-      if (search) search.value = '';
-      renderSlitSkidPicker('');
-      renderSlitCompList();
+    if (search) {
+      renderSlitPicker('');
+      search.oninput = function () { renderSlitPicker(search.value); };
+    }
+    var cancelSwitch = document.getElementById('cancelSwitchBtn');
+    if (cancelSwitch) cancelSwitch.onclick = function () {
+      slitPickMode = null; slitPendingStrips = 0;
+      renderSlitterSessionContent(document.getElementById('view'), detail);
     };
 
-    document.getElementById('addPalletBtn').onclick = function () {
-      var outputCount = Number(document.getElementById('slitOutputCount').value) || 0;
-      var notes = document.getElementById('slitPalletNotes').value;
-      if (!slitterComp.length) { toast('Add at least one source mill'); return; }
-      if (outputCount <= 0) { toast('Enter the output pallet count'); return; }
-      var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
-      runMutation('addSlitterPallet', [currentSlitter.sessionId, outputCount, slitterComp.slice(), notes, currentSlitter.operator, newOpId()],
-        function (updated) {
-          if (updated && updated.duplicate) { toast('Already added'); btn.disabled = false; btn.textContent = 'Add pallet to session'; return; }
-          var madePallets = (updated && updated.pallets) || [];
-          var newLoad = madePallets.length ? madePallets[madePallets.length - 1].loadNo : '';
-          if (newLoad) { showInfo('Pallet made — LOAD ' + newLoad, 'Write "LOAD ' + newLoad + '" on the physical pallet. That is now its ticket number.'); } else { toast('Pallet added'); }
-          slitterComp = []; slitPicked = null;
-          // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.
-          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
-          renderSlitterSessionContent(document.getElementById('view'), updated);
-        },
-        function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = 'Add pallet to session'; });
+    var fullBtn = document.getElementById('palletFullBtn');
+    if (fullBtn) fullBtn.onclick = function () {
+      showPromptModal({
+        title: 'Pallet full', message: 'Count the pallet. How many ' + unit + ' are on it now?',
+        inputLabel: unit + ' on the pallet', placeholder: 'e.g. 50', confirmText: 'Save pallet',
+        onConfirm: function (val) {
+          var strips = Number(val) || 0;
+          if (strips <= 0) { toast('Enter the ' + unit + ' count'); return; }
+          runMutation('slitterFinishPallet', [currentSlitter.sessionId, strips, '', currentSlitter.operator, newOpId()],
+            function (updated) {
+              if (updated && updated.newLoadNo) {
+                showInfo('Pallet done — LOAD ' + updated.newLoadNo, 'Write "LOAD ' + updated.newLoadNo + '" on the pallet. That is now its ticket number.');
+              } else if (updated && updated.duplicate) { toast('Already saved'); }
+              slitPickMode = null; slitPendingStrips = 0;
+              // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.
+              google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+              renderSlitterSessionContent(document.getElementById('view'), updated);
+            },
+            function (err) { toast('Error: ' + err.message); });
+        }
+      });
+    };
+
+    var emptyBtn = document.getElementById('skidEmptyBtn');
+    if (emptyBtn) emptyBtn.onclick = function () {
+      showPromptModal({
+        title: 'Skid empty', message: 'This skid ran out. Count the pallet — how many ' + unit + ' are on it right now?',
+        inputLabel: unit + ' on the pallet', placeholder: 'e.g. 30', confirmText: 'Pick next skid',
+        onConfirm: function (val) {
+          var strips = Number(val);
+          if (isNaN(strips) || strips < 0) { toast('Enter the ' + unit + ' count'); return; }
+          slitPendingStrips = strips;
+          slitPickMode = 'switch';
+          renderSlitterSessionContent(document.getElementById('view'), detail);
+        }
+      });
     };
 
     document.getElementById('finishSlitBtn').onclick = function () {
-      showConfirm('Finish slitter session', 'Finish ' + currentSlitter.sessionId + '? You can still view it, but no more pallets can be added.', function () {
+      showConfirm('Finish session', 'Finish ' + currentSlitter.sessionId + '? Any pallet still being cut is not saved.', function () {
         runMutation('finishSlitterSession', [currentSlitter.sessionId, currentSlitter.operator, newOpId()],
           function () { toast('Session finished'); openMetalsSection('slitter'); },
           function (err) { toast('Error: ' + err.message); });
@@ -3808,48 +3833,48 @@
     });
   }
 
-  function renderSlitCompList() {
-    var el = document.getElementById('slitCompList');
-    if (!el) return;
-    if (!slitterComp.length) { el.innerHTML = '<div class="sub">No sources added to this pallet yet.</div>'; return; }
-    var html = '';
-    slitterComp.forEach(function (r, i) {
-      html += '<div class="queue-item" style="padding:4px 0"><div style="min-width:0">' +
-        '<span class="ticket-id" style="font-size:14px">Mill ' + esc(r.mill) + '</span> ' +
-        '<span class="sub">' + esc(r.qty) + ' sheets' + (r.ticket ? ' &middot; from ' + esc(r.ticket) : '') + '</span></div>' +
-        '<button class="btn danger" style="padding:4px 8px;font-size:12px" data-cdel="' + i + '">&times;</button></div>';
-    });
-    el.innerHTML = html;
-    Array.prototype.forEach.call(el.querySelectorAll('[data-cdel]'), function (b) {
-      b.onclick = function () { slitterComp.splice(Number(b.getAttribute('data-cdel')), 1); renderSlitCompList(); };
-    });
-  }
-
-  function renderSlitSkidPicker(term) {
+  // Picker for loading / switching the source skid being cut. Loadable = active inventory skids
+  // (Current / WIP / Pending); cut pallets and spent (Used / In Production / Missing) skids are hidden.
+  function renderSlitPicker(term) {
     var c = document.getElementById('slitSkidPicker');
     if (!c) return;
     term = (term || '').trim().toLowerCase();
-    if (!term) { c.innerHTML = ''; return; }
     var rows = allCache.filter(function (t) {
+      if (t.cutType) return false;
+      if (['Used', 'In Production', 'Missing'].indexOf(t.status) !== -1) return false;
+      if (!term) return false;
       return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1;
-    }).slice(0, 8);
-    if (!rows.length) { c.innerHTML = '<div class="sub">No skids match.</div>'; return; }
+    }).slice(0, 10);
+    if (!rows.length) { c.innerHTML = '<div class="sub">' + (term ? 'No skids match.' : 'Type a ticket or skid number to find it.') + '</div>'; return; }
     var html = '';
     rows.forEach(function (t) {
-      html += '<div class="queue-item" style="padding:4px 0"><div style="min-width:0">' +
-        '<span class="ticket-id" style="font-size:13px">' + esc(t.ticket) + '</span> ' +
-        '<span class="sub">Mill ' + esc(t.mill || '?') + ' &middot; ' + esc(t.qty || 0) + ' sheets</span></div>' +
-        '<button class="btn secondary" style="padding:4px 8px;font-size:12px" data-suse="' + esc(t.skidId) + '">Use</button></div>';
+      html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket) + '</span> ' +
+        '<span class="sub">Mill ' + esc(t.mill || '?') + (t.endUse ? ' &middot; ' + esc(t.endUse) : '') + '</span></div>' +
+        '<button class="btn success" style="padding:8px 14px" data-suse="' + esc(t.skidId) + '">Load</button></div>';
     });
     c.innerHTML = html;
     Array.prototype.forEach.call(c.querySelectorAll('[data-suse]'), function (b) {
       b.onclick = function () {
         var sk = b.getAttribute('data-suse');
-        var t = allCache.filter(function (x) { return x.skidId === sk; })[0];
-        if (!t) return;
-        slitPicked = { skidId: sk, ticket: t.ticket, mill: t.mill || '' };
-        var mi = document.getElementById('slitMillInput'); if (mi) mi.value = t.mill || '';
-        toast('Using ' + t.ticket + (t.mill ? ' (Mill ' + t.mill + ')' : ''));
+        b.disabled = true;
+        if (slitPickMode === 'switch') {
+          runMutation('slitterSwitchSkid', [currentSlitter.sessionId, slitPendingStrips, sk, currentSlitter.operator, newOpId()],
+            function (updated) {
+              slitPickMode = null; slitPendingStrips = 0;
+              // An emptied source flipped to Used — refresh the shared cache.
+              google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+              renderSlitterSessionContent(document.getElementById('view'), updated);
+            },
+            function (err) { toast('Error: ' + err.message); b.disabled = false; });
+        } else {
+          runMutation('slitterLoadSkid', [currentSlitter.sessionId, sk, currentSlitter.operator, newOpId()],
+            function (updated) {
+              slitPickMode = null;
+              renderSlitterSessionContent(document.getElementById('view'), updated);
+            },
+            function (err) { toast('Error: ' + err.message); b.disabled = false; });
+        }
       };
     });
   }
