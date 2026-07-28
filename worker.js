@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-16' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-17' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -355,7 +355,7 @@ async function getAllTickets(sheets) {
     skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
-    row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', loadNo: o['Load #'] || '', countedOn: toYMD(o['Counted At']),
+    row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', loadNo: o['Load #'] || '', cost: num(o['Cost']), countedOn: toYMD(o['Counted At']),
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
@@ -1424,22 +1424,36 @@ function nextLoadNumber(rows) {
 // Count / Job screens (which only look at Current/WIP/Pending) while making it selectable in the
 // metals run picker. Its Ticket IS the app-generated Load # — the primary, writable pallet number;
 // the parent tickets/mills live in Mill + Comments and the full composition stays on the Slitter
-// Pallets row. Value/weight is intentionally left blank for now (deferred). Returns { skidId, loadNo }.
+// Pallets row. Cost and Litho are carried down as the simple average of the parent skids' values
+// (two independent averages — never combined; blanks/zeros skipped). Weight is deferred. Returns
+// { skidId, loadNo }.
 async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machine) {
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Mill');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut Type');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Load #');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cost');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Litho');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
   const loadNo = nextLoadNumber(master.rows);
-  // Copy steel specs from the first source skid we can find, so the run picker shows sensible specs.
-  let src = null;
-  for (const c of comp) {
-    if (!c || !c.skidId) continue;
-    src = master.rows.filter((o) => String(o['Skid ID']).trim() === String(c.skidId).trim())[0];
-    if (src) break;
-  }
+  // Gather every parent skid this pallet was cut from (for spec copy + cost/litho averaging).
+  const parentRows = [];
+  comp.forEach((c) => {
+    if (!c || !c.skidId) return;
+    const p = master.rows.filter((o) => String(o['Skid ID']).trim() === String(c.skidId).trim())[0];
+    if (p) parentRows.push(p);
+  });
+  const src = parentRows[0] || null;                    // first parent seeds the steel specs
+  // Simple average of a parent field across the parents that actually carry a value (>0).
+  const avgOf = (field) => {
+    const vals = [];
+    parentRows.forEach((p) => { const v = num(p[field]); if (v > 0) vals.push(v); });
+    if (!vals.length) return null;
+    return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 100) / 100;
+  };
+  const costAvg = avgOf('Cost');
+  const lithoAvg = avgOf('Litho');
   const mills = comp.map((c) => String((c && c.mill) || '').trim()).filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
   const stripsOf = (c) => (c && c.strips != null ? c.strips : (c && c.qty) || 0);
   const parents = comp.map((c) => (c && c.ticket ? c.ticket : 'Mill ' + (c && c.mill)) + ' (' + stripsOf(c) + ')').join(', ');
@@ -1449,6 +1463,8 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
     'Comments': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
   };
+  if (costAvg != null) row['Cost'] = costAvg;            // averaged steel cost of the parents
+  if (lithoAvg != null) row['Litho'] = lithoAvg;         // averaged litho cost of the parents (kept separate)
   if (src) {
     ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'Coil/Sheet'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
   }
@@ -1890,7 +1906,8 @@ async function getDepartmentReport(sheets, start, end, dept) {
       const kind = sess['Kind'] || 'Slitter';
       const comp = parseComposition(p['Composition']);
       const from = comp.map((c) => (c.ticket || ('Mill ' + c.mill)) + (c.mill ? ' [mill ' + c.mill + ']' : '') + ' (' + (c.strips != null ? c.strips : (c.qty || 0)) + ')').join(' + ');
-      const row = { date: toYMD(p['Created On']), loadNo: p['Load #'] || '', machine: sess['Slitter'] || '', by: sess['Operator'] || '', output: num(p['Output Count']), unit: kind === 'Scroll' ? 'Strips' : 'Body Blanks', from, skidId: p['Skid ID'] || '' };
+      const cutRow = master.rows.filter((o) => String(o['Skid ID']).trim() === String(p['Skid ID'] || '').trim())[0] || {};
+      const row = { date: toYMD(p['Created On']), loadNo: p['Load #'] || '', machine: sess['Slitter'] || '', by: sess['Operator'] || '', output: num(p['Output Count']), unit: kind === 'Scroll' ? 'Strips' : 'Body Blanks', from, skidId: p['Skid ID'] || '', cost: num(cutRow['Cost']), litho: num(cutRow['Litho']) };
       if (kind === 'Scroll') scrollRows.push(row); else slitRows.push(row);
     });
     if (want('slitter')) { slitRows.sort(byDate); sections.push({ key: 'slitter', label: 'Slitter — pallets made', rows: slitRows }); }

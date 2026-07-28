@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.14.0</span>
+      <span class="version" id="appVersion">v1.14.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -971,8 +971,8 @@
       head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Machine</th><th>By</th><th>Sheets</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.sheets) + '</td></tr>'; }).join('');
     } else if (sec.key === 'slitter' || sec.key === 'scrolls') {
-      head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cut from</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
+      head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cost</th><th>Litho</th><th>Cut from</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
     } else if (sec.key === 'count') {
       head = '<tr><th>Date</th><th>Session</th><th>By</th><th>Current</th><th>Promoted</th><th>WIP</th><th>Missing</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.sessionId) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.currentFound) + '</td><td>' + esc(x.promoted) + '</td><td>' + esc(x.wipFound) + '</td><td>' + esc(x.missing) + '</td></tr>'; }).join('');
