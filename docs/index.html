@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.13.0</span>
+      <span class="version" id="appVersion">v1.14.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -891,8 +891,8 @@
     });
   }
 
-  // ---------------- Reports (what was produced, by day or range) ----------------
-  var reportDept = 'litho';
+  // ---------------- Reports (completed work by department, by day or range) ----------------
+  var reportDept = 'all';
   function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
 
   function openReports() {
@@ -908,8 +908,8 @@
     var today = todayStr();
     view.innerHTML =
       '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
-        '<div class="sub" style="margin-bottom:10px">See what was produced for a day or a date range.</div>' +
-        selectField('reportDeptSel', 'Department', [{ value: 'litho', text: 'Litho' }, { value: 'metals', text: 'Metals' }], reportDept) +
+        '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range.</div>' +
+        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'count', text: 'Count' }], reportDept) +
         '<div class="row">' +
           '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
           '<div class="field"><label>To</label><input type="date" id="reportTo" value="' + esc(today) + '"></div>' +
@@ -931,53 +931,56 @@
       from.value = ymd(sun); to.value = ymd(sat);
     };
     document.getElementById('runReportBtn').onclick = function () {
-      var dept = document.getElementById('reportDeptSel').value || 'litho';
+      var dept = document.getElementById('reportDeptSel').value || 'all';
       var f = from.value, t = to.value || from.value;
       if (!f) { toast('Pick a date'); return; }
       if (t < f) { toast('"To" is before "From"'); return; }
       reportDept = dept;
       var results = document.getElementById('reportResults');
       results.innerHTML = '<div class="loading">Building report&hellip;</div>';
-      var fn = dept === 'metals' ? 'getMetalsReport' : 'getLithoReport';
-      var runner = google.script.run
-        .withSuccessHandler(function (r) { renderReportResults(dept, r); })
-        .withFailureHandler(function (err) { results.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>'; });
-      runner[fn](f, t);
+      google.script.run
+        .withSuccessHandler(function (r) { renderReportResults(r); })
+        .withFailureHandler(function (err) { results.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>'; })
+        .getDepartmentReport(f, t, dept);
     };
   }
 
-  function renderReportResults(dept, r) {
+  function renderReportResults(r) {
     var el = document.getElementById('reportResults');
     if (!el) return;
     var range = (r.start === r.end) ? r.start : (r.start + ' to ' + r.end);
-    var html = '<div class="card">';
-    if (dept === 'metals') {
-      html += '<h3 style="margin-top:0;font-size:15px">Metals produced &middot; ' + esc(range) + '</h3>' +
-        '<div class="row"><div class="stat"><div class="num">' + (r.count || 0) + '</div><div class="label">Skids used</div></div>' +
-        '<div class="stat"><div class="num">' + (r.totalSheets || 0) + '</div><div class="label">Sheets</div></div></div>';
-      if (!r.rows || !r.rows.length) html += '<div class="sub" style="margin-top:8px">Nothing in this range.</div>';
-      else {
-        html += '<table style="margin-top:8px"><thead><tr><th>Ticket</th><th>Skid</th><th>Finished</th><th>By</th><th>Sheets</th></tr></thead><tbody>';
-        r.rows.forEach(function (x) {
-          html += '<tr><td>' + esc(x.ticket || '(no ticket)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.finishedOn) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.sheets) + '</td></tr>';
-        });
-        html += '</tbody></table>';
-      }
-    } else {
-      html += '<h3 style="margin-top:0;font-size:15px">Litho produced &middot; ' + esc(range) + '</h3>' +
-        '<div class="row"><div class="stat"><div class="num">' + (r.count || 0) + '</div><div class="label">Tickets</div></div>' +
-        '<div class="stat"><div class="num">' + money(r.totalLitho) + '</div><div class="label">Total litho</div></div></div>';
-      if (!r.rows || !r.rows.length) html += '<div class="sub" style="margin-top:8px">Nothing in this range.</div>';
-      else {
-        html += '<table style="margin-top:8px"><thead><tr><th>Ticket</th><th>Skid</th><th>Coated</th><th>By</th><th>Litho</th></tr></thead><tbody>';
-        r.rows.forEach(function (x) {
-          html += '<tr><td>' + esc(x.ticket || '(no ticket)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.coatedOn) + '</td><td>' + esc(x.by) + '</td><td>' + money(x.litho) + '</td></tr>';
-        });
-        html += '</tbody></table>';
-      }
-    }
-    html += '</div>';
+    var sections = r.sections || [];
+    var html = '';
+    sections.forEach(function (sec) { html += reportSectionHtml(sec, range); });
+    if (!html) html = '<div class="card empty">Nothing in this range.</div>';
     el.innerHTML = html;
+  }
+
+  // Render one department section. Columns are tailored per department; cut pallets show the parent
+  // tickets + mills they were cut from, so lineage back to the mill is visible in the report.
+  function reportSectionHtml(sec, range) {
+    var rows = sec.rows || [];
+    var html = '<div class="card"><h3 style="margin-top:0;font-size:15px">' + esc(sec.label) +
+      ' <span class="sub" style="font-weight:400">&middot; ' + esc(range) + ' &middot; ' + rows.length + '</span></h3>';
+    if (!rows.length) { return html + '<div class="sub">Nothing in this range.</div></div>'; }
+    var head, body;
+    if (sec.key === 'litho') {
+      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>By</th><th>Litho</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.by) + '</td><td>' + money(x.litho) + '</td></tr>'; }).join('');
+    } else if (sec.key === 'lines' || sec.key === 'press') {
+      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Machine</th><th>By</th><th>Sheets</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.sheets) + '</td></tr>'; }).join('');
+    } else if (sec.key === 'slitter' || sec.key === 'scrolls') {
+      head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cut from</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
+    } else if (sec.key === 'count') {
+      head = '<tr><th>Date</th><th>Session</th><th>By</th><th>Current</th><th>Promoted</th><th>WIP</th><th>Missing</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.sessionId) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.currentFound) + '</td><td>' + esc(x.promoted) + '</td><td>' + esc(x.wipFound) + '</td><td>' + esc(x.missing) + '</td></tr>'; }).join('');
+    } else {
+      head = '<tr><th>Date</th><th>Detail</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(JSON.stringify(x)) + '</td></tr>'; }).join('');
+    }
+    return html + '<div style="overflow-x:auto"><table style="margin-top:8px"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div></div>';
   }
 
   // ---------------- Steel Count (guided two-stage physical count) ----------------

@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-14' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-15' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -175,6 +175,8 @@ async function handle(fn, args, env) {
       return getLithoReport(sheets, args[0], args[1]);
     case 'getMetalsReport': // (startYMD, endYMD)
       return getMetalsReport(sheets, args[0], args[1]);
+    case 'getDepartmentReport': // (startYMD, endYMD, dept)
+      return getDepartmentReport(sheets, args[0], args[1], args[2]);
     // ---- steel count ----
     case 'setSkidCounted': // (skidId, counted, operator, opId)
       return setSkidCounted(sheets, args[0], args[1], args[2], args[3]);
@@ -1566,6 +1568,9 @@ async function slitterFinishPallet(sheets, sessionId, stripsOnPalletNow, notes, 
   });
   // Reset the in-progress pallet; the still-running Active Skid carries over to the next pallet.
   await stampCells(sheets, SLITTER_SESSIONS, s.__row, tab.map, { 'Pallet Coils': '[]' });
+  // Audit log: record that a pallet was made, so daily/department activity is complete.
+  const parents = finalComp.map((c) => (c.ticket || ('Mill ' + c.mill)) + ' (' + (c.strips != null ? c.strips : (c.qty || 0)) + ')').join(', ');
+  await eventTx(sheets, { skidId: cut.skidId, ticket: String(cut.loadNo), itemText: 'PALLET MADE — LOAD ' + cut.loadNo, operator, note: cutType + ' pallet on ' + (s['Slitter'] || '') + ' (' + total + ') from: ' + parents }, opId);
   await recountSlitter(sheets, sessionId);
   const detail = await getSlitterDetail(sheets, sessionId);
   detail.newLoadNo = cut.loadNo;
@@ -1815,4 +1820,87 @@ async function getMetalsReport(sheets, start, end) {
   });
   out.sort((a, b) => (a.finishedOn < b.finishedOn ? -1 : a.finishedOn > b.finishedOn ? 1 : 0));
   return { start, end, count: out.length, totalSheets, rows: out };
+}
+
+function classifyMachine(machine) {
+  const m = /^\s*(Line|Press)\b/i.exec(String(machine || ''));
+  return m ? (m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()) : '';
+}
+
+// Completed-work activity by department for a date range. dept: 'all' | 'litho' | 'lines' |
+// 'press' | 'slitter' | 'scrolls' | 'count'. Reads the authoritative source tabs so it reflects
+// finished output (pallets made, skids coated, runs finished, counts done), not every keystroke.
+// Cut pallets carry their parent tickets + mills, so lineage back to the mill shows on each row.
+async function getDepartmentReport(sheets, start, end, dept) {
+  start = start || todayYMD();
+  end = end || start;
+  dept = dept || 'all';
+  const want = (k) => dept === 'all' || dept === k;
+  const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const sections = [];
+
+  let master = { rows: [] };
+  try { master = await readObjects(sheets, MASTER, true); } catch (e) { /* keep empty */ }
+
+  if (want('litho')) {
+    const rows = [];
+    master.rows.forEach((o) => {
+      const st = o['Status'] || '';
+      if (st !== STATUS.WIP && st !== STATUS.IN_PRODUCTION && st !== STATUS.USED) return;
+      if (!inRange(o['First Coated At'], start, end)) return;
+      rows.push({ date: toYMD(o['First Coated At']), ticket: o['Ticket'], skidId: o['Skid ID'], by: o['First Coated By'] || '', litho: num(o['Litho']) });
+    });
+    rows.sort(byDate);
+    sections.push({ key: 'litho', label: 'Litho — skids coated', rows });
+  }
+
+  if (want('lines') || want('press')) {
+    const runMap = {};
+    try { (await readObjects(sheets, PRODUCTION, true)).rows.forEach((r) => { if (r['Run ID']) runMap[String(r['Run ID']).trim()] = r['Machine'] || ''; }); } catch (e) { /* no runs */ }
+    const lineRows = [], pressRows = [];
+    master.rows.forEach((o) => {
+      if ((o['Status'] || '') !== STATUS.USED) return;
+      if (!inRange(o['Finished On'], start, end)) return;
+      const runId = String(o['Run ID'] || '').trim();
+      if (!runId) return;                                   // no run = not a Line/Press completion
+      const machine = runMap[runId] || '';
+      const type = classifyMachine(machine);
+      const row = { date: toYMD(o['Finished On']), ticket: o['Ticket'], skidId: o['Skid ID'], machine, by: o['Used By'] || '', sheets: num(o['QTY/LOAD']) };
+      if (type === 'Line') lineRows.push(row); else if (type === 'Press') pressRows.push(row);
+    });
+    if (want('lines')) { lineRows.sort(byDate); sections.push({ key: 'lines', label: 'Metal Lines — skids run', rows: lineRows }); }
+    if (want('press')) { pressRows.sort(byDate); sections.push({ key: 'press', label: 'Press — skids run', rows: pressRows }); }
+  }
+
+  if (want('slitter') || want('scrolls')) {
+    const sessMap = {};
+    try { (await readObjects(sheets, SLITTER_SESSIONS, true)).rows.forEach((s) => { if (s['Session ID']) sessMap[String(s['Session ID']).trim()] = s; }); } catch (e) { /* none */ }
+    let pallets = [];
+    try { pallets = (await readObjects(sheets, SLITTER_PALLETS, true)).rows.filter((p) => p['Pallet ID'] && p['Session ID']); } catch (e) { /* none */ }
+    const slitRows = [], scrollRows = [];
+    pallets.forEach((p) => {
+      if (!inRange(p['Created On'], start, end)) return;
+      const sess = sessMap[String(p['Session ID']).trim()] || {};
+      const kind = sess['Kind'] || 'Slitter';
+      const comp = parseComposition(p['Composition']);
+      const from = comp.map((c) => (c.ticket || ('Mill ' + c.mill)) + (c.mill ? ' [mill ' + c.mill + ']' : '') + ' (' + (c.strips != null ? c.strips : (c.qty || 0)) + ')').join(' + ');
+      const row = { date: toYMD(p['Created On']), loadNo: p['Load #'] || '', machine: sess['Slitter'] || '', by: sess['Operator'] || '', output: num(p['Output Count']), unit: kind === 'Scroll' ? 'Strips' : 'Body Blanks', from, skidId: p['Skid ID'] || '' };
+      if (kind === 'Scroll') scrollRows.push(row); else slitRows.push(row);
+    });
+    if (want('slitter')) { slitRows.sort(byDate); sections.push({ key: 'slitter', label: 'Slitter — pallets made', rows: slitRows }); }
+    if (want('scrolls')) { scrollRows.sort(byDate); sections.push({ key: 'scrolls', label: 'Scrolls — pallets made', rows: scrollRows }); }
+  }
+
+  if (want('count')) {
+    let rows = [];
+    try {
+      rows = (await readObjects(sheets, COUNTS, true)).rows
+        .filter((o) => o['Session ID'] && String(o['Stage']) === 'Done' && inRange(o['Ended At'], start, end))
+        .map((o) => ({ date: toYMD(o['Ended At']), sessionId: o['Session ID'], by: o['Ended By'] || '', currentFound: num(o['Current Found']), promoted: num(o['Promoted']), wipFound: num(o['WIP Found']), missing: num(o['Missing Marked']) }));
+    } catch (e) { /* none */ }
+    rows.sort(byDate);
+    sections.push({ key: 'count', label: 'Count — sessions completed', rows });
+  }
+
+  return { start, end, dept, sections };
 }
