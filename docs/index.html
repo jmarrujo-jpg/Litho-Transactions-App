@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.12.8</span>
+      <span class="version" id="appVersion">v1.12.9</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3234,10 +3234,13 @@
   }
 
   function skidRowHtml(q, pickAttr) {
+    var isCut = !!q.cutType;
+    var label = isCut ? ('LOAD ' + esc(q.ticket)) : esc(q.ticket);
+    var cutLine = isCut && q.mill ? '<div class="sub">' + esc(q.cutType) + ' pallet &middot; mill ' + esc(q.mill) + '</div>' : '';
     return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
-      '<span class="ticket-id" style="font-size:14px">' + esc(q.ticket) + '</span> ' +
+      '<span class="ticket-id" style="font-size:14px">' + label + '</span> ' +
       '<span class="badge ' + badgeClassFor(q.status) + '">' + esc(q.status) + '</span> ' +
-      '<span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span>' +
+      '<span class="sub">' + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span>' + cutLine +
       '<div class="specs"><span><b>BW</b> ' + esc(q.bw) + '</span><span><b>Type</b> ' + esc(q.type) +
       '</span><span><b>Temper</b> ' + esc(q.temper) + '</span></div></div>' +
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px" ' + pickAttr + '="' + esc(q.skidId) + '">Select</button></div>';
@@ -3729,8 +3732,9 @@
         var comp = (p.composition || []).map(function (c) { return 'Mill ' + esc(c.mill) + ' (' + esc(c.qty) + (c.ticket ? ', ' + esc(c.ticket) : '') + ')'; }).join(', ');
         var mixed = (p.composition || []).length > 1 ? ' <span class="badge wip">mixed mill</span>' : '';
         var runnable = p.skidId ? ' &middot; runnable skid <b>' + esc(p.skidId) + '</b>' : '';
+        var head = p.loadNo ? 'LOAD ' + esc(p.loadNo) : esc(p.palletId);
         pHtml += '<div class="queue-item"><div style="min-width:0">' +
-          '<div class="ticket-id" style="font-size:14px">' + esc(p.palletId) + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' pieces</span>' + mixed + '</div>' +
+          '<div class="ticket-id" style="font-size:16px">' + head + ' <span class="sub" style="font-weight:400">' + esc(p.outputCount) + ' pieces</span>' + mixed + '</div>' +
           '<div class="sub">' + (comp || 'no sources') + runnable + '</div></div>' +
           (isOpen ? '<button class="btn danger" style="padding:6px 10px;font-size:13px" data-pdel="' + esc(p.palletId) + '">Remove</button>' : '') +
           '</div>';
@@ -3773,7 +3777,9 @@
       runMutation('addSlitterPallet', [currentSlitter.sessionId, outputCount, slitterComp.slice(), notes, currentSlitter.operator, newOpId()],
         function (updated) {
           if (updated && updated.duplicate) { toast('Already added'); btn.disabled = false; btn.textContent = 'Add pallet to session'; return; }
-          toast('Pallet added');
+          var madePallets = (updated && updated.pallets) || [];
+          var newLoad = madePallets.length ? madePallets[madePallets.length - 1].loadNo : '';
+          if (newLoad) { showInfo('Pallet made — LOAD ' + newLoad, 'Write "LOAD ' + newLoad + '" on the physical pallet. That is now its ticket number.'); } else { toast('Pallet added'); }
           slitterComp = []; slitPicked = null;
           // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.
           google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();

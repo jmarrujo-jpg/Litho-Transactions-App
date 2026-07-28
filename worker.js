@@ -32,7 +32,7 @@ const PRODUCTION_HEADERS = ['Run ID', 'Created On', 'Operator', 'Machine', 'Stat
 const SLITTER_SESSIONS = 'Slitter Sessions';
 const SLITTER_SESSION_HEADERS = ['Session ID', 'Slitter', 'Kind', 'Operator', 'Created On', 'Status', 'Pallet Count', 'Notes', 'Op ID'];
 const SLITTER_PALLETS = 'Slitter Pallets';
-const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output Count', 'Composition', 'Skid ID', 'Notes', 'Op ID'];
+const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output Count', 'Composition', 'Skid ID', 'Load #', 'Notes', 'Op ID'];
 
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-11' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-12' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -349,7 +349,7 @@ async function getAllTickets(sheets) {
     skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
-    row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', countedOn: toYMD(o['Counted At']),
+    row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', loadNo: o['Load #'] || '', countedOn: toYMD(o['Counted At']),
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
@@ -1335,7 +1335,7 @@ async function slitterPalletsOf(sheets, sessionId) {
   try { rows = (await readObjects(sheets, SLITTER_PALLETS, true)).rows; } catch (e) { return []; }
   return rows.filter((o) => String(o['Session ID']).trim() === String(sessionId).trim()).map((o) => ({
     palletId: o['Pallet ID'], sessionId: o['Session ID'], createdOn: toYMD(o['Created On']),
-    outputCount: num(o['Output Count']), composition: parseComposition(o['Composition']), skidId: o['Skid ID'] || '', notes: o['Notes'] || '',
+    outputCount: num(o['Output Count']), composition: parseComposition(o['Composition']), skidId: o['Skid ID'] || '', loadNo: o['Load #'] || '', notes: o['Notes'] || '',
   }));
 }
 
@@ -1378,17 +1378,31 @@ async function recountSlitter(sheets, sessionId) {
   return count;
 }
 
+// Cut/child pallets get a short, app-generated Load # (starts at 1001) that an operator can write
+// on the physical pallet; it becomes the pallet's primary ticket number. Sequenced off the max
+// existing Load # so it never collides, independent of the SKD- / SLT- id spaces.
+function nextLoadNumber(rows) {
+  let max = 1000;
+  for (const o of rows) {
+    const v = parseInt(String((o && o['Load #']) || '').replace(/[^0-9]/g, ''), 10);
+    if (!isNaN(v) && v > max) max = v;
+  }
+  return max + 1;
+}
+
 // Mint a runnable Steel Tickets skid for a cut pallet. Status 'Cut' keeps it out of the Litho /
 // Count / Job screens (which only look at Current/WIP/Pending) while making it selectable in the
-// metals run picker. Its Ticket is the pallet id; the parent tickets/mills live in Mill + Comments
-// and the full composition stays on the Slitter Pallets row. Value/weight is intentionally left
-// blank for now (deferred). Returns the new Skid ID.
+// metals run picker. Its Ticket IS the app-generated Load # — the primary, writable pallet number;
+// the parent tickets/mills live in Mill + Comments and the full composition stays on the Slitter
+// Pallets row. Value/weight is intentionally left blank for now (deferred). Returns { skidId, loadNo }.
 async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machine) {
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Mill');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut Type');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Load #');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
+  const loadNo = nextLoadNumber(master.rows);
   // Copy steel specs from the first source skid we can find, so the run picker shows sensible specs.
   let src = null;
   for (const c of comp) {
@@ -1399,16 +1413,16 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const mills = comp.map((c) => String((c && c.mill) || '').trim()).filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
   const parents = comp.map((c) => (c && c.ticket ? c.ticket : 'Mill ' + (c && c.mill)) + ' (' + ((c && c.qty) || 0) + ')').join(', ');
   const row = {
-    'Skid ID': skidId, 'Ticket': palletId, 'Status': STATUS.CUT, 'QTY/LOAD': num(outputCount),
+    'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'Status': STATUS.CUT, 'QTY/LOAD': num(outputCount),
     'Mill': mills.join(' / '), 'Cut Type': cutType,
-    'Comments': cutType + ' pallet cut on ' + (machine || '') + ' from: ' + parents,
+    'Comments': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
   };
   if (src) {
     ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'Coil/Sheet'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
   }
   await appendRowObj(sheets, MASTER, ens.headers, row);
-  return skidId;
+  return { skidId: skidId, loadNo: loadNo };
 }
 
 async function addSlitterPallet(sheets, sessionId, outputCount, composition, notes, operator, opId) {
@@ -1431,12 +1445,13 @@ async function addSlitterPallet(sheets, sessionId, outputCount, composition, not
   const palletId = sessionId + '-P' + n;
   // Mint the runnable Cut skid (slit -> lines, scroll -> press) that carries the parent tickets.
   const cutType = (s['Kind'] || 'Slitter') === 'Scroll' ? 'Scroll' : 'Slit';
-  const cutSkid = await createCutSkid(sheets, palletId, cutType, outputCount, comp, s['Slitter']);
+  const cut = await createCutSkid(sheets, palletId, cutType, outputCount, comp, s['Slitter']);
   let ens = await ensureColumn(sheets, SLITTER_PALLETS, p0.headers, 'Skid ID');
+  ens = await ensureColumn(sheets, SLITTER_PALLETS, ens.headers, 'Load #');
   ens = await ensureColumn(sheets, SLITTER_PALLETS, ens.headers, 'Op ID');
   await appendRowObj(sheets, SLITTER_PALLETS, ens.headers, {
     'Pallet ID': palletId, 'Session ID': sessionId, 'Created On': todayYMD(),
-    'Output Count': num(outputCount), 'Composition': JSON.stringify(comp), 'Skid ID': cutSkid, 'Notes': notes || '', 'Op ID': opId || '',
+    'Output Count': num(outputCount), 'Composition': JSON.stringify(comp), 'Skid ID': cut.skidId, 'Load #': cut.loadNo, 'Notes': notes || '', 'Op ID': opId || '',
   });
   await recountSlitter(sheets, sessionId);
   return getSlitterDetail(sheets, sessionId);
