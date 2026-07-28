@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-15' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-16' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1452,10 +1452,16 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   if (src) {
     ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'Coil/Sheet'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
   }
-  // Append against the freshly re-read sheet header (not the concatenated ens.headers): if the live
-  // header row is wider/narrower than the pre-ensure copy, ens.headers can be misaligned and the
-  // 'Load #' cell would land in the wrong column, which is what made every pallet read back as 1001.
-  await appendRowObj(sheets, MASTER, master.headers, row);
+  // Append the positional row, then STAMP the identity cells by column name onto the new row. The
+  // positional append can misalign when the live header row reads back ragged (wider/narrower than
+  // our copy) — that dropped the Load #/Ticket/Skid ID into the wrong column, so it read back blank
+  // and every pallet came out 1001. Stamping by the column map guarantees these land correctly
+  // regardless of the append's alignment.
+  const rowArr = master.headers.map((h) => (row.hasOwnProperty(h) ? row[h] : ''));
+  const res = await sheets.append(MASTER, rowArr);
+  const updRange = res && res.updates && res.updates.updatedRange ? String(res.updates.updatedRange) : '';
+  const rm = updRange.match(/(\d+)\s*$/);
+  if (rm) await stampCells(sheets, MASTER, parseInt(rm[1], 10), master.map, row);   // stamp every field by column name
   return { skidId: skidId, loadNo: loadNo };
 }
 
