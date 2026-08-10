@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-19' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-20' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -588,7 +588,7 @@ async function logCoatingTx(sheets, o, opId) {
 }
 async function eventTx(sheets, o, opId) {
   await appendTx(sheets, {
-    'Timestamp': nowStamp(), 'Ticket': o.ticket, 'Pass Number': 0, 'Operator': o.operator || '',
+    'Timestamp': o.timestamp || nowStamp(), 'Ticket': o.ticket, 'Pass Number': 0, 'Operator': o.operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': o.itemText, 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': 0, 'Running Total After Pass': o.runningTotal || 0, 'Notes': o.note || '', 'Job Name': '', 'Skid ID': o.skidId || '',
   }, opId);
@@ -1317,20 +1317,17 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
 // keys off so these show up in their own department-report section, separate from run completions
 // and slitter sources). Already-Used or unknown skids are skipped, not errored, so one bad row in
 // a batch never blocks the rest. opId-deduped like the other mutations.
-// usedDate (YYYY-MM-DD) is the production date the operator chose (defaults to today when blank or
-// malformed); it lands in 'Finished On' so the report groups by the day the work happened. 'Used At'
-// separately records the full timestamp of the moment the mark was made (date + time), so the actual
-// action is auditable even when the production date is backdated.
+// usedDate (YYYY-MM-DD) is the date the operator chose in the selector (defaults to today when blank
+// or malformed). By request, this flow is date-only: the chosen date is the single source of truth —
+// it lands in 'Finished On' (and the audit entry) with NO wall-clock time recorded anywhere.
 async function markUsedDirect(sheets, skidIds, usedDate, opId) {
   if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, skipped: 0, duplicate: true, results: [] };
   const ids = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
   if (!ids.length) throw new Error('No skids to mark.');
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(usedDate || '').trim()) ? String(usedDate).trim() : todayYMD();
-  const stamp = nowStamp();
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Finished On');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
-  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used At');
   master = await readTab(sheets, MASTER);
   const results = [];
   let opRecorded = false;
@@ -1339,13 +1336,13 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
     if (!obj) { results.push({ skidId, ok: false, reason: 'not found' }); continue; }
     if (String(obj['Status']) === STATUS.USED) { results.push({ skidId, ticket: obj['Ticket'], ok: false, reason: 'already Used' }); continue; }
     await stampCells(sheets, MASTER, obj.__row, master.map, {
-      'Status': STATUS.USED, 'Finished On': date, 'Used Via': 'Direct', 'Used At': stamp, 'Last Updated At': stamp });
+      'Status': STATUS.USED, 'Finished On': date, 'Used Via': 'Direct', 'Last Updated At': date });
     await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION (DIRECT)',
-      operator: '', note: 'Marked Used in Production (direct) for ' + date + ' at ' + stamp, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
+      operator: '', note: 'Marked Used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
     opRecorded = true;
     results.push({ skidId, ticket: obj['Ticket'], ok: true });
   }
-  return { ok: true, marked: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, usedDate: date, markedAt: stamp, results };
+  return { ok: true, marked: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================
@@ -1921,7 +1918,7 @@ async function getDepartmentReport(sheets, start, end, dept) {
       if ((o['Status'] || '') !== STATUS.USED) return;
       if (String(o['Used Via'] || '') !== 'Direct') return;   // only the quick-mark flow, not runs/slitter
       if (!inRange(o['Finished On'], start, end)) return;
-      rows.push({ date: toYMD(o['Finished On']), markedAt: o['Used At'] || '', ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });
+      rows.push({ date: toYMD(o['Finished On']), ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });
     });
     rows.sort(byDate);
     sections.push({ key: 'direct', label: 'Used in Production (direct)', rows });
