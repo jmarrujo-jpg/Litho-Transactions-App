@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.15.1</span>
+      <span class="version" id="appVersion">v1.16.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3078,13 +3078,28 @@
   // 'USED IN PRODUCTION (DIRECT)' audit entry and shows up in the Reports "Used in Production
   // (direct)" section.
   var usedBatch = [];   // [{ skidId, ticket, mill }] pending this session
+  var usedTab = 'skids'; // Used-in-Production sub-tab: 'skids' (quick mark) | 'coil' (Coil Line)
 
+  // Used in Production is two sub-tabs: the quick skid mark, and Coil Line (cut a coil into skids).
   function renderUsedHome() {
     state.view = 'usedHome';
     var view = document.getElementById('view');
     if (!view) return;
     nextViewToken();
-    view.innerHTML =
+    var chips = [['skids', '✅ Mark Skids Used'], ['coil', '🧵 Coil Line']].map(function (c) {
+      return '<button data-usedtab="' + c[0] + '"' + (usedTab === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+    view.innerHTML = '<div class="tabbar">' + chips + '</div><div id="usedBody"></div>';
+    Array.prototype.forEach.call(view.querySelectorAll('[data-usedtab]'), function (b) {
+      b.onclick = function () { usedTab = b.getAttribute('data-usedtab'); renderUsedHome(); };
+    });
+    if (usedTab === 'coil') renderCoilLine(); else renderUsedSkids();
+  }
+
+  function renderUsedSkids() {
+    var body = document.getElementById('usedBody');
+    if (!body) return;
+    body.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Used in Production</h3>' +
         '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to today.</div>' +
@@ -3224,6 +3239,152 @@
             var b2 = document.getElementById('usedMarkBtn');
             if (b2) { b2.disabled = false; renderUsedList(); }
           });
+      });
+  }
+
+  // ----- Coil Line: cut a received coil (C/S = 'C') into child skids -----
+  // Pick a coil, enter the weight + quantity of each skid it was cut into, and cut it. The coil is
+  // marked Used; each new skid keeps the coil's Mill + specs (Mill is the link back to the coil) and
+  // gets a ticket = the cut date + a running per-day sequence. Only ticket, weight and quantity change.
+  var coilSel = null;                        // selected coil: { skidId, ticket, mill, weight, qty }
+  var coilRows = [{ weight: '', qty: '' }];  // the cut skids being entered
+
+  // Coils that can be cut: C/S = 'C', still active, not already a cut-child (Split Of) or a cut pallet.
+  function coilEligible() {
+    return allCache.filter(function (t) {
+      if (String(t.cs || '').toUpperCase() !== 'C') return false;
+      if (t.splitOf) return false;
+      if (t.cutType) return false;
+      if (['Used', 'Missing'].indexOf(t.status) !== -1) return false;
+      return true;
+    });
+  }
+
+  function renderCoilLine() {
+    var body = document.getElementById('usedBody');
+    if (!body) return;
+    if (!coilSel) {
+      body.innerHTML =
+        '<div class="card">' +
+          '<h3 style="margin-top:0">Coil Line</h3>' +
+          '<div class="sub" style="margin-bottom:12px">Pick a coil to cut into skids. Each new skid keeps the coil’s Mill and specs — only the ticket (the cut date), weight and quantity change. The coil is marked Used.</div>' +
+          '<div class="field"><label>Find a coil (ticket / skid / mill)</label><input id="coilSearch" placeholder="type to search…" autocomplete="off"></div>' +
+          '<div id="coilPicker"></div>' +
+        '</div>';
+      var s = document.getElementById('coilSearch');
+      s.oninput = function () { renderCoilPicker(s.value); };
+      ensureAllCache(function () { renderCoilPicker(s.value); });
+      renderCoilPicker('');
+      return;
+    }
+    var c = coilSel;
+    body.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Coil Line</h3>' +
+        '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+          '<span class="ticket-id">' + esc(c.ticket || '(no ticket)') + '</span> ' +
+          '<span class="sub">' + esc(c.skidId) + (c.mill ? ' &middot; Mill ' + esc(c.mill) : '') +
+          (c.weight ? ' &middot; wt ' + esc(c.weight) : '') + (c.qty ? ' &middot; qty ' + esc(c.qty) : '') + '</span></div>' +
+          '<button class="btn secondary" id="coilChangeBtn" style="padding:8px 14px">Change</button></div>' +
+        '<div class="field" style="margin-top:10px"><label>Date cut</label><input type="date" id="coilDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">Cut skids — weight &amp; quantity of each</h3>' +
+        '<div class="sub" style="margin-bottom:8px">Each row becomes a new skid, ticket dated the day it was cut. Everything else copies from the coil.</div>' +
+        '<div id="coilRowsBox"></div>' +
+        '<button class="btn secondary" id="coilAddRowBtn" style="width:100%;margin-top:8px">+ Add another skid</button>' +
+        '<button class="btn success" id="coilCutBtn" style="width:100%;margin-top:12px">Cut coil &amp; create skids</button>' +
+      '</div>';
+    document.getElementById('coilChangeBtn').onclick = function () { coilSel = null; renderCoilLine(); };
+    document.getElementById('coilAddRowBtn').onclick = function () { syncCoilRows(); coilRows.push({ weight: '', qty: '' }); renderCoilRows(); };
+    document.getElementById('coilCutBtn').onclick = coilCutSubmit;
+    renderCoilRows();
+  }
+
+  function renderCoilPicker(term) {
+    var box = document.getElementById('coilPicker');
+    if (!box) return;
+    term = (term || '').trim().toLowerCase();
+    var rows = coilEligible().filter(function (t) {
+      if (!term) return true;
+      return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1 || String(t.mill).toLowerCase().indexOf(term) !== -1;
+    }).slice(0, 25);
+    if (!rows.length) { box.innerHTML = '<div class="sub">' + (allCache.length ? ('No coils' + (term ? ' match.' : ' available.')) : 'Loading&hellip;') + '</div>'; return; }
+    var html = '';
+    rows.forEach(function (t) {
+      html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+        '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.weight ? ' &middot; wt ' + esc(t.weight) : '') + '</span></div>' +
+        '<button class="btn success" style="padding:8px 14px" data-coil="' + esc(t.skidId) + '">Select</button></div>';
+    });
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-coil]'), function (b) {
+      b.onclick = function () {
+        var t = allCache.filter(function (x) { return x.skidId === b.getAttribute('data-coil'); })[0];
+        if (!t) return;
+        coilSel = { skidId: t.skidId, ticket: t.ticket, mill: t.mill, weight: t.weight, qty: t.qty };
+        coilRows = [{ weight: '', qty: '' }];
+        renderCoilLine();
+      };
+    });
+  }
+
+  // Read the current weight/qty inputs back into coilRows (so add/remove doesn't lose typed values).
+  function syncCoilRows() {
+    var box = document.getElementById('coilRowsBox');
+    if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-crow]'), function (rowEl) {
+      var i = Number(rowEl.getAttribute('data-crow'));
+      if (coilRows[i]) { coilRows[i].weight = rowEl.querySelector('.crWeight').value; coilRows[i].qty = rowEl.querySelector('.crQty').value; }
+    });
+  }
+
+  function renderCoilRows() {
+    var box = document.getElementById('coilRowsBox');
+    if (!box) return;
+    if (!coilRows.length) coilRows.push({ weight: '', qty: '' });
+    var html = '';
+    coilRows.forEach(function (r, i) {
+      html += '<div class="row" data-crow="' + i + '" style="align-items:flex-end;margin-bottom:6px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Weight</label><input type="number" class="crWeight" value="' + esc(r.weight) + '" placeholder="lbs"></div>' +
+        '<div class="field" style="flex:1;margin:0 8px"><label>Quantity</label><input type="number" class="crQty" value="' + esc(r.qty) + '" placeholder="sheets"></div>' +
+        '<button class="btn danger" data-crdel="' + i + '" style="padding:10px 12px">&times;</button></div>';
+    });
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-crow]'), function (rowEl) {
+      var i = Number(rowEl.getAttribute('data-crow'));
+      rowEl.querySelector('.crWeight').oninput = function () { coilRows[i].weight = this.value; };
+      rowEl.querySelector('.crQty').oninput = function () { coilRows[i].qty = this.value; };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-crdel]'), function (b) {
+      b.onclick = function () { syncCoilRows(); coilRows.splice(Number(b.getAttribute('data-crdel')), 1); if (!coilRows.length) coilRows.push({ weight: '', qty: '' }); renderCoilRows(); };
+    });
+  }
+
+  function coilCutSubmit() {
+    syncCoilRows();
+    var dateEl = document.getElementById('coilDate');
+    var date = (dateEl && dateEl.value) ? dateEl.value : todayStr();
+    var skids = coilRows.map(function (r) { return { weight: r.weight, qty: r.qty }; })
+      .filter(function (r) { return String(r.weight).trim() !== '' || String(r.qty).trim() !== ''; });
+    if (!skids.length) { toast('Add at least one skid with a weight or quantity'); return; }
+    var c = coilSel;
+    showConfirm('Cut coil ' + (c.ticket || c.skidId) + ' into ' + skids.length + ' skid' + (skids.length === 1 ? '' : 's') + '?',
+      'The coil is marked Used on ' + date + '. Each new skid gets a ticket dated ' + date + ', keeps the coil’s Mill (' + (c.mill || '?') + ') and specs, with the weight & quantity you entered.',
+      function () {
+        var btn = document.getElementById('coilCutBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Cutting…'; }
+        runMutation('cutCoil', [c.skidId, date, skids, newOpId()],
+          function (res) {
+            var made = (res && res.created != null) ? res.created : skids.length;
+            var list = (res && res.tickets) ? res.tickets.map(function (t) { return t.ticket; }).join(', ') : '';
+            markCacheStatus(c.skidId, 'Used');
+            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();  // pull the new skids + used coil
+            coilSel = null; coilRows = [{ weight: '', qty: '' }];
+            showInfo('Coil cut', made + ' skid' + (made === 1 ? '' : 's') + ' created' + (list ? ' — tickets ' + list : '') + '. The coil is marked Used.',
+              function () { renderCoilLine(); });
+          },
+          function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('coilCutBtn'); if (b2) { b2.disabled = false; b2.textContent = 'Cut coil & create skids'; } });
       });
   }
 
