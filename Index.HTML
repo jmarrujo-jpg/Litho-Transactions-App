@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.14.2</span>
+      <span class="version" id="appVersion">v1.14.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -974,8 +974,8 @@
       head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cost</th><th>Litho</th><th>Cut from</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
     } else if (sec.key === 'direct') {
-      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Mill</th><th>Cost</th><th>Litho</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.mill || '—') + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td></tr>'; }).join('');
+      head = '<tr><th>Date</th><th>Marked at</th><th>Ticket</th><th>Skid</th><th>Mill</th><th>Cost</th><th>Litho</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.markedAt || '—') + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.mill || '—') + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td></tr>'; }).join('');
     } else if (sec.key === 'count') {
       head = '<tr><th>Date</th><th>Session</th><th>By</th><th>Current</th><th>Promoted</th><th>WIP</th><th>Missing</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.sessionId) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.currentFound) + '</td><td>' + esc(x.promoted) + '</td><td>' + esc(x.wipFound) + '</td><td>' + esc(x.missing) + '</td></tr>'; }).join('');
@@ -3056,7 +3056,8 @@
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Used in Production</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Today’s date is recorded automatically.</div>' +
+        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to today.</div>' +
+        '<div class="field"><label>Date used</label><input type="date" id="usedDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
         '<div class="row" style="align-items:flex-end">' +
           '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="usedAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
           '<button class="btn" id="usedAddBtn" style="margin-left:8px">+ Add</button>' +
@@ -3169,13 +3170,15 @@
   function usedMarkAll() {
     if (!usedBatch.length) return;
     var ids = usedBatch.map(function (b) { return b.skidId; });
+    var dateEl = document.getElementById('usedDate');
+    var date = (dateEl && dateEl.value) ? dateEl.value : todayStr();
     var n = ids.length;
     showConfirm('Mark ' + n + ' skid' + (n === 1 ? '' : 's') + ' Used in Production?',
-      'This records them as Used with today’s date. It does not go through a line, press, or slitter.',
+      'This records them as Used on ' + date + '. It does not go through a line, press, or slitter.',
       function () {
         var btn = document.getElementById('usedMarkBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
-        runMutation('markUsedDirect', [ids, newOpId()],
+        runMutation('markUsedDirect', [ids, date, newOpId()],
           function (res) {
             ids.forEach(function (id) { markCacheStatus(id, 'Used'); });
             usedBatch = [];
