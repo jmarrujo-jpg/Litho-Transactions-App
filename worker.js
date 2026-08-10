@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-23' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-24' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -157,8 +157,8 @@ async function handle(fn, args, env) {
       return markUsedDirect(sheets, args[0], args[1], args[2]);
     case 'migrateUsedDates': // () one-time: copy Finished On -> Used At
       return migrateUsedDates(sheets);
-    case 'cutCoil': // (coilSkidId, cutDate, coilLine, skids[{weight,qty}], opId)
-      return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'cutCoil': // (coilSkidId, cutDate, coilLine, skids[{weight,qty}], finish, opId)
+      return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -1380,12 +1380,13 @@ async function migrateUsedDates(sheets) {
 // 3-char suffix whose first digit is the coil line (1 or 2) and last two are that line's running
 // cut number for the day — e.g. 080126-101, 080126-102 on line 1; 080126-201 on line 2. Children
 // start as Current stock with Split Of = the coil. Date-only, no operator. skids = [{ weight, qty }].
-async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, opId) {
+async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opId) {
   if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, created: 0, tickets: [] };
   coilSkidId = String(coilSkidId || '').trim();
   if (!coilSkidId) throw new Error('Pick a coil to cut.');
   const list = (skids || []).map((s) => ({ weight: num(s && s.weight), qty: num(s && s.qty) }));
   if (!list.length) throw new Error('Add at least one cut skid.');
+  const finished = finish === false ? false : true;        // false = more to cut later; keep the coil open
   const line = Math.max(1, parseInt(coilLine, 10) || 1);   // coil line number -> first digit of the suffix
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(cutDate || '').trim()) ? String(cutDate).trim() : todayYMD();
   const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
@@ -1407,7 +1408,7 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, opId) {
   let seq = 0;
   master.rows.forEach((o) => { const m = seqRe.exec(String(o['Ticket'] || '').trim()); if (m) { const n = parseInt(m[1], 10); if (!isNaN(n) && n > seq) seq = n; } });
   // Columns that must NOT carry over to a fresh child (identity / lifecycle / the ones that change).
-  const RESET = ['Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'Used At', 'Used By', 'Used Via',
+  const RESET = ['Row', 'Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'Used At', 'Used By', 'Used Via',
     'Run ID', 'Loaded On', 'Finished On', 'Counted At', 'Counted By', 'First Coated At', 'First Coated By',
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
   const hasCS = master.headers.indexOf('C/S') !== -1;
@@ -1436,12 +1437,21 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, opId) {
     if (rm) await stampCells(sheets, MASTER, parseInt(rm[1], 10), master.map, row);   // ragged-safe: stamp identity by column name
     tickets.push({ skidId, ticket, weight: s.weight, qty: s.qty });
   }
-  // Mark the coil Used (date-only), tagged 'Coil' so it's distinct from the direct quick-mark.
-  await stampCells(sheets, MASTER, coil.__row, master.map, {
-    'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date });
-  await eventTx(sheets, { skidId: coilSkidId, ticket: coilTicket, itemText: 'COIL CUT — USED', operator: '',
-    note: 'Cut on coil line ' + line + ' into ' + tickets.length + ' skid(s) on ' + date + ': ' + tickets.map((t) => t.ticket).join(', '), timestamp: date, runningTotal: 0 }, opId || '');
-  return { ok: true, created: tickets.length, coilSkidId, coilTicket, coilLine: line, usedDate: date, tickets };
+  // Only mark the coil Used when it's FINISHED. If there's more to cut later, leave it available
+  // (Status untouched) so it can be selected again the next day and resume — the running tickets
+  // just continue under that day's date. Either way, stamp when it was last touched.
+  if (finished) {
+    await stampCells(sheets, MASTER, coil.__row, master.map, {
+      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date });   // 'Coil' distinguishes it from the direct quick-mark
+  } else {
+    await stampCells(sheets, MASTER, coil.__row, master.map, { 'Last Updated At': date });
+  }
+  await eventTx(sheets, { skidId: coilSkidId, ticket: coilTicket,
+    itemText: finished ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator: '',
+    note: 'Cut on coil line ' + line + ' into ' + tickets.length + ' skid(s) on ' + date +
+      (finished ? '' : ' — coil left open for more cutting') + ': ' + tickets.map((t) => t.ticket).join(', '),
+    timestamp: date, runningTotal: 0 }, opId || '');
+  return { ok: true, created: tickets.length, coilSkidId, coilTicket, coilLine: line, finished, usedDate: finished ? date : '', tickets };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================
