@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.14.1</span>
+      <span class="version" id="appVersion">v1.14.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -734,7 +734,7 @@
         renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': openLitho(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
-      case 'prodHome': case 'slitterHome': openProduction(); return; // a section home -> chooser
+      case 'prodHome': case 'slitterHome': case 'usedHome': openProduction(); return; // a section home -> chooser
       case 'prodAdd': case 'prodReview': openMetalsSection(metalsTab); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
@@ -909,7 +909,7 @@
     view.innerHTML =
       '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
         '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range.</div>' +
-        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'count', text: 'Count' }], reportDept) +
+        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'count', text: 'Count' }], reportDept) +
         '<div class="row">' +
           '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
           '<div class="field"><label>To</label><input type="date" id="reportTo" value="' + esc(today) + '"></div>' +
@@ -973,6 +973,9 @@
     } else if (sec.key === 'slitter' || sec.key === 'scrolls') {
       head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cost</th><th>Litho</th><th>Cut from</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
+    } else if (sec.key === 'direct') {
+      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Mill</th><th>Cost</th><th>Litho</th></tr>';
+      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.mill || '—') + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td></tr>'; }).join('');
     } else if (sec.key === 'count') {
       head = '<tr><th>Date</th><th>Session</th><th>By</th><th>Current</th><th>Promoted</th><th>WIP</th><th>Missing</th></tr>';
       body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.sessionId) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.currentFound) + '</td><td>' + esc(x.promoted) + '</td><td>' + esc(x.wipFound) + '</td><td>' + esc(x.missing) + '</td></tr>'; }).join('');
@@ -3020,10 +3023,12 @@
       '<div class="sub" style="margin:4px 0 16px;font-size:16px">Which department are you working in?</div>' +
       '<button class="btn" id="metalsPickLines" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
       '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
-      '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px">✂️&nbsp; Slitter Department</button>';
+      '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
+      '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>';
     document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
+    document.getElementById('metalsPickUsed').onclick = function () { openMetalsSection('used'); };
   }
 
   // Enter a chosen department full-screen. Back from a section home returns to the chooser.
@@ -3031,7 +3036,161 @@
     metalsTab = tab;
     showTabbar(false); showBack(true); setDept('Metals');
     if (tab === 'slitter') { state.view = 'slitterHome'; renderSlitterHome(); }
+    else if (tab === 'used') { state.view = 'usedHome'; renderUsedHome(); }
     else { state.view = 'prodHome'; renderProductionHome(tab === 'press' ? 'Press' : 'Line'); }
+  }
+
+  // ----- Used in Production (quick direct mark) -----
+  // A shortcut for marking skids Used without a run or slitter session. The operator builds a batch
+  // list (scan/type a ticket or skid to add), then hits one button to mark them all Used. Only the
+  // date is recorded — no operator, no machine — per the floor's request. Each marked skid gets a
+  // 'USED IN PRODUCTION (DIRECT)' audit entry and shows up in the Reports "Used in Production
+  // (direct)" section.
+  var usedBatch = [];   // [{ skidId, ticket, mill }] pending this session
+
+  function renderUsedHome() {
+    state.view = 'usedHome';
+    var view = document.getElementById('view');
+    if (!view) return;
+    nextViewToken();
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Used in Production</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Today’s date is recorded automatically.</div>' +
+        '<div class="row" style="align-items:flex-end">' +
+          '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="usedAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
+          '<button class="btn" id="usedAddBtn" style="margin-left:8px">+ Add</button>' +
+        '</div>' +
+        '<div id="usedPicker" style="margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">On the list <span class="sub" id="usedCount"></span></h3>' +
+        '<div id="usedListBox"></div>' +
+        '<button class="btn success" id="usedMarkBtn" style="width:100%;margin-top:12px">Mark all Used</button>' +
+      '</div>';
+
+    var input = document.getElementById('usedAddInput');
+    input.oninput = function () { renderUsedPicker(input.value); };
+    input.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); usedQuickAdd(input.value); } };
+    document.getElementById('usedAddBtn').onclick = function () { usedQuickAdd(input.value); };
+    document.getElementById('usedMarkBtn').onclick = usedMarkAll;
+    ensureAllCache(function () { renderUsedList(); renderUsedPicker(input.value); });
+    renderUsedList();
+  }
+
+  // Add the single skid that exactly matches a typed ticket/skid (used by Enter / the +Add button).
+  // If it's ambiguous or not an exact match, leave it to the picker list below.
+  function usedQuickAdd(term) {
+    term = (term || '').trim();
+    if (!term) return;
+    var lc = term.toLowerCase();
+    var matches = usedEligible().filter(function (t) {
+      return String(t.ticket).toLowerCase() === lc || String(t.skidId).toLowerCase() === lc;
+    });
+    if (matches.length === 1) { usedAdd(matches[0].skidId); return; }
+    if (!matches.length) { toast('No available skid matches "' + term + '"'); return; }
+    renderUsedPicker(term); // multiple — let them pick from the list
+  }
+
+  // Skids that can still be marked Used here: real source skids that aren't already Used/Missing and
+  // aren't cut pallets (those are output, not consumed here) and aren't already on the batch list.
+  function usedEligible() {
+    var onList = {};
+    usedBatch.forEach(function (b) { onList[b.skidId] = true; });
+    return allCache.filter(function (t) {
+      if (t.cutType) return false;
+      if (['Used', 'Missing'].indexOf(t.status) !== -1) return false;
+      if (onList[t.skidId]) return false;
+      return true;
+    });
+  }
+
+  function renderUsedPicker(term) {
+    var c = document.getElementById('usedPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    if (!term) { c.innerHTML = ''; return; }
+    var rows = usedEligible().filter(function (t) {
+      return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1;
+    }).slice(0, 10);
+    if (!rows.length) { c.innerHTML = '<div class="sub">No available skids match.</div>'; return; }
+    var html = '';
+    rows.forEach(function (t) {
+      html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+        '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.status && t.status !== 'Current' ? ' &middot; ' + esc(t.status) : '') + '</span></div>' +
+        '<button class="btn success" style="padding:8px 14px" data-uadd="' + esc(t.skidId) + '">+ Add</button></div>';
+    });
+    c.innerHTML = html;
+    Array.prototype.forEach.call(c.querySelectorAll('[data-uadd]'), function (b) {
+      b.onclick = function () { usedAdd(b.getAttribute('data-uadd')); };
+    });
+  }
+
+  function usedAdd(skidId) {
+    var t = allCache.filter(function (x) { return x.skidId === skidId; })[0];
+    if (!t) { toast('Skid not found'); return; }
+    if (usedBatch.some(function (b) { return b.skidId === skidId; })) return;
+    usedBatch.push({ skidId: t.skidId, ticket: t.ticket, mill: t.mill });
+    var input = document.getElementById('usedAddInput');
+    if (input) { input.value = ''; input.focus(); }
+    renderUsedPicker('');
+    renderUsedList();
+  }
+
+  function usedRemove(skidId) {
+    usedBatch = usedBatch.filter(function (b) { return b.skidId !== skidId; });
+    renderUsedList();
+    var input = document.getElementById('usedAddInput');
+    if (input) renderUsedPicker(input.value);
+  }
+
+  function renderUsedList() {
+    var box = document.getElementById('usedListBox');
+    var cnt = document.getElementById('usedCount');
+    var btn = document.getElementById('usedMarkBtn');
+    if (!box) return;
+    if (cnt) cnt.textContent = usedBatch.length ? '(' + usedBatch.length + ')' : '';
+    if (btn) { btn.disabled = !usedBatch.length; btn.textContent = usedBatch.length ? ('Mark ' + usedBatch.length + ' Used') : 'Mark all Used'; }
+    if (!usedBatch.length) { box.innerHTML = '<div class="sub">Nothing added yet.</div>'; return; }
+    var html = '';
+    usedBatch.forEach(function (b) {
+      html += '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(b.ticket || '(no ticket)') + '</span> ' +
+        '<span class="sub">' + esc(b.skidId) + (b.mill ? ' &middot; Mill ' + esc(b.mill) : '') + '</span></div>' +
+        '<button class="btn danger" style="padding:8px 12px" data-urem="' + esc(b.skidId) + '">Remove</button></div>';
+    });
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-urem]'), function (b) {
+      b.onclick = function () { usedRemove(b.getAttribute('data-urem')); };
+    });
+  }
+
+  function usedMarkAll() {
+    if (!usedBatch.length) return;
+    var ids = usedBatch.map(function (b) { return b.skidId; });
+    var n = ids.length;
+    showConfirm('Mark ' + n + ' skid' + (n === 1 ? '' : 's') + ' Used in Production?',
+      'This records them as Used with today’s date. It does not go through a line, press, or slitter.',
+      function () {
+        var btn = document.getElementById('usedMarkBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
+        runMutation('markUsedDirect', [ids, newOpId()],
+          function (res) {
+            ids.forEach(function (id) { markCacheStatus(id, 'Used'); });
+            usedBatch = [];
+            var marked = (res && res.marked != null) ? res.marked : n;
+            var skipped = (res && res.skipped) ? res.skipped : 0;
+            showInfo('Marked Used', marked + ' skid' + (marked === 1 ? '' : 's') + ' marked Used in Production.' +
+              (skipped ? ' ' + skipped + ' skipped (already Used or not found).' : ''),
+              function () { renderUsedHome(); });
+          },
+          function (err) {
+            toast('Error: ' + err.message);
+            var b2 = document.getElementById('usedMarkBtn');
+            if (b2) { b2.disabled = false; renderUsedList(); }
+          });
+      });
   }
 
   // ----- Log Work (Metal Lines / Press): start a run, resume open runs, or go to Review -----

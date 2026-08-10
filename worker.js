@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-17' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-18' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -153,6 +153,8 @@ async function handle(fn, args, env) {
       return runSkidPartial(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'finishRun': // (runId, usedMap, operator, opId)
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
+    case 'markUsedDirect': // (skidIds[], opId)
+      return markUsedDirect(sheets, args[0], args[1]);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -1309,6 +1311,36 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
   return getRunDetail(sheets, runId);
 }
 
+// Quick "Used in Production" shortcut — flips a batch of skids straight to Used with today's date,
+// WITHOUT a production run / slitter session. No operator or machine is recorded (by request); the
+// only stamps are Status=Used, Finished On=today, and Used Via='Direct' (the marker the report
+// keys off so these show up in their own department-report section, separate from run completions
+// and slitter sources). Already-Used or unknown skids are skipped, not errored, so one bad row in
+// a batch never blocks the rest. opId-deduped like the other mutations.
+async function markUsedDirect(sheets, skidIds, opId) {
+  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, skipped: 0, duplicate: true, results: [] };
+  const ids = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) throw new Error('No skids to mark.');
+  let master = await readTab(sheets, MASTER);
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Finished On');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
+  master = await readTab(sheets, MASTER);
+  const results = [];
+  let opRecorded = false;
+  for (const skidId of ids) {
+    const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === skidId)[0];
+    if (!obj) { results.push({ skidId, ok: false, reason: 'not found' }); continue; }
+    if (String(obj['Status']) === STATUS.USED) { results.push({ skidId, ticket: obj['Ticket'], ok: false, reason: 'already Used' }); continue; }
+    await stampCells(sheets, MASTER, obj.__row, master.map, {
+      'Status': STATUS.USED, 'Finished On': todayYMD(), 'Used Via': 'Direct', 'Last Updated At': nowStamp() });
+    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION (DIRECT)',
+      operator: '', note: 'Marked Used in Production (direct)', runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
+    opRecorded = true;
+    results.push({ skidId, ticket: obj['Ticket'], ok: true });
+  }
+  return { ok: true, marked: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, results };
+}
+
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================
 // A session ('Slitter Sessions', Kind = 'Slitter' | 'Scroll') groups the child pallets cut on one
 // machine. One source skid is "loaded" (Active Skid) at a time and cut into the in-progress child
@@ -1874,6 +1906,18 @@ async function getDepartmentReport(sheets, start, end, dept) {
     });
     rows.sort(byDate);
     sections.push({ key: 'litho', label: 'Litho — skids coated', rows });
+  }
+
+  if (want('direct')) {
+    const rows = [];
+    master.rows.forEach((o) => {
+      if ((o['Status'] || '') !== STATUS.USED) return;
+      if (String(o['Used Via'] || '') !== 'Direct') return;   // only the quick-mark flow, not runs/slitter
+      if (!inRange(o['Finished On'], start, end)) return;
+      rows.push({ date: toYMD(o['Finished On']), ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });
+    });
+    rows.sort(byDate);
+    sections.push({ key: 'direct', label: 'Used in Production (direct)', rows });
   }
 
   if (want('lines') || want('press')) {
