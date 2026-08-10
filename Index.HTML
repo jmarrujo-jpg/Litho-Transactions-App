@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.15.0</span>
+      <span class="version" id="appVersion">v1.15.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1684,13 +1684,18 @@
   }
 
   // Renders the SQF trace table from a skid's Litho Transactions rows.
+  // Full activity history for a skid: coatings AND lifecycle events (e.g. "USED IN PRODUCTION").
+  // Sorted oldest-first by when it happened, so the story reads top to bottom and the used-in-
+  // production line shows the date it was used. Detail = the coating group, or the event's note.
   function renderHistoryTable(rows) {
-    if (!rows || !rows.length) return '<div class="sub">No passes logged yet.</div>';
-    var html = '<table><thead><tr><th>#</th><th>Item</th><th>Group</th><th>Cost</th><th>Operator</th><th>Job</th><th>Running Total</th></tr></thead><tbody>';
-    rows.forEach(function (r) {
-      html += '<tr><td>' + esc(r.passNumber) + '</td><td>' + esc(r.item) + '</td><td>' + esc(r.group) +
-        (r.sub ? ' / ' + esc(r.sub) : '') + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
-        '</td><td>' + esc(r.jobName) + '</td><td>' + money(r.runningTotal) + '</td></tr>';
+    if (!rows || !rows.length) return '<div class="sub">Nothing logged yet.</div>';
+    var sorted = rows.slice().sort(function (a, b) { return String(a.timestamp || '').localeCompare(String(b.timestamp || '')); });
+    var html = '<table><thead><tr><th>When</th><th>Item</th><th>Detail</th><th>Cost</th><th>Operator</th><th>Running Total</th></tr></thead><tbody>';
+    sorted.forEach(function (r) {
+      var detail = r.group ? (esc(r.group) + (r.sub ? ' / ' + esc(r.sub) : '')) : (r.notes ? esc(r.notes) : (r.jobName ? esc(r.jobName) : ''));
+      html += '<tr><td class="sub" style="white-space:nowrap">' + esc(r.timestamp || '') + '</td><td>' + esc(r.item) +
+        '</td><td class="sub">' + detail + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
+        '</td><td>' + money(r.runningTotal) + '</td></tr>';
     });
     return html + '</tbody></table>';
   }
@@ -1967,6 +1972,14 @@
     var stamps = [];
     if (steel['First Coated At']) stamps.push('First coated ' + fmtStamp(steel['First Coated At'], steel['First Coated By']));
     if (steel['Approved At']) stamps.push('Approved ' + fmtStamp(steel['Approved At'], steel['Approved By']));
+    // When the skid was used in production — pulled straight from Used At (old rows fall back to
+    // Finished On), with how it was used (a run, the direct mark, or cut on a slitter/scroll).
+    var usedWhen = steel['Used At'] || steel['Finished On'] || '';
+    if (usedWhen) {
+      var how = (steel['Used Via'] === 'Direct') ? 'used in production'
+        : (steel['Run ID'] ? 'run ' + steel['Run ID'] : (status === 'Used' ? 'cut/used' : ''));
+      stamps.push('Used ' + fmtStamp(usedWhen, steel['Used By']) + (how ? ' &middot; ' + esc(how) : ''));
+    }
     if (stamps.length) html += '<div class="sub" style="margin-bottom:6px">' + stamps.join(' &middot; ') + '</div>';
     if (status === 'Current') {
       html += '<div class="sub">In Current Steel — no litho applied yet. Logging a coating sends it to WIP.</div>';
