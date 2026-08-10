@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-20' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-21' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -155,6 +155,8 @@ async function handle(fn, args, env) {
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
     case 'markUsedDirect': // (skidIds[], usedDate, opId)
       return markUsedDirect(sheets, args[0], args[1], args[2]);
+    case 'migrateUsedDates': // () one-time: copy Finished On -> Used At
+      return migrateUsedDates(sheets);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -308,6 +310,9 @@ function todayYMD() {
 // Tolerates thousands-separator commas ("4,405" -> 4405) which appear in some weight cells;
 // plain Number() would read those as NaN and silently treat the weight as 0.
 function num(v) { return Number(String(v == null ? '' : v).replace(/,/g, '')) || 0; }
+// The skid's "used" date/time lives in 'Used At'. Historically it was 'Finished On' (date only);
+// we still read that as a fallback so pre-migration rows keep counting until the old column is gone.
+function usedAt(o) { return o['Used At'] || o['Finished On'] || ''; }
 async function readObjects(sheets, tab, unformatted) {
   const values = await sheets.read(tab, unformatted);
   if (!values.length) return { headers: [], rows: [] };
@@ -375,7 +380,7 @@ async function getUsedTickets(sheets) {
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
     bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || STATUS.USED,
     row: o['Row'] != null ? o['Row'] : '', runId: o['Run ID'] || '',
-    finishedOn: toYMD(o['Finished On']), usedBy: o['Used By'] || '',
+    finishedOn: toYMD(usedAt(o)), usedBy: o['Used By'] || '',
   })).sort((a, b) => String(b.finishedOn).localeCompare(String(a.finishedOn)));
 }
 
@@ -393,7 +398,7 @@ function familyOf(rows, ticket) {
         skidId: o['Skid ID'] || '', ticket: tk, status: o['Status'] || STATUS.CURRENT,
         qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '', weight: o['Weight'] != null ? o['Weight'] : '',
         litho: num(o['Litho']), splitOf: o['Split Of'] || '', isOriginal: String(tk).trim() === String(base).trim(),
-        runId: o['Run ID'] || '', finishedOn: toYMD(o['Finished On']), usedBy: o['Used By'] || '',
+        runId: o['Run ID'] || '', finishedOn: toYMD(usedAt(o)), usedBy: o['Used By'] || '',
         missingOn: toYMD(o['Missing At']),
       };
     });
@@ -1041,7 +1046,7 @@ async function ensureTab(sheets, title, headers) {
 async function runDetailSkids(masterRows, runId) {
   return masterRows.filter((o) => String(o['Run ID']).trim() === String(runId).trim()).map((o) => ({
     skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'] || '', loadedOn: toYMD(o['Loaded On']),
-    finishedOn: toYMD(o['Finished On']), qty: num(o['QTY/LOAD']), weight: num(o['Weight']),
+    finishedOn: toYMD(usedAt(o)), qty: num(o['QTY/LOAD']), weight: num(o['Weight']),
     bw: o['BW'], type: o['TC'], temper: o['TM'], endUse: o['End Use'], width: o['Width'], length: o['Length'],
     litho: num(o['Litho']), notes: o['Litho Notes'] || '',
   }));
@@ -1230,7 +1235,7 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
   delete remObj.__row;
   Object.assign(remObj, {
     'Ticket': base, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
-    'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used By': '', 'Split Of': skidId,
+    'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used At': '', 'Used By': '', 'Split Of': skidId,
     'QTY/LOAD': remQty, 'Weight': remWeight, 'Counted At': '', 'Counted By': '',
     'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' (' + context + ') on ' + todayYMD(),
     'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
@@ -1282,7 +1287,7 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
   if (String(run['Status']) === 'Finished') return getRunDetail(sheets, runId);
   usedMap = usedMap || {};
   let master = await readTab(sheets, MASTER);
-  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Finished On');
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used By');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Split Of');
   master = await readTab(sheets, MASTER);
@@ -1302,7 +1307,7 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
     }
 
     await stampCells(sheets, MASTER, obj.__row, master.map, {
-      'Status': STATUS.USED, 'Finished On': todayYMD(), 'Used By': operator || '',
+      'Status': STATUS.USED, 'Used At': nowStamp(), 'Used By': operator || '',
       'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
     await eventTx(sheets, { skidId, ticket, itemText: 'USED IN PRODUCTION', operator,
       note: 'Used ' + used + (onHand ? ' of ' + onHand : '') + ' sheets on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, '');
@@ -1313,20 +1318,21 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
 
 // Quick "Used in Production" shortcut — flips a batch of skids straight to Used with today's date,
 // WITHOUT a production run / slitter session. No operator or machine is recorded (by request); the
-// only stamps are Status=Used, Finished On=today, and Used Via='Direct' (the marker the report
+// only stamps are Status=Used, Used At=<date>, and Used Via='Direct' (the marker the report
 // keys off so these show up in their own department-report section, separate from run completions
 // and slitter sources). Already-Used or unknown skids are skipped, not errored, so one bad row in
 // a batch never blocks the rest. opId-deduped like the other mutations.
 // usedDate (YYYY-MM-DD) is the date the operator chose in the selector (defaults to today when blank
 // or malformed). By request, this flow is date-only: the chosen date is the single source of truth —
-// it lands in 'Finished On' (and the audit entry) with NO wall-clock time recorded anywhere.
+// it lands in 'Used At' (and the audit entry) with NO wall-clock time recorded anywhere. (Runs write
+// a full date+time into 'Used At'; this quick-mark deliberately writes date only.)
 async function markUsedDirect(sheets, skidIds, usedDate, opId) {
   if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, skipped: 0, duplicate: true, results: [] };
   const ids = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
   if (!ids.length) throw new Error('No skids to mark.');
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(usedDate || '').trim()) ? String(usedDate).trim() : todayYMD();
   let master = await readTab(sheets, MASTER);
-  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Finished On');
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
   master = await readTab(sheets, MASTER);
   const results = [];
@@ -1336,13 +1342,31 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
     if (!obj) { results.push({ skidId, ok: false, reason: 'not found' }); continue; }
     if (String(obj['Status']) === STATUS.USED) { results.push({ skidId, ticket: obj['Ticket'], ok: false, reason: 'already Used' }); continue; }
     await stampCells(sheets, MASTER, obj.__row, master.map, {
-      'Status': STATUS.USED, 'Finished On': date, 'Used Via': 'Direct', 'Last Updated At': date });
+      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Direct', 'Last Updated At': date });
     await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION (DIRECT)',
       operator: '', note: 'Marked Used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
     opRecorded = true;
     results.push({ skidId, ticket: obj['Ticket'], ok: true });
   }
   return { ok: true, marked: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
+}
+
+// One-time maintenance: the skid "used" date moved from 'Finished On' to 'Used At'. This copies any
+// existing 'Finished On' value into 'Used At' where 'Used At' is still blank, so historical used
+// skids keep showing in the reports once the old 'Finished On' column is deleted from the sheet.
+// Idempotent — safe to run more than once (it only fills blanks and never overwrites).
+async function migrateUsedDates(sheets) {
+  let master = await readTab(sheets, MASTER);
+  const e = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
+  master = await readTab(sheets, MASTER);
+  if (!master.map['Finished On']) return { ok: true, migrated: 0, note: 'No "Finished On" column found — nothing to migrate.' };
+  const uaCol = master.map['Used At'];
+  const data = [];
+  master.rows.forEach((o) => {
+    if (o['Finished On'] && !o['Used At']) data.push({ range: "'" + MASTER + "'!" + colLetter(uaCol) + o.__row, values: [[o['Finished On']]] });
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return { ok: true, migrated: data.length };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================
@@ -1547,9 +1571,11 @@ async function markSkidUsed(sheets, skidId, operator, note) {
   const master = await readTab(sheets, MASTER);
   const o = master.rows.filter((r) => String(r['Skid ID']).trim() === String(skidId).trim())[0];
   if (!o || String(o['Status']) === STATUS.USED) return;
-  const ens = await ensureColumn(sheets, MASTER, master.headers, 'Used By');
+  let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used By');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used At');
+  // Slitter/Scroll sources are cut up, not "finished" like a line/press run — record date only.
   await stampCells(sheets, MASTER, o.__row, ens.map, {
-    'Status': STATUS.USED, 'Finished On': todayYMD(), 'Used By': operator || '',
+    'Status': STATUS.USED, 'Used At': todayYMD(), 'Used By': operator || '',
     'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   await eventTx(sheets, { skidId, ticket: o['Ticket'], itemText: 'FULLY CUT — SOURCE USED', operator, note: note || '' }, '');
 }
@@ -1871,10 +1897,10 @@ async function getMetalsReport(sheets, start, end) {
   let totalSheets = 0;
   rows.forEach((o) => {
     if ((o['Status'] || '') !== STATUS.USED) return;
-    if (!inRange(o['Finished On'], start, end)) return;
+    if (!inRange(usedAt(o), start, end)) return;
     const sheetsUsed = num(o['QTY/LOAD']);
     totalSheets += sheetsUsed;
-    out.push({ ticket: o['Ticket'], skidId: o['Skid ID'], finishedOn: toYMD(o['Finished On']), by: o['Used By'] || '', sheets: sheetsUsed });
+    out.push({ ticket: o['Ticket'], skidId: o['Skid ID'], finishedOn: toYMD(usedAt(o)), by: o['Used By'] || '', sheets: sheetsUsed });
   });
   out.sort((a, b) => (a.finishedOn < b.finishedOn ? -1 : a.finishedOn > b.finishedOn ? 1 : 0));
   return { start, end, count: out.length, totalSheets, rows: out };
@@ -1917,8 +1943,8 @@ async function getDepartmentReport(sheets, start, end, dept) {
     master.rows.forEach((o) => {
       if ((o['Status'] || '') !== STATUS.USED) return;
       if (String(o['Used Via'] || '') !== 'Direct') return;   // only the quick-mark flow, not runs/slitter
-      if (!inRange(o['Finished On'], start, end)) return;
-      rows.push({ date: toYMD(o['Finished On']), ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });
+      if (!inRange(usedAt(o), start, end)) return;
+      rows.push({ date: toYMD(usedAt(o)), ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });   // date only
     });
     rows.sort(byDate);
     sections.push({ key: 'direct', label: 'Used in Production (direct)', rows });
@@ -1930,12 +1956,12 @@ async function getDepartmentReport(sheets, start, end, dept) {
     const lineRows = [], pressRows = [];
     master.rows.forEach((o) => {
       if ((o['Status'] || '') !== STATUS.USED) return;
-      if (!inRange(o['Finished On'], start, end)) return;
+      if (!inRange(usedAt(o), start, end)) return;
       const runId = String(o['Run ID'] || '').trim();
       if (!runId) return;                                   // no run = not a Line/Press completion
       const machine = runMap[runId] || '';
       const type = classifyMachine(machine);
-      const row = { date: toYMD(o['Finished On']), ticket: o['Ticket'], skidId: o['Skid ID'], machine, by: o['Used By'] || '', sheets: num(o['QTY/LOAD']) };
+      const row = { date: usedAt(o), ticket: o['Ticket'], skidId: o['Skid ID'], machine, by: o['Used By'] || '', sheets: num(o['QTY/LOAD']) };   // full date + time
       if (type === 'Line') lineRows.push(row); else if (type === 'Press') pressRows.push(row);
     });
     if (want('lines')) { lineRows.sort(byDate); sections.push({ key: 'lines', label: 'Metal Lines — skids run', rows: lineRows }); }
