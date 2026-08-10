@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-22' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-23' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -157,8 +157,8 @@ async function handle(fn, args, env) {
       return markUsedDirect(sheets, args[0], args[1], args[2]);
     case 'migrateUsedDates': // () one-time: copy Finished On -> Used At
       return migrateUsedDates(sheets);
-    case 'cutCoil': // (coilSkidId, cutDate, skids[{weight,qty}], opId)
-      return cutCoil(sheets, args[0], args[1], args[2], args[3]);
+    case 'cutCoil': // (coilSkidId, cutDate, coilLine, skids[{weight,qty}], opId)
+      return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4]);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -1375,17 +1375,22 @@ async function migrateUsedDates(sheets) {
 // ================= COIL LINE (cut a received coil into child skids) ==================
 // We receive steel COILS (C/S = 'C'). When one is cut, it's marked Used and each resulting skid
 // becomes a brand-new Steel Tickets row that RETAINS every spec of the coil — Mill is the link back
-// to it — EXCEPT the three things that change per the operator: Ticket (= cut date + a running
-// per-day sequence, e.g. 2026-08-10-1, -2), Weight, and QTY/LOAD. Children start as Current stock
-// with Split Of = the coil (an explicit lineage link on top of the shared Mill). Date-only, no
-// operator, matching the Used in Production flow. skids = [{ weight, qty }].
-async function cutCoil(sheets, coilSkidId, cutDate, skids, opId) {
+// to it — EXCEPT: Ticket, Weight, QTY/LOAD (the operator-entered ones) and C/S, which flips to 'S'
+// because a cut skid is a sheet, not a coil. The Ticket is MMDDYY-<line><NN>: the cut date, then a
+// 3-char suffix whose first digit is the coil line (1 or 2) and last two are that line's running
+// cut number for the day — e.g. 080126-101, 080126-102 on line 1; 080126-201 on line 2. Children
+// start as Current stock with Split Of = the coil. Date-only, no operator. skids = [{ weight, qty }].
+async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, opId) {
   if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, created: 0, tickets: [] };
   coilSkidId = String(coilSkidId || '').trim();
   if (!coilSkidId) throw new Error('Pick a coil to cut.');
   const list = (skids || []).map((s) => ({ weight: num(s && s.weight), qty: num(s && s.qty) }));
   if (!list.length) throw new Error('Add at least one cut skid.');
+  const line = Math.max(1, parseInt(coilLine, 10) || 1);   // coil line number -> first digit of the suffix
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(cutDate || '').trim()) ? String(cutDate).trim() : todayYMD();
+  const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  const mmddyy = dm[2] + dm[3] + dm[1].slice(2);            // 2026-08-01 -> 080126
+  const prefix = mmddyy + '-' + line;                      // 080126-1
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Split Of');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used At');
@@ -1396,20 +1401,22 @@ async function cutCoil(sheets, coilSkidId, cutDate, skids, opId) {
   if (String(coil['Status']) === STATUS.USED) throw new Error('That coil is already marked Used.');
   const coilTicket = coil['Ticket'] || '';
   const coilMill = coil['Mill'] || '';
-  // Next Skid ID and next per-day ticket sequence (…-1, …-2 across ALL cuts made that day).
+  // Next Skid ID and next running cut number for THIS date + line (existing MMDDYY-<line>NN tickets).
   let nextN = maxIdNumber(master.rows, 'Skid ID', 'SKD-');
-  const seqRe = new RegExp('^' + date + '-(\\d+)$');
+  const seqRe = new RegExp('^' + prefix + '(\\d+)$');
   let seq = 0;
   master.rows.forEach((o) => { const m = seqRe.exec(String(o['Ticket'] || '').trim()); if (m) { const n = parseInt(m[1], 10); if (!isNaN(n) && n > seq) seq = n; } });
-  // Columns that must NOT carry over to a fresh child (identity / lifecycle / the 3 that change).
-  const RESET = ['Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'Split Of', 'Comments', 'Used At', 'Used By', 'Used Via',
+  // Columns that must NOT carry over to a fresh child (identity / lifecycle / the ones that change).
+  const RESET = ['Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'Used At', 'Used By', 'Used Via',
     'Run ID', 'Loaded On', 'Finished On', 'Counted At', 'Counted By', 'First Coated At', 'First Coated By',
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
+  const hasCS = master.headers.indexOf('C/S') !== -1;
+  const hasCoilSheet = master.headers.indexOf('Coil/Sheet') !== -1;
   const tickets = [];
   for (const s of list) {
     nextN += 1; seq += 1;
     const skidId = fmtId('SKD-', nextN);
-    const ticket = date + '-' + seq;
+    const ticket = prefix + (seq < 10 ? '0' + seq : String(seq));   // MMDDYY-<line>NN (2-digit min)
     const row = {};
     master.headers.forEach((h) => { if (h && RESET.indexOf(h) === -1 && coil[h] != null && coil[h] !== '') row[h] = coil[h]; });   // retain every spec
     row['Skid ID'] = skidId;
@@ -1417,8 +1424,10 @@ async function cutCoil(sheets, coilSkidId, cutDate, skids, opId) {
     row['Status'] = STATUS.CURRENT;
     row['Weight'] = s.weight || '';
     row['QTY/LOAD'] = s.qty || '';
+    if (hasCS) row['C/S'] = 'S';                 // a cut skid is a sheet, not a coil
+    if (hasCoilSheet) row['Coil/Sheet'] = 'S';
     row['Split Of'] = coilSkidId;
-    row['Comments'] = (coil['Comments'] ? coil['Comments'] + ' | ' : '') + 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date;
+    row['Comments'] = (coil['Comments'] ? coil['Comments'] + ' | ' : '') + 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
     row['Last Updated At'] = date; row['Last Updated By'] = 'coil line';
     const rowArr = master.headers.map((h) => (row.hasOwnProperty(h) ? row[h] : ''));
     const res = await sheets.append(MASTER, rowArr);
@@ -1431,8 +1440,8 @@ async function cutCoil(sheets, coilSkidId, cutDate, skids, opId) {
   await stampCells(sheets, MASTER, coil.__row, master.map, {
     'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date });
   await eventTx(sheets, { skidId: coilSkidId, ticket: coilTicket, itemText: 'COIL CUT — USED', operator: '',
-    note: 'Cut into ' + tickets.length + ' skid(s) on ' + date + ': ' + tickets.map((t) => t.ticket).join(', '), timestamp: date, runningTotal: 0 }, opId || '');
-  return { ok: true, created: tickets.length, coilSkidId, coilTicket, usedDate: date, tickets };
+    note: 'Cut on coil line ' + line + ' into ' + tickets.length + ' skid(s) on ' + date + ': ' + tickets.map((t) => t.ticket).join(', '), timestamp: date, runningTotal: 0 }, opId || '');
+  return { ok: true, created: tickets.length, coilSkidId, coilTicket, coilLine: line, usedDate: date, tickets };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================

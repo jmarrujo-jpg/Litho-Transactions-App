@@ -201,7 +201,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.16.0</span>
+      <span class="version" id="appVersion">v1.16.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3248,6 +3248,14 @@
   // gets a ticket = the cut date + a running per-day sequence. Only ticket, weight and quantity change.
   var coilSel = null;                        // selected coil: { skidId, ticket, mill, weight, qty }
   var coilRows = [{ weight: '', qty: '' }];  // the cut skids being entered
+  var coilLineNo = 1;                        // which coil line (1 or 2) — first digit of the ticket suffix
+
+  // Preview the ticket shape for a cut date + coil line, e.g. 2026-08-01 / line 1 -> "080126-1XX".
+  function fmtTicketPreview(ymd, line) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+    if (!m) return '(date)-' + line + 'XX';
+    return m[2] + m[3] + m[1].slice(2) + '-' + line + 'XX';
+  }
 
   // Coils that can be cut: C/S = 'C', still active, not already a cut-child (Split Of) or a cut pallet.
   function coilEligible() {
@@ -3286,15 +3294,22 @@
           '<span class="sub">' + esc(c.skidId) + (c.mill ? ' &middot; Mill ' + esc(c.mill) : '') +
           (c.weight ? ' &middot; wt ' + esc(c.weight) : '') + (c.qty ? ' &middot; qty ' + esc(c.qty) : '') + '</span></div>' +
           '<button class="btn secondary" id="coilChangeBtn" style="padding:8px 14px">Change</button></div>' +
-        '<div class="field" style="margin-top:10px"><label>Date cut</label><input type="date" id="coilDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
+        '<div class="row">' +
+          '<div class="field" style="flex:1;margin:10px 8px 0 0"><label>Date cut</label><input type="date" id="coilDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
+          '<div class="field" style="flex:1;margin:10px 0 0"><label>Coil line</label><select id="coilLineNo">' +
+            '<option value="1"' + (coilLineNo === 2 ? '' : ' selected') + '>Coil Line 1</option>' +
+            '<option value="2"' + (coilLineNo === 2 ? ' selected' : '') + '>Coil Line 2</option>' +
+          '</select></div>' +
+        '</div>' +
       '</div>' +
       '<div class="card">' +
         '<h3 style="margin-top:0;font-size:15px">Cut skids — weight &amp; quantity of each</h3>' +
-        '<div class="sub" style="margin-bottom:8px">Each row becomes a new skid, ticket dated the day it was cut. Everything else copies from the coil.</div>' +
+        '<div class="sub" style="margin-bottom:8px">Each row becomes a new skid. Its ticket is the cut date + coil line + count (e.g. MMDDYY-101). Everything else copies from the coil, but it becomes a sheet (C/S = S).</div>' +
         '<div id="coilRowsBox"></div>' +
         '<button class="btn secondary" id="coilAddRowBtn" style="width:100%;margin-top:8px">+ Add another skid</button>' +
         '<button class="btn success" id="coilCutBtn" style="width:100%;margin-top:12px">Cut coil &amp; create skids</button>' +
       '</div>';
+    document.getElementById('coilLineNo').onchange = function () { coilLineNo = Number(this.value) === 2 ? 2 : 1; };
     document.getElementById('coilChangeBtn').onclick = function () { coilSel = null; renderCoilLine(); };
     document.getElementById('coilAddRowBtn').onclick = function () { syncCoilRows(); coilRows.push({ weight: '', qty: '' }); renderCoilRows(); };
     document.getElementById('coilCutBtn').onclick = coilCutSubmit;
@@ -3365,16 +3380,19 @@
     syncCoilRows();
     var dateEl = document.getElementById('coilDate');
     var date = (dateEl && dateEl.value) ? dateEl.value : todayStr();
+    var lineEl = document.getElementById('coilLineNo');
+    var line = (lineEl && Number(lineEl.value) === 2) ? 2 : 1;
+    coilLineNo = line;
     var skids = coilRows.map(function (r) { return { weight: r.weight, qty: r.qty }; })
       .filter(function (r) { return String(r.weight).trim() !== '' || String(r.qty).trim() !== ''; });
     if (!skids.length) { toast('Add at least one skid with a weight or quantity'); return; }
     var c = coilSel;
-    showConfirm('Cut coil ' + (c.ticket || c.skidId) + ' into ' + skids.length + ' skid' + (skids.length === 1 ? '' : 's') + '?',
-      'The coil is marked Used on ' + date + '. Each new skid gets a ticket dated ' + date + ', keeps the coil’s Mill (' + (c.mill || '?') + ') and specs, with the weight & quantity you entered.',
+    showConfirm('Cut coil ' + (c.ticket || c.skidId) + ' into ' + skids.length + ' skid' + (skids.length === 1 ? '' : 's') + ' on Coil Line ' + line + '?',
+      'The coil is marked Used on ' + date + '. Each new skid becomes a sheet, keeps the coil’s Mill (' + (c.mill || '?') + ') and specs, with the weight & quantity you entered, and gets a ticket like ' + fmtTicketPreview(date, line) + '.',
       function () {
         var btn = document.getElementById('coilCutBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Cutting…'; }
-        runMutation('cutCoil', [c.skidId, date, skids, newOpId()],
+        runMutation('cutCoil', [c.skidId, date, line, skids, newOpId()],
           function (res) {
             var made = (res && res.created != null) ? res.created : skids.length;
             var list = (res && res.tickets) ? res.tickets.map(function (t) { return t.ticket; }).join(', ') : '';
