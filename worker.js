@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-26' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-27' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1433,6 +1433,12 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
   const hasCS = master.headers.indexOf('C/S') !== -1;
   const hasCoilSheet = master.headers.indexOf('Coil/Sheet') !== -1;
+  // If the header row has duplicate column names, the app reads the LAST occurrence of each name.
+  // A plain positional append would fill EVERY occurrence, so each value would also land in the
+  // stray duplicate columns off to the right ("neverland"). Write each field at its last occurrence
+  // ONLY — one copy, in exactly the column the app reads — so no duplicate copy is created.
+  const lastIdx = {};
+  master.headers.forEach((h, i) => { if (h) lastIdx[h] = i; });
   const tickets = [];
   for (const s of list) {
     nextN += 1; seq += 1;
@@ -1450,11 +1456,13 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     row['Split Of'] = coilSkidId;
     row['Comments'] = (coil['Comments'] ? coil['Comments'] + ' | ' : '') + 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
     row['Last Updated At'] = date; row['Last Updated By'] = 'coil line';
-    const rowArr = master.headers.map((h) => (row.hasOwnProperty(h) ? row[h] : ''));
+    // Value goes only at the LAST occurrence of each header (the column the app reads); every other
+    // position — including any left-hand duplicate — stays blank, so no stray copy is written.
+    const rowArr = master.headers.map((h, i) => (h && lastIdx[h] === i && row.hasOwnProperty(h)) ? row[h] : '');
     const res = await sheets.append(MASTER, rowArr);
     const updRange = res && res.updates && res.updates.updatedRange ? String(res.updates.updatedRange) : '';
     const rm = updRange.match(/(\d+)\s*$/);
-    if (rm) await stampCells(sheets, MASTER, parseInt(rm[1], 10), master.map, row);   // ragged-safe: stamp identity by column name
+    if (rm) await stampCells(sheets, MASTER, parseInt(rm[1], 10), master.map, row);   // ragged-safe: (re)stamp by name at the same last-occurrence columns
     tickets.push({ skidId, ticket, weight: s.weight, qty: s.qty });
   }
   // Only mark the coil Used when it's FINISHED. If there's more to cut later, leave it available
