@@ -207,7 +207,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.18.0</span>
+      <span class="version" id="appVersion">v1.18.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1072,7 +1072,7 @@
         '</div>' +
         '<div class="row" style="gap:8px;margin-bottom:10px">' +
           '<button class="btn secondary" id="reportToday" style="flex:1">Today</button>' +
-          '<button class="btn secondary" id="reportWeek" style="flex:1">This week</button>' +
+          '<button class="btn secondary" id="reportWeek" style="flex:1">This week (Mon–Fri)</button>' +
         '</div>' +
         '<button class="btn" id="runReportBtn" style="width:100%">Generate report</button>' +
       '</div>' +
@@ -1084,9 +1084,11 @@
     var to = document.getElementById('reportTo');
     document.getElementById('reportToday').onclick = function () { from.value = todayStr(); to.value = todayStr(); };
     document.getElementById('reportWeek').onclick = function () {
-      var d = new Date(); var sun = new Date(d); sun.setDate(d.getDate() - d.getDay());
-      var sat = new Date(sun); sat.setDate(sun.getDate() + 6);
-      from.value = ymd(sun); to.value = ymd(sat);
+      // Generalized work week: Monday through Friday of the current week (Sun counts as that week).
+      var d = new Date();
+      var mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+      var fri = new Date(mon); fri.setDate(mon.getDate() + 4);
+      from.value = ymd(mon); to.value = ymd(fri);
     };
     document.getElementById('runReportBtn').onclick = function () {
       var dept = document.getElementById('reportDeptSel').value || 'all';
