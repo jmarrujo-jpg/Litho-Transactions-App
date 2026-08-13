@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-30' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-31' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -726,13 +726,16 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
     result.remainderSheets = originalQty - sheets_;
     result.remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
     const remainderSkid = await nextSkidId(sheets);
+    const ensSN = await ensureColumn(sheets, MASTER, master.headers, 'System Notes');
+    master.headers = ensSN.headers; master.map = ensSN.map;
     const remObj = {};
     master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
     delete remObj.__row;
     Object.assign(remObj, {
       'Ticket': leftoverTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT, 'Job ID': '', 'Split Of': skidId,
       'QTY/LOAD': result.remainderSheets, 'Weight': result.remainderWeight, 'Litho': '',
-      'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' after coating ' + sheets_ + ' of ' + originalQty + ' sheets (coated batch is ' + coatedTicketFinal + ') on ' + nowStamp().slice(0, 10),
+      'Comments': obj['Comments'] || '',                      // carry the human comment; system note goes to System Notes
+      'System Notes': (obj['System Notes'] ? obj['System Notes'] + ' | ' : '') + 'Leftover of ' + base + ' after coating ' + sheets_ + ' of ' + originalQty + ' sheets (coated batch is ' + coatedTicketFinal + ') on ' + nowStamp().slice(0, 10),
       'First Coated At': '', 'First Coated By': '', 'Litho Notes': '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
     });
     await appendRowObj(sheets, MASTER, master.headers, remObj);
@@ -1247,6 +1250,8 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
   // intentionally different from litho's -LR#: a ran metals skid is terminal (it goes to Used and
   // drops out of every active picker), so there's no active duplicate to disambiguate.
   const remSkid = await nextSkidId(sheets);
+  const ensSN = await ensureColumn(sheets, MASTER, master.headers, 'System Notes');
+  master.headers = ensSN.headers; master.map = ensSN.map;
   const remObj = {};
   master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
   delete remObj.__row;
@@ -1254,7 +1259,8 @@ async function splitSkidRemainder(sheets, master, obj, keepSheets, operator, con
     'Ticket': base, 'Skid ID': remSkid, 'Status': (num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT),
     'Run ID': '', 'Loaded On': '', 'Finished On': '', 'Used At': '', 'Used By': '', 'Split Of': skidId,
     'QTY/LOAD': remQty, 'Weight': remWeight, 'Counted At': '', 'Counted By': '',
-    'Comments': (obj['Comments'] ? obj['Comments'] + ' | ' : '') + 'Leftover of ' + base + ' (' + context + ') on ' + todayYMD(),
+    'Comments': obj['Comments'] || '',                        // carry the human comment; system note goes to System Notes
+    'System Notes': (obj['System Notes'] ? obj['System Notes'] + ' | ' : '') + 'Leftover of ' + base + ' (' + context + ') on ' + todayYMD(),
     'Last Updated At': nowStamp(), 'Last Updated By': operator || '',
   });
   await appendRowObj(sheets, MASTER, master.headers, remObj);
@@ -1351,7 +1357,7 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
-  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Comments');   // re-uses are appended here
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');   // re-uses are appended here
   master = await readTab(sheets, MASTER);
   const results = [];
   let opRecorded = false;
@@ -1361,12 +1367,12 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
     if (String(obj['Status']) === STATUS.USED) {
       // Re-use: some skids get used on more than one occasion. Rather than rework the row into a
       // second Used record (the report reads one row per skid), we log the extra use two ways —
-      // append "Re-used <date>" to Comments, and write a transaction-audit entry — then refresh
-      // 'Used At' to this latest date so the row always reflects the most recent use.
-      const prior = String(obj['Comments'] || '').trim();
+      // append "Re-used <date>" to System Notes (NOT Comments, which is the human "who it's for"
+      // field), and write a transaction-audit entry — then refresh 'Used At' to this latest date.
+      const prior = String(obj['System Notes'] || '').trim();
       const merged = (prior ? prior + '; ' : '') + 'Re-used ' + date;
       await stampCells(sheets, MASTER, obj.__row, master.map, {
-        'Used At': date, 'Used Via': 'Direct', 'Comments': merged, 'Last Updated At': date });
+        'Used At': date, 'Used Via': 'Direct', 'System Notes': merged, 'Last Updated At': date });
       await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION AGAIN (DIRECT)',
         operator: '', note: 'Re-used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
       opRecorded = true;
@@ -1426,6 +1432,7 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Split Of');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');   // cut-from-coil note lands here, not Comments
   master = await readTab(sheets, MASTER);
   const coil = master.rows.filter((o) => String(o['Skid ID']).trim() === coilSkidId)[0];
   if (!coil) throw new Error('Coil not found: ' + coilSkidId);
@@ -1438,7 +1445,7 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   let seq = 0;
   master.rows.forEach((o) => { const m = seqRe.exec(String(o['Ticket'] || '').trim()); if (m) { const n = parseInt(m[1], 10); if (!isNaN(n) && n > seq) seq = n; } });
   // Columns that must NOT carry over to a fresh child (identity / lifecycle / the ones that change).
-  const RESET = ['Row', 'Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'Used At', 'Used By', 'Used Via',
+  const RESET = ['Row', 'Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'System Notes', 'Used At', 'Used By', 'Used Via',
     'Run ID', 'Loaded On', 'Finished On', 'Counted At', 'Counted By', 'First Coated At', 'First Coated By',
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
   const hasCS = master.headers.indexOf('C/S') !== -1;
@@ -1468,7 +1475,8 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     if (hasCS) row['C/S'] = 'S';                 // a cut skid is a sheet, not a coil
     if (hasCoilSheet) row['Coil/Sheet'] = 'S';
     row['Split Of'] = coilSkidId;
-    row['Comments'] = (coil['Comments'] ? coil['Comments'] + ' | ' : '') + 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
+    row['Comments'] = coil['Comments'] || '';                 // carry the coil's human comment (who it's for)
+    row['System Notes'] = 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
     row['Last Updated At'] = date; row['Last Updated By'] = 'coil line';
     // Header-aligned row written at an exact position (A<writeRow>), so it lands in the same columns
     // as every existing row — no append table-detection, no rightward drift.
@@ -1570,7 +1578,7 @@ const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 // but we pre-create them (blank) so the fresh Steel Tickets header is complete — the app never has to
 // widen the sheet later and nothing reads as a "missing header". Names are exact (from the code that
 // stamps them), so no phantom duplicates get created.
-const IMPORT_LIFECYCLE_COLS = ['Coil/Sheet', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
+const IMPORT_LIFECYCLE_COLS = ['System Notes', 'Coil/Sheet', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
   'First Coated At', 'First Coated By', 'Used At', 'Used By', 'Used Via', 'Loaded On', 'Finished On',
   'Counted At', 'Counted By', 'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Spoilage'];
 
@@ -1621,6 +1629,9 @@ async function importStaging(sheets, opId) {
   parts.forEach((p) => p.headers.forEach(add));                 // every source column, in order
   IMPORT_LIFECYCLE_COLS.forEach(add);                           // app columns, pre-created blank
   ['Last Updated At', 'Last Updated By'].forEach(add);
+  // Keep System Notes right next to Comments (Comments = human "who it's for"; System Notes = auto notes).
+  const ci = header.indexOf('Comments'), si = header.indexOf('System Notes');
+  if (ci !== -1 && si !== -1 && si !== ci + 1) { header.splice(si, 1); header.splice(header.indexOf('Comments') + 1, 0, 'System Notes'); }
 
   // 3) Reset Steel Tickets (clean header) + clear the audit log.
   const date = todayYMD();
@@ -1794,6 +1805,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Load #');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cost');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Litho');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
   const loadNo = nextLoadNumber(master.rows);
@@ -1820,7 +1832,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const row = {
     'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'Status': STATUS.CUT, 'QTY/LOAD': num(outputCount),
     'Mill': mills.join(' / '), 'Cut Type': cutType,
-    'Comments': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
+    'System Notes': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
   };
   if (costAvg != null) row['Cost'] = costAvg;            // averaged steel cost of the parents
