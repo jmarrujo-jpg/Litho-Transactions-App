@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-29' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-30' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1566,6 +1566,14 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
 // old skid's history. opId-deduped like the other mutations.
 const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 
+// Lifecycle / bookkeeping columns the app writes over a skid's life. They aren't in the source tabs,
+// but we pre-create them (blank) so the fresh Steel Tickets header is complete — the app never has to
+// widen the sheet later and nothing reads as a "missing header". Names are exact (from the code that
+// stamps them), so no phantom duplicates get created.
+const IMPORT_LIFECYCLE_COLS = ['Coil/Sheet', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
+  'First Coated At', 'First Coated By', 'Used At', 'Used By', 'Used Via', 'Loaded On', 'Finished On',
+  'Counted At', 'Counted By', 'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Spoilage'];
+
 // Deletes every data row on a tab (keeps row 1). Returns nothing.
 async function clearTabData(sheets, tab) {
   const grid = await sheetGrid(sheets, tab);
@@ -1604,11 +1612,15 @@ async function importStaging(sheets, opId) {
   }
 
   // 2) Clean Steel Tickets header: Ticket, Skid ID, Status, then every source column (union across
-  //    tabs, in order), then the import bookkeeping columns. Source Skid ID/Status are never carried.
-  const srcUnion = [];
-  const seen = { 'Skid ID': true, 'Status': true, 'Last Updated At': true, 'Last Updated By': true };
-  parts.forEach((p) => p.headers.forEach((h) => { const n = String(h || '').trim(); if (n && !seen[n]) { seen[n] = true; srcUnion.push(n); } }));
-  const header = ['Ticket', 'Skid ID', 'Status'].concat(srcUnion.filter((h) => h !== 'Ticket')).concat(['Last Updated At', 'Last Updated By']);
+  //    tabs, in order), then the app's lifecycle columns (blank for now) and the bookkeeping columns.
+  //    Built with a running "seen" set so nothing is duplicated. Source Skid ID/Status never carry.
+  const header = [];
+  const seen = {};
+  const add = (name) => { const n = String(name || '').trim(); if (n && !seen[n]) { seen[n] = true; header.push(n); } };
+  ['Ticket', 'Skid ID', 'Status'].forEach(add);
+  parts.forEach((p) => p.headers.forEach(add));                 // every source column, in order
+  IMPORT_LIFECYCLE_COLS.forEach(add);                           // app columns, pre-created blank
+  ['Last Updated At', 'Last Updated By'].forEach(add);
 
   // 3) Reset Steel Tickets (clean header) + clear the audit log.
   const date = todayYMD();
@@ -1623,7 +1635,12 @@ async function importStaging(sheets, opId) {
     const needRows = 1 + total;
     if (grid.rowCount && needRows > grid.rowCount) await sheets.appendRows(grid.sheetId, needRows - grid.rowCount);
   }
-  let n = 0, writeRow = 2;
+  // Build EVERY row first, then write them in a few big batches — NOT one API call per row. A Cloudflare
+  // Worker caps how many subrequests it can make per request, so a per-row write blows the cap on a real
+  // import and stops partway (leaving the wiped sheet half-filled). One values.update per chunk is a
+  // single subrequest regardless of how many rows it carries.
+  const allRows = [];
+  let n = 0;
   const counts = { Current: 0, WIP: 0 };
   for (const p of parts) {
     for (const o of p.rows) {
@@ -1635,11 +1652,13 @@ async function importStaging(sheets, opId) {
       rec['Status'] = p.status;
       rec['Last Updated At'] = date;
       rec['Last Updated By'] = 'import';
-      const rowArr = header.map((h) => (rec[h] == null ? '' : rec[h]));
-      await sheets.update("'" + MASTER + "'!A" + writeRow, [rowArr]);
-      writeRow += 1;
+      allRows.push(header.map((h) => (rec[h] == null ? '' : rec[h])));
       counts[p.tabName] = (counts[p.tabName] || 0) + 1;
     }
+  }
+  const CHUNK = 500;                                            // rows per write call (keeps payloads sane, subrequests few)
+  for (let i = 0; i < allRows.length; i += CHUNK) {
+    await sheets.update("'" + MASTER + "'!A" + (2 + i), allRows.slice(i, i + CHUNK));
   }
   // Log the import into the (freshly cleared) audit tab. This doubles as the opId dedup marker, so a
   // double-submit of the same import is caught instead of wiping and reloading twice.
