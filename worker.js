@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-25' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-26' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1334,20 +1334,35 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
 // it lands in 'Used At' (and the audit entry) with NO wall-clock time recorded anywhere. (Runs write
 // a full date+time into 'Used At'; this quick-mark deliberately writes date only.)
 async function markUsedDirect(sheets, skidIds, usedDate, opId) {
-  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, skipped: 0, duplicate: true, results: [] };
+  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, reused: 0, skipped: 0, duplicate: true, results: [] };
   const ids = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
   if (!ids.length) throw new Error('No skids to mark.');
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(usedDate || '').trim()) ? String(usedDate).trim() : todayYMD();
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Comments');   // re-uses are appended here
   master = await readTab(sheets, MASTER);
   const results = [];
   let opRecorded = false;
   for (const skidId of ids) {
     const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === skidId)[0];
     if (!obj) { results.push({ skidId, ok: false, reason: 'not found' }); continue; }
-    if (String(obj['Status']) === STATUS.USED) { results.push({ skidId, ticket: obj['Ticket'], ok: false, reason: 'already Used' }); continue; }
+    if (String(obj['Status']) === STATUS.USED) {
+      // Re-use: some skids get used on more than one occasion. Rather than rework the row into a
+      // second Used record (the report reads one row per skid), we log the extra use two ways —
+      // append "Re-used <date>" to Comments, and write a transaction-audit entry — then refresh
+      // 'Used At' to this latest date so the row always reflects the most recent use.
+      const prior = String(obj['Comments'] || '').trim();
+      const merged = (prior ? prior + '; ' : '') + 'Re-used ' + date;
+      await stampCells(sheets, MASTER, obj.__row, master.map, {
+        'Used At': date, 'Used Via': 'Direct', 'Comments': merged, 'Last Updated At': date });
+      await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION AGAIN (DIRECT)',
+        operator: '', note: 'Re-used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
+      opRecorded = true;
+      results.push({ skidId, ticket: obj['Ticket'], ok: true, reused: true });
+      continue;
+    }
     await stampCells(sheets, MASTER, obj.__row, master.map, {
       'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Direct', 'Last Updated At': date });
     await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION (DIRECT)',
@@ -1355,7 +1370,8 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
     opRecorded = true;
     results.push({ skidId, ticket: obj['Ticket'], ok: true });
   }
-  return { ok: true, marked: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
+  return { ok: true, marked: results.filter((r) => r.ok && !r.reused).length, reused: results.filter((r) => r.reused).length,
+    skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
 }
 
 // One-time maintenance: the skid "used" date moved from 'Finished On' to 'Used At'. This copies any

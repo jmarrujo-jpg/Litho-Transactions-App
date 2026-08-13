@@ -91,6 +91,8 @@
   .btn.success { background: var(--good); }
   .btn.danger { background: #c0392b; }
   .btn.danger:hover { background: #a5311f; }
+  .btn.warn { background: #b26a00; }
+  .btn.warn:hover { background: #935700; }
   .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -207,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.18.1</span>
+      <span class="version" id="appVersion">v1.19.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3260,7 +3262,7 @@
     body.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Used in Production</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to today.</div>' +
+        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to today. A skid that&rsquo;s already Used can be added again for another occasion — it&rsquo;s flagged &ldquo;re-use&rdquo; and the extra use is recorded in its Comments.</div>' +
         '<div class="field"><label>Date used</label><input type="date" id="usedDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
         '<div class="row" style="align-items:flex-end">' +
           '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="usedAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
@@ -3297,14 +3299,16 @@
     renderUsedPicker(term); // multiple — let them pick from the list
   }
 
-  // Skids that can still be marked Used here: real source skids that aren't already Used/Missing and
-  // aren't cut pallets (those are output, not consumed here) and aren't already on the batch list.
+  // Skids that can be marked Used here: real source skids that aren't cut pallets (those are output,
+  // not consumed here) and aren't already on the batch list. Already-Used skids ARE allowed — some
+  // skids get used on more than one occasion, so re-marking a Used skid logs another use (see the
+  // "re-use" flag in the picker). Missing skids stay excluded.
   function usedEligible() {
     var onList = {};
     usedBatch.forEach(function (b) { onList[b.skidId] = true; });
     return allCache.filter(function (t) {
       if (t.cutType) return false;
-      if (['Used', 'Missing'].indexOf(t.status) !== -1) return false;
+      if (t.status === 'Missing') return false;
       if (onList[t.skidId]) return false;
       return true;
     });
@@ -3321,10 +3325,15 @@
     if (!rows.length) { c.innerHTML = '<div class="sub">No available skids match.</div>'; return; }
     var html = '';
     rows.forEach(function (t) {
+      var reuse = t.status === 'Used';
+      var meta = t.mill ? ' &middot; Mill ' + esc(t.mill) : '';
+      meta += reuse
+        ? ' &middot; <span style="color:#b26a00;font-weight:600">already Used → re-use</span>'
+        : (t.status && t.status !== 'Current' ? ' &middot; ' + esc(t.status) : '');
       html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
         '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
-        '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.status && t.status !== 'Current' ? ' &middot; ' + esc(t.status) : '') + '</span></div>' +
-        '<button class="btn success" style="padding:8px 14px" data-uadd="' + esc(t.skidId) + '">+ Add</button></div>';
+        '<span class="sub">' + esc(t.skidId) + meta + '</span></div>' +
+        '<button class="btn ' + (reuse ? 'warn' : 'success') + '" style="padding:8px 14px" data-uadd="' + esc(t.skidId) + '">' + (reuse ? 'Re-use' : '+ Add') + '</button></div>';
     });
     c.innerHTML = html;
     Array.prototype.forEach.call(c.querySelectorAll('[data-uadd]'), function (b) {
@@ -3336,7 +3345,7 @@
     var t = allCache.filter(function (x) { return x.skidId === skidId; })[0];
     if (!t) { toast('Skid not found'); return; }
     if (usedBatch.some(function (b) { return b.skidId === skidId; })) return;
-    usedBatch.push({ skidId: t.skidId, ticket: t.ticket, mill: t.mill });
+    usedBatch.push({ skidId: t.skidId, ticket: t.ticket, mill: t.mill, status: t.status });
     var input = document.getElementById('usedAddInput');
     if (input) { input.value = ''; input.focus(); }
     renderUsedPicker('');
@@ -3360,9 +3369,11 @@
     if (!usedBatch.length) { box.innerHTML = '<div class="sub">Nothing added yet.</div>'; return; }
     var html = '';
     usedBatch.forEach(function (b) {
+      var reuse = b.status === 'Used';
       html += '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
         '<span class="ticket-id" style="font-size:15px">' + esc(b.ticket || '(no ticket)') + '</span> ' +
-        '<span class="sub">' + esc(b.skidId) + (b.mill ? ' &middot; Mill ' + esc(b.mill) : '') + '</span></div>' +
+        '<span class="sub">' + esc(b.skidId) + (b.mill ? ' &middot; Mill ' + esc(b.mill) : '') +
+        (reuse ? ' &middot; <span style="color:#b26a00;font-weight:600">re-use</span>' : '') + '</span></div>' +
         '<button class="btn danger" style="padding:8px 12px" data-urem="' + esc(b.skidId) + '">Remove</button></div>';
     });
     box.innerHTML = html;
@@ -3377,8 +3388,10 @@
     var dateEl = document.getElementById('usedDate');
     var date = (dateEl && dateEl.value) ? dateEl.value : todayStr();
     var n = ids.length;
+    var reuseN = usedBatch.filter(function (b) { return b.status === 'Used'; }).length;
     showConfirm('Mark ' + n + ' skid' + (n === 1 ? '' : 's') + ' Used in Production?',
-      'This records them as Used on ' + date + '. It does not go through a line, press, or slitter.',
+      'This records them as Used on ' + date + '. It does not go through a line, press, or slitter.' +
+        (reuseN ? ' ' + reuseN + ' ' + (reuseN === 1 ? 'is' : 'are') + ' already Used and will be recorded as a re-use (noted in Comments).' : ''),
       function () {
         var btn = document.getElementById('usedMarkBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
@@ -3387,9 +3400,12 @@
             ids.forEach(function (id) { markCacheStatus(id, 'Used'); });
             usedBatch = [];
             var marked = (res && res.marked != null) ? res.marked : n;
+            var reused = (res && res.reused) ? res.reused : 0;
             var skipped = (res && res.skipped) ? res.skipped : 0;
-            showInfo('Marked Used', marked + ' skid' + (marked === 1 ? '' : 's') + ' marked Used in Production.' +
-              (skipped ? ' ' + skipped + ' skipped (already Used or not found).' : ''),
+            showInfo('Marked Used',
+              (marked ? marked + ' skid' + (marked === 1 ? '' : 's') + ' marked Used in Production.' : '') +
+              (reused ? (marked ? ' ' : '') + reused + ' skid' + (reused === 1 ? '' : 's') + ' re-used (recorded in Comments).' : '') +
+              (skipped ? ' ' + skipped + ' skipped (not found).' : '') || 'Nothing to mark.',
               function () { renderUsedHome(); });
           },
           function (err) {
