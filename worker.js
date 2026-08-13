@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-31' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-32' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -669,7 +669,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   if (status === STATUS.WIP || status === STATUS.PENDING) {
     const newTotal = Math.round(((num(obj['Litho'])) + match.totalCost) * 100) / 100;
     const stamp = { 'Litho': newTotal, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
-    if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; }
+    if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; stamp['Row'] = ''; }   // attached to a job -> leaving its storage row
     await stampCells(sheets, MASTER, row, map, stamp);
     await appendLithoNote(lithoNoteClean);
     await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName }, opId);
@@ -713,7 +713,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
     leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': coatedTicketFinal }]), ticket, 'LR');
   }
 
-  const stamp = { 'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost,
+  const stamp = { 'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost, 'Row': '',   // coated -> moved out of its storage row
     'First Coated At': nowStamp(), 'First Coated By': operatorName || '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
   if (usedFewer) { stamp['QTY/LOAD'] = sheets_; stamp['Weight'] = estimatedWeightUsed; }
   if (usedFewer && isPartialSkid) { stamp['Ticket'] = coatedTicketFinal; } // this record becomes the coated -LR# piece
@@ -1146,7 +1146,7 @@ async function runAddSkid(sheets, runId, skidId, operator, opId) {
     throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already on run ' + onRun + '.');
   }
   await stampCells(sheets, MASTER, obj.__row, master.map, {
-    'Status': STATUS.IN_PRODUCTION, 'Run ID': runId, 'Loaded On': todayYMD(),
+    'Status': STATUS.IN_PRODUCTION, 'Run ID': runId, 'Loaded On': todayYMD(), 'Row': '',   // loaded onto a run -> off its storage row
     'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'ADDED TO PRODUCTION', operator,
     note: 'Loaded on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, opId);
