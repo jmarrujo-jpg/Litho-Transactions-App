@@ -53,8 +53,8 @@ const COUNT_TALLY_COLS = ['Current Found', 'Promoted', 'WIP Found', 'Missing Mar
 
 // Editable steel-spec columns captured on Add Ticket and Edit ticket details (mirrors the
 // paper ticket; QTY first). B/C and Mill are new columns created on demand.
-const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill', 'BW', 'Coil/Sheet', 'End Use', 'Supplier', 'TM', 'Width', 'Comments'];
-const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'Basis Weight', 'Coil/Sheet': 'Coil / Sheet', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
+const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill', 'BW', 'C/S', 'End Use', 'Supplier', 'TM', 'Width', 'Comments'];
+const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'Basis Weight', 'C/S': 'Coil / Sheet', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
 const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true };
 
 export default {
@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-32' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-33' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1449,7 +1449,6 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     'Run ID', 'Loaded On', 'Finished On', 'Counted At', 'Counted By', 'First Coated At', 'First Coated By',
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
   const hasCS = master.headers.indexOf('C/S') !== -1;
-  const hasCoilSheet = master.headers.indexOf('Coil/Sheet') !== -1;
   // Place children by EXACT row via values.update at column A — NOT values.append. Google's append
   // runs its own "table" detection and, on this sheet, was drifting each new row further to the
   // right (a staircase: -103 aligned, -104 shifted right, -105 further still). Writing to
@@ -1473,7 +1472,6 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     row['Weight'] = s.weight || '';
     row['QTY/LOAD'] = s.qty || '';
     if (hasCS) row['C/S'] = 'S';                 // a cut skid is a sheet, not a coil
-    if (hasCoilSheet) row['Coil/Sheet'] = 'S';
     row['Split Of'] = coilSkidId;
     row['Comments'] = coil['Comments'] || '';                 // carry the coil's human comment (who it's for)
     row['System Notes'] = 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
@@ -1578,7 +1576,7 @@ const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 // but we pre-create them (blank) so the fresh Steel Tickets header is complete — the app never has to
 // widen the sheet later and nothing reads as a "missing header". Names are exact (from the code that
 // stamps them), so no phantom duplicates get created.
-const IMPORT_LIFECYCLE_COLS = ['System Notes', 'Coil/Sheet', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
+const IMPORT_LIFECYCLE_COLS = ['System Notes', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
   'First Coated At', 'First Coated By', 'Used At', 'Used By', 'Used Via', 'Loaded On', 'Finished On',
   'Counted At', 'Counted By', 'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Spoilage'];
 
@@ -1838,7 +1836,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   if (costAvg != null) row['Cost'] = costAvg;            // averaged steel cost of the parents
   if (lithoAvg != null) row['Litho'] = lithoAvg;         // averaged litho cost of the parents (kept separate)
   if (src) {
-    ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'Coil/Sheet'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
+    ['BW', 'TC', 'TM', 'Width', 'Length', 'End Use', 'Supplier', 'B/C', 'C/S'].forEach((k) => { if (src[k] != null && src[k] !== '') row[k] = src[k]; });
   }
   // Append the positional row, then STAMP the identity cells by column name onto the new row. The
   // positional append can misalign when the live header row reads back ragged (wider/narrower than
