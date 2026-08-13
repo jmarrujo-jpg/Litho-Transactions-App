@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.20.1</span>
+      <span class="version" id="appVersion">v1.20.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -783,8 +783,21 @@
   var dbTable = 'steel';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
+  var DB_CODE = '1245';                          // passcode to open the Database tab
+  var dbUnlocked = false;                        // stays unlocked for the rest of the session once entered
 
   function openDatabase() {
+    if (!dbUnlocked) {
+      showPromptModal({
+        title: 'Database — enter code', message: 'This area is protected.',
+        inputLabel: 'Code', placeholder: '••••', confirmText: 'Unlock',
+        onConfirm: function (v) {
+          if (String(v) === DB_CODE) { dbUnlocked = true; openDatabase(); }
+          else { toast('Incorrect code'); }
+        }
+      });
+      return;
+    }
     state.view = 'database';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Database');
