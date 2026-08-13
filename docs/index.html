@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.19.0</span>
+      <span class="version" id="appVersion">v1.20.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -807,14 +807,46 @@
         '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
       '</div>' +
       '<div class="sub" id="dbCount" style="margin:8px 0"></div>' +
-      '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>';
+      '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>' +
+      '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
+        '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP tabs</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Paste your Access data into two tabs named <b>Current</b> and <b>WIP</b> in this spreadsheet. This rebuilds <b>Steel Tickets</b> from those tabs: each row becomes a clean skid (fresh Skid ID; Status from which tab it came from) in single, non-duplicated columns.</div>' +
+        '<div class="sub" style="margin-bottom:10px;color:#b26a00"><b>This wipes the current Steel Tickets tab and the Litho Transactions audit log</b> and replaces them. Make a backup copy of the sheet first (File → Make a copy). Re-run it any time you refresh the Access data.</div>' +
+        '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP</button>' +
+      '</div>';
     Array.prototype.forEach.call(view.querySelectorAll('[data-dbt]'), function (b) {
       b.onclick = function () { dbTable = b.getAttribute('data-dbt'); dbSearch = ''; renderDatabaseHome(); };
     });
     var s = document.getElementById('dbSearch');
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
+    document.getElementById('dbImportBtn').onclick = dbFreshImport;
     loadDbAndRender();
+  }
+
+  // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP staging tabs.
+  function dbFreshImport() {
+    showConfirm('Wipe and re-import from Current + WIP?',
+      'This DELETES everything in Steel Tickets and Litho Transactions, then rebuilds Steel Tickets from the Current and WIP tabs. Make sure you have a backup copy of the sheet. Continue?',
+      function () {
+        var btn = document.getElementById('dbImportBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+        runMutation('importStaging', [newOpId()],
+          function (res) {
+            var cur = (res && res.current) || 0, wip = (res && res.wip) || 0, total = (res && res.total) || 0;
+            allCache = []; dbData.steel = null; dbData.tx = null;   // force a full reload
+            ensureAllCache(function () {});
+            showInfo('Import complete',
+              'Imported ' + total + ' skid' + (total === 1 ? '' : 's') + ' — ' + cur + ' Current, ' + wip + ' WIP.' +
+              (res && res.firstSkid ? ' Skid IDs ' + res.firstSkid + '–' + res.lastSkid + '.' : ''),
+              function () { renderDatabaseHome(); });
+          },
+          function (err) {
+            toast('Import failed: ' + (err && err.message ? err.message : 'unknown error'));
+            var b2 = document.getElementById('dbImportBtn');
+            if (b2) { b2.disabled = false; b2.textContent = 'Wipe & import from Current + WIP'; }
+          });
+      }, 'Wipe & import', 'danger');
   }
 
   function loadDbAndRender() {

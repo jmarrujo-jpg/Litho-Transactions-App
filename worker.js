@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-28' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-29' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -163,6 +163,8 @@ async function handle(fn, args, env) {
       return getRawTable(sheets, args[0]);
     case 'updateRawRow': // (tableKey, rowNum, fields, opId)
       return updateRawRow(sheets, args[0], args[1], args[2], args[3]);
+    case 'importStaging': // (opId) fresh-start import from the 'Current' + 'WIP' tabs
+      return importStaging(sheets, args[0]);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -301,6 +303,10 @@ async function makeSheets(env) {
     async appendRows(sheetId, count) {
       return call(base + ':batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] }) });
+    },
+    async deleteRows(sheetId, startIndex, endIndex) {   // 0-based, half-open [startIndex, endIndex)
+      return call(base + ':batchUpdate',
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }) });
     },
   };
 }
@@ -1547,6 +1553,101 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
       operator: '', note: changes.join('; '), runningTotal: num(cur['Litho']) }, opId || '');
   }
   return { ok: true, updated: changes.length, changes };
+}
+
+// ================= FRESH-START IMPORT (convert 'Current' + 'WIP' tabs) ===============
+// The operator pastes their Access data into two staging tabs — 'Current' and 'WIP' — one per
+// state. This wipes Steel Tickets + Litho Transactions and rebuilds Steel Tickets from those tabs:
+// every row becomes a CLEAN single-column Steel Tickets row (fresh SKD id, Status taken from which
+// tab it came from), mapped BY COLUMN NAME so it tolerates whatever columns each tab actually has.
+// Rows are written at exact positions (no append drift), and the header is rebuilt clean — so this
+// also permanently escapes the duplicate-column / staircase mess. Repeatable: re-run it whenever the
+// Access data is refreshed. Litho Transactions is cleared too, so a reused SKD id can't inherit an
+// old skid's history. opId-deduped like the other mutations.
+const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
+
+// Deletes every data row on a tab (keeps row 1). Returns nothing.
+async function clearTabData(sheets, tab) {
+  const grid = await sheetGrid(sheets, tab);
+  const t = await readTab(sheets, tab);
+  const lastDataRow = t.rows.length + 1;                 // header is row 1; data rows follow
+  if (grid && lastDataRow >= 2) await sheets.deleteRows(grid.sheetId, 1, lastDataRow);   // remove rows 2..lastDataRow
+}
+
+// Wipes a tab's data rows and overwrites row 1 with `header`, padding with blanks so any stray
+// trailing (duplicate) header cells are erased — leaving a clean, single-column schema.
+async function resetTabToHeader(sheets, tab, header) {
+  const grid = await sheetGrid(sheets, tab);
+  const t = await readTab(sheets, tab);
+  const lastDataRow = t.rows.length + 1;
+  if (grid && lastDataRow >= 2) await sheets.deleteRows(grid.sheetId, 1, lastDataRow);
+  const width = Math.max(header.length, (grid && grid.columnCount) || 0, t.headers.length);
+  const row1 = header.slice();
+  while (row1.length < width) row1.push('');
+  await sheets.update("'" + tab + "'!A1", [row1]);
+}
+
+async function importStaging(sheets, opId) {
+  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, current: 0, wip: 0, total: 0 };
+
+  // 1) Read both staging tabs (each by its own headers). Only rows with a Ticket count.
+  const parts = [];
+  for (const [tabName, status] of IMPORT_TABS) {
+    let data;
+    try { data = await readObjects(sheets, tabName); }
+    catch (e) { throw new Error('Could not read a "' + tabName + '" tab. Create tabs named Current and WIP and paste your data into them, then try again.'); }
+    if (!data.headers.length || data.headers.indexOf('Ticket') === -1) {
+      throw new Error('The "' + tabName + '" tab needs a header row with a "Ticket" column.');
+    }
+    const rows = data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '');
+    parts.push({ tabName, status, headers: data.headers, rows });
+  }
+
+  // 2) Clean Steel Tickets header: Ticket, Skid ID, Status, then every source column (union across
+  //    tabs, in order), then the import bookkeeping columns. Source Skid ID/Status are never carried.
+  const srcUnion = [];
+  const seen = { 'Skid ID': true, 'Status': true, 'Last Updated At': true, 'Last Updated By': true };
+  parts.forEach((p) => p.headers.forEach((h) => { const n = String(h || '').trim(); if (n && !seen[n]) { seen[n] = true; srcUnion.push(n); } }));
+  const header = ['Ticket', 'Skid ID', 'Status'].concat(srcUnion.filter((h) => h !== 'Ticket')).concat(['Last Updated At', 'Last Updated By']);
+
+  // 3) Reset Steel Tickets (clean header) + clear the audit log.
+  const date = todayYMD();
+  await resetTabToHeader(sheets, MASTER, header);
+  await clearTabData(sheets, TRANSACTIONS);
+
+  // 4) Make sure the grid has room, then write each converted row at an exact A<row>.
+  const total = parts.reduce((n, p) => n + p.rows.length, 0);
+  const grid = await sheetGrid(sheets, MASTER);
+  if (grid) {
+    if (grid.columnCount && header.length > grid.columnCount) await sheets.appendColumns(grid.sheetId, header.length - grid.columnCount);
+    const needRows = 1 + total;
+    if (grid.rowCount && needRows > grid.rowCount) await sheets.appendRows(grid.sheetId, needRows - grid.rowCount);
+  }
+  let n = 0, writeRow = 2;
+  const counts = { Current: 0, WIP: 0 };
+  for (const p of parts) {
+    for (const o of p.rows) {
+      n += 1;
+      const rec = {};
+      header.forEach((h) => { rec[h] = (o[h] == null ? '' : o[h]); });   // carry every source field by name
+      rec['Ticket'] = o['Ticket'];
+      rec['Skid ID'] = fmtId('SKD-', n);
+      rec['Status'] = p.status;
+      rec['Last Updated At'] = date;
+      rec['Last Updated By'] = 'import';
+      const rowArr = header.map((h) => (rec[h] == null ? '' : rec[h]));
+      await sheets.update("'" + MASTER + "'!A" + writeRow, [rowArr]);
+      writeRow += 1;
+      counts[p.tabName] = (counts[p.tabName] || 0) + 1;
+    }
+  }
+  // Log the import into the (freshly cleared) audit tab. This doubles as the opId dedup marker, so a
+  // double-submit of the same import is caught instead of wiping and reloading twice.
+  await eventTx(sheets, { skidId: '', ticket: '', itemText: 'FRESH IMPORT', operator: '',
+    note: 'Imported ' + n + ' skids from staging (Current ' + (counts['Current'] || 0) + ', WIP ' + (counts['WIP'] || 0) + ')',
+    timestamp: date, runningTotal: 0 }, opId || '');
+  return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, total: n,
+    firstSkid: n ? fmtId('SKD-', 1) : '', lastSkid: n ? fmtId('SKD-', n) : '', columns: header.length };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================
