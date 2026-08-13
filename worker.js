@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-24' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-25' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -159,6 +159,10 @@ async function handle(fn, args, env) {
       return migrateUsedDates(sheets);
     case 'cutCoil': // (coilSkidId, cutDate, coilLine, skids[{weight,qty}], finish, opId)
       return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
+    case 'getRawTable': // (tableKey: 'steel' | 'tx')
+      return getRawTable(sheets, args[0]);
+    case 'updateRawRow': // (tableKey, rowNum, fields, opId)
+      return updateRawRow(sheets, args[0], args[1], args[2], args[3]);
     // ---- slitter (log-only) ----
     case 'getSlitterSessions': // (kind, dateStr, scope)
       return getSlitterSessions(sheets, args[0], args[1], args[2]);
@@ -1452,6 +1456,67 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
       (finished ? '' : ' — coil left open for more cutting') + ': ' + tickets.map((t) => t.ticket).join(', '),
     timestamp: date, runningTotal: 0 }, opId || '');
   return { ok: true, created: tickets.length, coilSkidId, coilTicket, coilLine: line, finished, usedDate: finished ? date : '', tickets };
+}
+
+// ================= DATABASE (raw table viewer / manual editor) ======================
+// A guarded audit surface: view every column of a whitelisted tab and correct values BY COLUMN
+// NAME, so edits stay aligned with how the app itself reads the sheet (the same last-occurrence
+// resolution) even if the header row has stray duplicate columns. Only these tables are exposed —
+// nothing else can be read or written through here.
+const DB_TABLES = { steel: MASTER, tx: TRANSACTIONS };
+
+// Return { tab, tableKey, headers, rows } for a whitelisted table. headers is de-duplicated to the
+// first occurrence of each name (blank headers dropped), in sheet order; each row is a plain object
+// keyed by header name plus __row (its sheet row number, used to target edits). Values are exactly
+// what the app reads for that row. Fully-blank trailing rows are skipped.
+async function getRawTable(sheets, tableKey) {
+  const tab = DB_TABLES[String(tableKey || '')];
+  if (!tab) throw new Error('Unknown table: ' + tableKey);
+  const r = await readObjects(sheets, tab);
+  const seen = {};
+  const headers = [];
+  r.headers.forEach((h) => { const n = String(h || '').trim(); if (n && !seen[n]) { seen[n] = true; headers.push(n); } });
+  const rows = r.rows.map((o) => {
+    const row = { __row: o.__row };
+    headers.forEach((h) => { row[h] = (o[h] == null ? '' : o[h]); });
+    return row;
+  }).filter((row) => headers.some((h) => String(row[h]).trim() !== ''));
+  return { tab, tableKey, headers, rows };
+}
+
+// Edit named cells on ONE row of a whitelisted table, targeted by its sheet row number. Only columns
+// that exist on the tab are written (by name, last-occurrence — matching app reads). On Steel Tickets
+// it also stamps Last Updated and logs a MANUAL EDIT audit line with old->new values so every manual
+// correction is traceable. Returns the list of changes actually applied.
+async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
+  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, updated: 0, changes: [] };
+  const tab = DB_TABLES[String(tableKey || '')];
+  if (!tab) throw new Error('Unknown table: ' + tableKey);
+  rowNum = parseInt(rowNum, 10);
+  if (!(rowNum > 1)) throw new Error('Bad row number.');
+  fields = fields || {};
+  const t = await readTab(sheets, tab);
+  const cur = t.rows.filter((o) => o.__row === rowNum)[0];
+  if (!cur) throw new Error('That row was not found — reload the table and try again.');
+  const write = {};
+  const changes = [];
+  Object.keys(fields).forEach((k) => {
+    if (!t.map[k]) return;                                   // ignore unknown columns
+    const nv = fields[k] == null ? '' : fields[k];
+    const ov = cur[k] == null ? '' : cur[k];
+    if (String(nv) !== String(ov)) { write[k] = nv; changes.push(k + ': "' + ov + '" → "' + nv + '"'); }
+  });
+  if (!changes.length) return { ok: true, updated: 0, changes: [] };
+  if (tab === MASTER && t.map['Last Updated At']) {
+    write['Last Updated At'] = nowStamp();
+    if (t.map['Last Updated By']) write['Last Updated By'] = 'database edit';
+  }
+  await stampCells(sheets, tab, rowNum, t.map, write);
+  if (tab === MASTER) {
+    await eventTx(sheets, { skidId: cur['Skid ID'] || '', ticket: cur['Ticket'] || '', itemText: 'MANUAL EDIT (DATABASE)',
+      operator: '', note: changes.join('; '), runningTotal: num(cur['Litho']) }, opId || '');
+  }
+  return { ok: true, updated: changes.length, changes };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================

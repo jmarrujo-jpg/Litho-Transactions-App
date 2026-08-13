@@ -118,6 +118,12 @@
   }
   .toast.show { opacity: 1; }
   .loading { text-align: center; padding: 40px; color: var(--muted); }
+  .dbtable { border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+  .dbtable th, .dbtable td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+  .dbtable thead th { background: var(--card); position: sticky; top: 0; font-weight: 700; }
+  .dbtable tbody tr { cursor: pointer; }
+  .dbtable tbody tr:hover td { background: #eef2ff; }
+  .dbtable .dbsticky { position: sticky; left: 0; background: var(--card); z-index: 1; }
   .gate { max-width: 380px; margin: 60px auto; text-align: center; }
   .gate h2 { margin-bottom: 4px; }
   .gate p { color: var(--muted); font-size: 14px; margin-top: 0; }
@@ -201,7 +207,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.17.0</span>
+      <span class="version" id="appVersion">v1.18.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -739,6 +745,8 @@
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
       case 'slitterSession': openMetalsSection('slitter'); return; // slitter detail -> slitter home
+      case 'database': renderLanding(); return;            // database home -> landing
+      case 'databaseEdit': renderDatabaseHome(); return;   // row editor -> database home
       default: renderLanding(); return;
     }
   };
@@ -754,12 +762,160 @@
       '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
       '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' +
-      '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px">🧮&nbsp; Litho Steel Count</button>';
+      '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🧮&nbsp; Litho Steel Count</button>' +
+      '<button class="btn secondary" id="tileDatabase" style="width:100%;padding:22px;font-size:18px">🗄️&nbsp; Database</button>';
     document.getElementById('tileSearch').onclick = openSearch;
     document.getElementById('tileLitho').onclick = openLitho;
     document.getElementById('tileProduction').onclick = openProduction;
     document.getElementById('tileReports').onclick = openReports;
     document.getElementById('tileCount').onclick = openSteelCount;
+    document.getElementById('tileDatabase').onclick = openDatabase;
+  }
+
+  // ---------------- Database (raw table audit / manual edit) ----------------
+  // A spreadsheet-like admin view of the underlying tabs, read/written BY COLUMN NAME so it matches
+  // exactly what the app uses (even where the sheet header has stray duplicate columns). Two tables:
+  // Steel Tickets and the Litho Transactions audit log. Tap a row to edit its fields and save back.
+  var DB_TABLE_TABS = [['steel', 'Steel Tickets'], ['tx', 'Litho Transactions']];
+  var DB_ROW_CAP = 60;                          // rows rendered at once (search to narrow beyond this)
+  var dbTable = 'steel';
+  var dbData = { steel: null, tx: null };       // cache: { headers, rows }
+  var dbSearch = '';
+
+  function openDatabase() {
+    state.view = 'database';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Database');
+    dbSearch = '';
+    renderDatabaseHome();
+  }
+
+  function renderDatabaseHome() {
+    state.view = 'database';
+    var view = document.getElementById('view');
+    if (!view) return;
+    nextViewToken();
+    var chips = DB_TABLE_TABS.map(function (c) {
+      return '<button data-dbt="' + c[0] + '"' + (dbTable === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+    view.innerHTML =
+      '<div class="tabbar">' + chips + '</div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Search this table</label><input id="dbSearch" placeholder="filter any column…" autocomplete="off" value="' + esc(dbSearch) + '"></div>' +
+        '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
+      '</div>' +
+      '<div class="sub" id="dbCount" style="margin:8px 0"></div>' +
+      '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>';
+    Array.prototype.forEach.call(view.querySelectorAll('[data-dbt]'), function (b) {
+      b.onclick = function () { dbTable = b.getAttribute('data-dbt'); dbSearch = ''; renderDatabaseHome(); };
+    });
+    var s = document.getElementById('dbSearch');
+    s.oninput = function () { dbSearch = s.value; renderDbTable(); };
+    document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
+    loadDbAndRender();
+  }
+
+  function loadDbAndRender() {
+    if (dbData[dbTable]) { renderDbTable(); return; }
+    var box = document.getElementById('dbTableBox');
+    if (box) box.innerHTML = '<div class="loading">Loading&hellip;</div>';
+    var key = dbTable;
+    google.script.run.withSuccessHandler(function (res) {
+      dbData[key] = (res && res.headers) ? { headers: res.headers, rows: res.rows || [] } : { headers: [], rows: [] };
+      if (dbTable === key) renderDbTable();
+    }).withFailureHandler(function (err) {
+      if (box) box.innerHTML = '<div class="sub">Could not load: ' + esc(err && err.message) + '</div>';
+    }).getRawTable(key);
+  }
+
+  function renderDbTable() {
+    var box = document.getElementById('dbTableBox');
+    var countEl = document.getElementById('dbCount');
+    if (!box) return;
+    var data = dbData[dbTable];
+    if (!data) { box.innerHTML = '<div class="loading">Loading&hellip;</div>'; return; }
+    var term = (dbSearch || '').trim().toLowerCase();
+    var rows = data.rows;
+    if (term) rows = rows.filter(function (r) {
+      return data.headers.some(function (h) { return String(r[h] == null ? '' : r[h]).toLowerCase().indexOf(term) !== -1; });
+    });
+    var total = rows.length;
+    var shown = rows.slice(0, DB_ROW_CAP);
+    if (countEl) countEl.textContent = 'Showing ' + shown.length + ' of ' + total + (term ? ' matching' : '') + ' — tap a row to edit.';
+    if (!shown.length) { box.innerHTML = '<div class="sub">No rows' + (term ? ' match “' + esc(term) + '”.' : '.') + '</div>'; return; }
+    var th = '<th class="dbsticky">#</th>' + data.headers.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('');
+    var trs = shown.map(function (r) {
+      var tds = '<td class="dbsticky" style="font-weight:600">' + esc(r.__row) + '</td>' +
+        data.headers.map(function (h) { return '<td>' + esc(r[h]) + '</td>'; }).join('');
+      return '<tr data-dbrow="' + esc(r.__row) + '">' + tds + '</tr>';
+    }).join('');
+    box.innerHTML = '<table class="dbtable"><thead><tr>' + th + '</tr></thead><tbody>' + trs + '</tbody></table>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-dbrow]'), function (tr) {
+      tr.onclick = function () {
+        var rn = Number(tr.getAttribute('data-dbrow'));
+        var rowObj = data.rows.filter(function (x) { return x.__row === rn; })[0];
+        if (rowObj) renderDbEditor(rowObj);
+      };
+    });
+  }
+
+  function renderDbEditor(rowObj) {
+    state.view = 'databaseEdit';
+    var view = document.getElementById('view');
+    if (!view) return;
+    nextViewToken();
+    var data = dbData[dbTable];
+    var title = (dbTable === 'steel') ? (rowObj['Skid ID'] || rowObj['Ticket'] || ('Row ' + rowObj.__row)) : ('Row ' + rowObj.__row);
+    var fieldsHtml = data.headers.map(function (h) {
+      var v = rowObj[h] == null ? '' : rowObj[h];
+      var big = String(v).length > 40 || h === 'Comments' || h === 'Notes' || h === 'Litho Notes';
+      var input = big
+        ? '<textarea class="dbf" data-f="' + esc(h) + '" rows="2">' + esc(v) + '</textarea>'
+        : '<input class="dbf" data-f="' + esc(h) + '" value="' + esc(v) + '">';
+      return '<div class="field" style="margin:0 0 8px"><label>' + esc(h) + '</label>' + input + '</div>';
+    }).join('');
+    view.innerHTML =
+      '<div class="card">' +
+        '<div class="row" style="justify-content:space-between;align-items:center">' +
+          '<h3 style="margin:0">Edit ' + esc(title) + '</h3>' +
+          '<span class="sub">sheet row ' + esc(rowObj.__row) + '</span>' +
+        '</div>' +
+        '<div class="sub" style="margin:6px 0 12px">Change any field and save — edits write straight to the sheet.</div>' +
+        fieldsHtml +
+        '<div class="row" style="gap:8px;margin-top:12px">' +
+          '<button class="btn secondary" id="dbCancel" style="flex:1">Cancel</button>' +
+          '<button class="btn success" id="dbSave" style="flex:2">Save changes</button>' +
+        '</div>' +
+      '</div>';
+    document.getElementById('dbCancel').onclick = function () { renderDatabaseHome(); };
+    document.getElementById('dbSave').onclick = function () { dbSaveEditor(rowObj); };
+  }
+
+  function dbSaveEditor(rowObj) {
+    var view = document.getElementById('view');
+    var fields = {};
+    var changed = [];
+    Array.prototype.forEach.call(view.querySelectorAll('.dbf'), function (el) {
+      var h = el.getAttribute('data-f');
+      var nv = el.value;
+      var ov = rowObj[h] == null ? '' : String(rowObj[h]);
+      if (String(nv) !== ov) { fields[h] = nv; changed.push(h); }
+    });
+    if (!changed.length) { toast('No changes to save'); return; }
+    showConfirm('Save ' + changed.length + ' change' + (changed.length === 1 ? '' : 's') + '?',
+      'Fields: ' + changed.join(', ') + '. This writes straight to the ' + (dbTable === 'steel' ? 'Steel Tickets' : 'Litho Transactions') + ' sheet.',
+      function () {
+        var btn = document.getElementById('dbSave');
+        if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+        runMutation('updateRawRow', [dbTable, rowObj.__row, fields, newOpId()],
+          function (res) {
+            var applied = (res && res.updated != null) ? res.updated : changed.length;
+            Object.keys(fields).forEach(function (h) { rowObj[h] = fields[h]; });   // keep local cache in sync
+            if (dbTable === 'steel') google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            showInfo('Saved', applied + ' field' + (applied === 1 ? '' : 's') + ' updated.', function () { renderDatabaseHome(); });
+          },
+          function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('dbSave'); if (b2) { b2.disabled = false; b2.textContent = 'Save changes'; } });
+      });
   }
 
   // Opens the Litho department exactly as the app worked before: the combined ticket list
