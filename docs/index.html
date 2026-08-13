@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.21.0</span>
+      <span class="version" id="appVersion">v1.22.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1895,11 +1895,12 @@
   function renderHistoryTable(rows) {
     if (!rows || !rows.length) return '<div class="sub">Nothing logged yet.</div>';
     var sorted = rows.slice().sort(function (a, b) { return String(a.timestamp || '').localeCompare(String(b.timestamp || '')); });
-    var html = '<table><thead><tr><th>When</th><th>Item</th><th>Detail</th><th>Cost</th><th>Operator</th><th>Running Total</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>When</th><th>Item</th><th>Job</th><th>Detail</th><th>Cost</th><th>Operator</th><th>Running Total</th></tr></thead><tbody>';
     sorted.forEach(function (r) {
       var detail = r.group ? (esc(r.group) + (r.sub ? ' / ' + esc(r.sub) : '')) : (r.notes ? esc(r.notes) : (r.jobName ? esc(r.jobName) : ''));
+      var job = r.jobId || r.jobName || '';
       html += '<tr><td class="sub" style="white-space:nowrap">' + esc(r.timestamp || '') + '</td><td>' + esc(r.item) +
-        '</td><td class="sub">' + detail + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
+        '</td><td class="sub" style="white-space:nowrap">' + esc(job) + '</td><td class="sub">' + detail + '</td><td>' + money(r.passTotal) + '</td><td>' + esc(r.operator) +
         '</td><td>' + money(r.runningTotal) + '</td></tr>';
     });
     return html + '</tbody></table>';

@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-33' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-34' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -442,7 +442,7 @@ async function getTransactionHistory(sheets, skidId, ticket) {
     timestamp: r['Timestamp'], ticket: r['Ticket'], passNumber: num(r['Pass Number']), operator: r['Operator'],
     group: r['Group'], sub: r['Sub-Variant'], item: r['Item'], chemCode: r['Chem Code'],
     appCost: r['Application Cost'], lineCost: r['Line Cost'], passTotal: r['Pass Total Cost'],
-    runningTotal: r['Running Total After Pass'], notes: r['Notes'], jobName: r['Job Name'], skidId: r['Skid ID'],
+    runningTotal: r['Running Total After Pass'], notes: r['Notes'], jobName: r['Job Name'], jobId: r['Job ID'] || '', skidId: r['Skid ID'],
   })).sort((a, b) => a.passNumber - b.passNumber);
 }
 async function getTicketCard(sheets, skidId) {
@@ -597,6 +597,7 @@ async function opAlreadyDone(sheets, opId) {
 async function appendTx(sheets, obj, opId) {
   let { headers } = await readTab(sheets, TRANSACTIONS);
   if (headers.indexOf('Op ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Op ID'); headers = e.headers; }
+  if (headers.indexOf('Job ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Job ID'); headers = e.headers; }
   obj['Op ID'] = opId || '';
   await appendRowObj(sheets, TRANSACTIONS, headers, obj);
 }
@@ -605,14 +606,14 @@ async function logCoatingTx(sheets, o, opId) {
     'Timestamp': nowStamp(), 'Ticket': o.ticket, 'Pass Number': o.passNumber, 'Operator': o.operator || '',
     'Group': o.group || '', 'Sub-Variant': o.sub || '', 'Item': o.item, 'Chem Code': o.match.chemCode || '',
     'Application Cost': o.match.appCost, 'Line Cost': o.match.lineCost, 'Pass Total Cost': o.match.totalCost,
-    'Running Total After Pass': o.runningTotal, 'Notes': o.notes || '', 'Job Name': o.jobName || '', 'Skid ID': o.skidId || '',
+    'Running Total After Pass': o.runningTotal, 'Notes': o.notes || '', 'Job Name': o.jobName || '', 'Job ID': o.jobId || '', 'Skid ID': o.skidId || '',
   }, opId);
 }
 async function eventTx(sheets, o, opId) {
   await appendTx(sheets, {
     'Timestamp': o.timestamp || nowStamp(), 'Ticket': o.ticket, 'Pass Number': 0, 'Operator': o.operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': o.itemText, 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
-    'Pass Total Cost': 0, 'Running Total After Pass': o.runningTotal || 0, 'Notes': o.note || '', 'Job Name': '', 'Skid ID': o.skidId || '',
+    'Pass Total Cost': 0, 'Running Total After Pass': o.runningTotal || 0, 'Notes': o.note || '', 'Job Name': '', 'Job ID': o.jobId || '', 'Skid ID': o.skidId || '',
   }, opId);
 }
 
@@ -672,7 +673,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
     if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; stamp['Row'] = ''; }   // attached to a job -> leaving its storage row
     await stampCells(sheets, MASTER, row, map, stamp);
     await appendLithoNote(lithoNoteClean);
-    await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName }, opId);
+    await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName, jobId: jobId || obj['Job ID'] || '' }, opId);
     result.litho = newTotal;
     result.detail = await ticketCardResult(sheets, skidId);
     return result;
@@ -748,7 +749,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   }
 
   await appendLithoNote([lithoNoteClean, scrapNote].filter(Boolean).join(' | '));
-  await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName }, opId);
+  await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName, jobId: jobId || '' }, opId);
 
   result.ticket = coatedTicketFinal;   // the coated piece now carries the -LR# ticket (obj kept its SKD)
   result.sheetsRun = sheets_;
@@ -899,8 +900,8 @@ async function editTicketCoating(sheets, skidId, passNumber, group, sub, item, o
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': ticket, 'Pass Number': ctx.nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'COATING CHANGED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': -oldCost, 'Running Total After Pass': afterVoid,
-    'Notes': 'VOID#' + passNumber + ': corrected ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ') -> ' + item + ' (' + newCost.toFixed(2) + ')', 'Job Name': jobId, 'Skid ID': skidId }, opId);
-  await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId }, '');
+    'Notes': 'VOID#' + passNumber + ': corrected ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ') -> ' + item + ' (' + newCost.toFixed(2) + ')', 'Job Name': jobId, 'Job ID': jobId, 'Skid ID': skidId }, opId);
+  await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId, jobId }, '');
   await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterNew, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   return getTicketCard(sheets, skidId);
 }
@@ -913,7 +914,7 @@ async function removeTicketCoating(sheets, skidId, passNumber, operator, opId) {
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': ctx.obj['Ticket'], 'Pass Number': ctx.nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'COATING REMOVED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': -oldCost, 'Running Total After Pass': afterVoid,
-    'Notes': 'VOID#' + passNumber + ': removed ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ')', 'Job Name': ctx.obj['Job ID'] || '', 'Skid ID': skidId }, opId);
+    'Notes': 'VOID#' + passNumber + ': removed ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ')', 'Job Name': ctx.obj['Job ID'] || '', 'Job ID': ctx.obj['Job ID'] || '', 'Skid ID': skidId }, opId);
   await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterVoid, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   return getTicketCard(sheets, skidId);
 }
@@ -1038,7 +1039,7 @@ async function approveJob(sheets, jobId, operator) {
     if (String(o['Job ID']).trim() !== String(jobId).trim()) continue;
     if ((o['Status'] || '') !== STATUS.PENDING) continue;
     await stampCells(sheets, MASTER, o.__row, master.map, { 'Status': STATUS.WIP, 'Approved At': nowStamp(), 'Approved By': operator || '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
-    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'JOB APPROVED', operator, note: 'Approved in job ' + jobId + ' — moved to WIP', runningTotal: num(o['Litho']) }, '');
+    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'JOB APPROVED', operator, note: 'Approved in job ' + jobId + ' — moved to WIP', jobId: jobId, runningTotal: num(o['Litho']) }, '');
   }
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Status': 'Approved', 'Approved At': nowStamp(), 'Approved By': operator || '' });
   return getJobDetail(sheets, jobId);
