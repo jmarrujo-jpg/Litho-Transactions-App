@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.26.1</span>
+      <span class="version" id="appVersion">v1.26.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3121,14 +3121,8 @@
       '<div class="sub" style="margin-top:4px">Coatings: ' + recipeText + '</div>' +
       '</div>';
 
-    html += '<div class="card" id="jobPickedTicketCard" style="display:none"></div>';
-
-    html += '<div class="card">' +
-      '<h3 style="margin-top:0;font-size:15px">Find a ticket</h3>' +
-      searchBarHtml('jobTicketSearch') +
-      '<div id="jobQueuePicker" style="margin-top:10px"></div>' +
-      '</div>';
-
+    // What's already on the job comes first, then the recipe editor, then the ticket picker —
+    // so when you reopen a job you see its current state before adding more.
     html += '<div class="card">' +
       '<h4 style="margin-bottom:6px;font-size:13px;color:var(--muted)">Tickets added to this job so far (<span id="jobAddedCount">0</span>)</h4>' +
       '<div id="jobAddedList" class="sub">None yet.</div>' +
@@ -3147,6 +3141,14 @@
       operatorFieldHtml('jobAddCoatOperator') +
       '<div id="jobAddCoatPreview" class="sub" style="margin:6px 0"></div>' +
       '<button class="btn secondary" id="jobAddCoatBtn">Add Coating</button>' +
+      '</div>';
+
+    html += '<div class="card" id="jobPickedTicketCard" style="display:none"></div>';
+
+    html += '<div class="card">' +
+      '<h3 style="margin-top:0;font-size:15px">Add a ticket</h3>' +
+      searchBarHtml('jobTicketSearch') +
+      '<div id="jobQueuePicker" style="margin-top:10px"></div>' +
       '</div>';
 
     html += '<div class="card">' +
