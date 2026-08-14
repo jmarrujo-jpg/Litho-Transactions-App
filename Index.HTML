@@ -212,7 +212,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.25.1</span>
+      <span class="version" id="appVersion">v1.25.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3392,7 +3392,7 @@
     body.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Used in Production</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to yesterday. A skid that&rsquo;s already Used can be added again for another occasion — it&rsquo;s flagged &ldquo;re-use&rdquo; and the extra use is recorded in its Comments.</div>' +
+        '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to the previous work day. A skid that&rsquo;s already Used can be added again for another occasion — it&rsquo;s flagged &ldquo;re-use&rdquo; and the extra use is recorded in its Comments.</div>' +
         '<div class="field"><label>Date used</label><input type="date" id="usedDate" value="' + esc(prevWorkdayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
         '<div class="row" style="align-items:flex-end">' +
           '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="usedAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
