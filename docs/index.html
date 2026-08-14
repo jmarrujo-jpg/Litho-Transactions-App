@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.22.0</span>
+      <span class="version" id="appVersion">v1.23.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2573,6 +2573,12 @@
     var d = new Date();
     return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
   }
+  // Previous workday (skips weekends): Mon -> Fri, Sun/Sat -> Fri, otherwise yesterday.
+  function prevWorkdayStr() {
+    var d = new Date();
+    do { d.setDate(d.getDate() - 1); } while (d.getDay() === 0 || d.getDay() === 6);
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
 
   function renderReview() {
     state.view = 'review';
@@ -3309,7 +3315,7 @@
       '<div class="card">' +
         '<h3 style="margin-top:0">Used in Production</h3>' +
         '<div class="sub" style="margin-bottom:12px">Scan or type a ticket / skid number to add it to the list, then mark them all Used. Pick the date the steel was used — it defaults to today. A skid that&rsquo;s already Used can be added again for another occasion — it&rsquo;s flagged &ldquo;re-use&rdquo; and the extra use is recorded in its Comments.</div>' +
-        '<div class="field"><label>Date used</label><input type="date" id="usedDate" value="' + esc(todayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
+        '<div class="field"><label>Date used</label><input type="date" id="usedDate" value="' + esc(prevWorkdayStr()) + '" max="' + esc(todayStr()) + '"></div>' +
         '<div class="row" style="align-items:flex-end">' +
           '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="usedAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
           '<button class="btn" id="usedAddBtn" style="margin-left:8px">+ Add</button>' +
