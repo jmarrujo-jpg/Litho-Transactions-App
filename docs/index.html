@@ -94,7 +94,7 @@
   .btn.warn { background: #b26a00; }
   .btn.warn:hover { background: #935700; }
   .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
-  .jobtile { flex: 0 0 auto; min-width: 160px; max-width: 220px; text-align: left;
+  .jobtile { width: 100%; text-align: left;
     background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
   .jobtile:hover { border-color: var(--accent); }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -212,7 +212,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.25.2</span>
+      <span class="version" id="appVersion">v1.25.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2007,7 +2007,7 @@
     bar.innerHTML =
       '<div class="card" style="padding:12px">' +
         '<div class="sub" style="margin-bottom:8px">Open jobs — tap to resume</div>' +
-        '<div style="display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px">' + tiles + '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:8px">' + tiles + '</div>' +
       '</div>';
     Array.prototype.forEach.call(bar.querySelectorAll('[data-resume]'), function (b) {
       b.onclick = function () { resumeJob(b.getAttribute('data-resume')); };
