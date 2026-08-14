@@ -94,9 +94,6 @@
   .btn.warn { background: #b26a00; }
   .btn.warn:hover { background: #935700; }
   .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
-  .jobtile { width: 100%; text-align: left;
-    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
-  .jobtile:hover { border-color: var(--accent); }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .colgrid { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -212,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.26.0</span>
+      <span class="version" id="appVersion">v1.26.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1997,17 +1994,21 @@
     var bar = document.getElementById('openJobsBar');
     if (!bar) return;
     if (!jobs || !jobs.length) { bar.innerHTML = ''; return; }
-    var tiles = jobs.map(function (j) {
-      return '<button class="jobtile" data-resume="' + esc(j.jobId) + '">' +
-        '<div class="ticket-id" style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.description || '(untitled job)') + '</div>' +
-        '<div class="sub">' + esc(j.jobId) + ' &middot; ' + (j.ticketCount || 0) + ' ticket(s)</div>' +
-        (j.coatings ? '<div class="sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.coatings) + '</div>' : '') +
-      '</button>';
+    var rows = jobs.map(function (j) {
+      return '<div class="queue-item" data-resume="' + esc(j.jobId) + '">' +
+        '<div style="min-width:0">' +
+          '<div class="ticket-id" style="font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.description || '(untitled job)') + '</div>' +
+          '<div class="sub">' + esc(j.jobId) + ' &middot; ' + (j.ticketCount || 0) + ' ticket(s)</div>' +
+          (j.coatings ? '<div class="sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.coatings) + '</div>' : '') +
+        '</div>' +
+        '<div class="sub" style="white-space:nowrap;color:var(--accent);font-weight:600">Resume &rsaquo;</div>' +
+      '</div>';
     }).join('');
     bar.innerHTML =
-      '<div class="card" style="padding:12px">' +
-        '<div class="sub" style="margin-bottom:8px">Open jobs — tap to resume</div>' +
-        '<div style="display:flex;flex-direction:column;gap:8px">' + tiles + '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin:0 0 4px;font-size:15px">Open jobs</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Tap one to resume adding tickets or coatings.</div>' +
+        rows +
       '</div>';
     Array.prototype.forEach.call(bar.querySelectorAll('[data-resume]'), function (b) {
       b.onclick = function () { resumeJob(b.getAttribute('data-resume')); };
