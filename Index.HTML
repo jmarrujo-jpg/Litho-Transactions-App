@@ -94,6 +94,9 @@
   .btn.warn { background: #b26a00; }
   .btn.warn:hover { background: #935700; }
   .ticket-link { color: var(--accent); font-weight: 600; text-decoration: underline; cursor: pointer; }
+  .jobtile { flex: 0 0 auto; min-width: 160px; max-width: 220px; text-align: left;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+  .jobtile:hover { border-color: var(--accent); }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .colgrid { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -209,7 +212,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.24.0</span>
+      <span class="version" id="appVersion">v1.25.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1956,10 +1959,12 @@
       '<div class="searchrow">' +
         '<button class="btn secondary" id="addTicketBtn" style="flex:1">+ Add Ticket</button>' +
       '</div>' +
+      '<div id="openJobsBar"></div>' +
       '<div id="allListContainer"><div class="loading">Loading tickets&hellip;</div></div>';
     document.getElementById('newJobBtn').onclick = openCreateJob;
     document.getElementById('reviewJobsBtn').onclick = openReview;
     document.getElementById('addTicketBtn').onclick = function () { openAddTicket(''); };
+    loadOpenJobsBar(tok);
     var searchInput = document.getElementById('mainSearch');
     searchInput.oninput = function () { renderAllRows(searchInput.value); };
     setActiveFilter(activeFilter);
@@ -1974,6 +1979,63 @@
       var c = document.getElementById('allListContainer');
       if (c && !allCache.length) c.innerHTML = '<div class="card empty">Error loading tickets: ' + esc(err.message) + '</div>';
     }).getAllTickets();
+  }
+
+  // Open (unapproved) jobs shown as tap-to-resume tiles above the ticket list, so an unfinished
+  // job survives a crash / walk-away — tapping one drops back into the add-tickets screen.
+  function loadOpenJobsBar(tok) {
+    google.script.run.withSuccessHandler(function (jobs) {
+      if (tok !== viewToken) return;
+      renderOpenJobsBar(jobs);
+    }).withFailureHandler(function () {
+      var bar = document.getElementById('openJobsBar');
+      if (bar) bar.innerHTML = '';   // non-critical: just hide the bar if it can't load
+    }).getOpenJobs();
+  }
+
+  function renderOpenJobsBar(jobs) {
+    var bar = document.getElementById('openJobsBar');
+    if (!bar) return;
+    if (!jobs || !jobs.length) { bar.innerHTML = ''; return; }
+    var tiles = jobs.map(function (j) {
+      return '<button class="jobtile" data-resume="' + esc(j.jobId) + '">' +
+        '<div class="ticket-id" style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.description || '(untitled job)') + '</div>' +
+        '<div class="sub">' + esc(j.jobId) + ' &middot; ' + (j.ticketCount || 0) + ' ticket(s)</div>' +
+        (j.coatings ? '<div class="sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.coatings) + '</div>' : '') +
+      '</button>';
+    }).join('');
+    bar.innerHTML =
+      '<div class="card" style="padding:12px">' +
+        '<div class="sub" style="margin-bottom:8px">Open jobs — tap to resume</div>' +
+        '<div style="display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px">' + tiles + '</div>' +
+      '</div>';
+    Array.prototype.forEach.call(bar.querySelectorAll('[data-resume]'), function (b) {
+      b.onclick = function () { resumeJob(b.getAttribute('data-resume')); };
+    });
+  }
+
+  // Resume an existing (unapproved) job into the same screen you see while creating a new job —
+  // the add-tickets step, with the job's id, description and coating recipe already filled in.
+  function resumeJob(jobId) {
+    state.view = 'createJob';
+    enterDetailView();
+    var view = document.getElementById('view');
+    var tok = viewToken;
+    view.innerHTML = '<div class="loading">Loading job&hellip;</div>';
+    google.script.run.withSuccessHandler(function (job) {
+      if (tok !== viewToken) return;
+      ensureRateData(function () {
+        if (tok !== viewToken) return;
+        currentJob = { jobId: job.jobId, description: job.description, coatings: job.coatings || [], operator: job.createdBy || '', notes: job.notes || '' };
+        state.jobId = job.jobId;
+        // Seed the "added so far" list with the tickets already on the job (detail columns unknown here).
+        jobAddedTickets = (job.tickets || []).map(function (t) { return { ticket: t.ticket, skidId: t.skidId, sheetsRun: '', estimatedWeightUsed: '' }; });
+        renderCreateJobAddTickets();
+      });
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      view.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
+    }).getJobDetail(jobId);
   }
 
   function ticketRowHtml(t) {
@@ -2736,6 +2798,15 @@
         '<button class="btn success" id="approveJobBtn"' + (job.tickets.length ? '' : ' disabled') + '>Approve &amp; Send to WIP</button>' +
         (job.tickets.length ? '' : '<div class="sub" style="margin-top:8px">Add at least one ticket first.</div>') +
         '</div>';
+
+      // Delete a job created by mistake. Only an empty job can be deleted here; a job with
+      // tickets must have them removed first (each ticket returns to Current).
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Delete job</h3>' +
+        (job.tickets.length
+          ? '<div class="sub">This job has ' + job.tickets.length + ' ticket(s). Remove them above first — each returns to Current — then you can delete the empty job.</div>'
+          : '<div class="sub" style="margin-bottom:10px">Permanently removes this empty job. Use this for a job created by mistake.</div>' +
+            '<button class="btn warn" id="deleteJobBtn" style="width:100%">Delete this job</button>') +
+        '</div>';
     }
 
     view.innerHTML = html;
@@ -2803,6 +2874,17 @@
           function () { showInfo('Job approved', 'All tickets moved to WIP.', function () { renderJob(); }); },
           function (err) { showModal({ title: 'Could not approve', message: err.message, confirmText: 'OK' }); approveBtn.disabled = false; });
       }, 'Approve');
+    };
+
+    // Delete job (only shown for an empty, unapproved job)
+    var deleteBtn = document.getElementById('deleteJobBtn');
+    if (deleteBtn) deleteBtn.onclick = function () {
+      showConfirm('Delete job', 'Delete ' + (job.description || job.jobId) + '? This can\'t be undone.', function () {
+        deleteBtn.disabled = true;
+        runMutation('deleteJob', [state.jobId, currentApprover(), newOpId()],
+          function () { toast('Job deleted'); openReview(); },
+          function (err) { showModal({ title: 'Could not delete', message: err.message, confirmText: 'OK' }); deleteBtn.disabled = false; });
+      }, 'Delete', 'warn');
     };
   }
 
@@ -3217,7 +3299,10 @@
       var last = r.remainderTicket
         ? esc(r.remainderTicket) + ' (' + esc(r.remainderSheets) + ' sheets)'
         : (r.scrapSheets ? esc(r.scrapSheets) + ' scrapped' : '&mdash;');
-      html += '<tr><td>' + esc(r.ticket) + '</td><td>' + esc(r.sheetsRun) + '</td><td>' + esc(r.estimatedWeightUsed) + ' lbs</td>' +
+      // Resumed tickets carry no sheets/weight detail — show a dash instead of "undefined".
+      var sheetsCell = (r.sheetsRun || r.sheetsRun === 0) ? esc(r.sheetsRun) : '&mdash;';
+      var weightCell = (r.estimatedWeightUsed || r.estimatedWeightUsed === 0) ? esc(r.estimatedWeightUsed) + ' lbs' : '&mdash;';
+      html += '<tr><td>' + esc(r.ticket) + '</td><td>' + sheetsCell + '</td><td>' + weightCell + '</td>' +
         '<td>' + last + '</td></tr>';
     });
     html += '</tbody></table>';

@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-34' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-35' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -106,6 +106,7 @@ async function handle(fn, args, env) {
     case 'getOperatorNames': return [];
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
+    case 'getOpenJobs': return getOpenJobs(sheets);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
     // ---- writes (Stage 2) ----
     case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, coatedTicket)
@@ -130,6 +131,8 @@ async function handle(fn, args, env) {
       return removeTicketFromJob(sheets, args[0], args[1], args[2], args[3]);
     case 'approveJob': // (jobId, operator, opId)
       return approveJob(sheets, args[0], args[1]);
+    case 'deleteJob': // (jobId, operator, opId)
+      return deleteJob(sheets, args[0], args[1], args[2]);
     // ---- production ----
     case 'getProductionRuns': // (dateStr, scope)
       return getProductionRuns(sheets, args[0], args[1]);
@@ -463,6 +466,18 @@ async function getJobsForDate(sheets, dateStr) {
     jobId: o['Job ID'], createdBy: o['Created By'], createdAt: toYMD(o['Created At']),
     description: o['Description'], coatings: o['Coatings'], ticketCount: o['Ticket Count'], status: o['Status'],
   }));
+}
+// Every unapproved (still "Pending") job, newest first — powers the "open jobs" tiles on the
+// main Litho screen so an unfinished job can be resumed after a crash or a walk-away.
+async function getOpenJobs(sheets) {
+  const { rows } = await readObjects(sheets, JOBS, true);
+  return rows
+    .filter((o) => o['Job ID'] && String(o['Status'] || '').trim() !== 'Approved')
+    .map((o) => ({
+      jobId: o['Job ID'], createdBy: o['Created By'], createdAt: toYMD(o['Created At']),
+      description: o['Description'], coatings: o['Coatings'], ticketCount: num(o['Ticket Count']), status: o['Status'],
+    }))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 async function getJobDetail(sheets, jobId) {
   const jobs = await readObjects(sheets, JOBS, true);
@@ -1043,6 +1058,28 @@ async function approveJob(sheets, jobId, operator) {
   }
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Status': 'Approved', 'Approved At': nowStamp(), 'Approved By': operator || '' });
   return getJobDetail(sheets, jobId);
+}
+
+// Delete a job created by mistake. Only unapproved jobs with NO tickets can be deleted — an
+// approved job's tickets are already in WIP (can't be undone here), and a job still holding
+// tickets must have them removed first (each returns to Current). Naturally idempotent: a
+// retry after the row is gone just reports it already deleted.
+async function deleteJob(sheets, jobId, operator, opId) {
+  const jobs = await readTab(sheets, JOBS);
+  const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
+  if (!job) return { ok: true, jobId, alreadyGone: true };
+  if (String(job['Status']).trim() === 'Approved') {
+    throw new Error('Job ' + jobId + ' is approved — its tickets are already in WIP and cannot be deleted here.');
+  }
+  const master = await readTab(sheets, MASTER);
+  const onJob = master.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim());
+  if (onJob.length) {
+    throw new Error('Job ' + jobId + ' still has ' + onJob.length + ' ticket(s). Remove them first (each returns to Current), then delete the job.');
+  }
+  const grid = await sheetGrid(sheets, JOBS);
+  if (!grid) throw new Error('Could not locate the Litho Jobs tab.');
+  await sheets.deleteRows(grid.sheetId, job.__row - 1, job.__row);   // job.__row is 1-based; deleteRows is 0-based half-open
+  return { ok: true, jobId, description: job['Description'] || '' };
 }
 
 // ================= PRODUCTION ======================================================
