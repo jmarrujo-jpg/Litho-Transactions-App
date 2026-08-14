@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.23.0</span>
+      <span class="version" id="appVersion">v1.24.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2469,19 +2469,16 @@
           });
       }
 
-      // Partial skid: let the operator name the coated batch's new -LR# ticket before it writes.
+      // Partial skid: the coated batch becomes a new -LR# ticket. The ticket NUMBER is auto-assigned
+      // by the worker (next free -LR# off the original) — we intentionally do NOT prompt to name it,
+      // so no one can renumber a ticket during a split. (Naming prompt turned off per request: the old
+      // "Name the coated skid" dialog let operators type an arbitrary -LR# number.)
       if (isPartialSkid) {
         var base = clientBaseTicket(card.ticket);
         var ran = Number(sheetsRun) || 0;
-        showPromptModal({
-          title: 'Name the coated skid',
-          message: 'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch gets this ticket and moves to WIP; the remaining ' + (origQty - ran) + ' sheets stay as ' + base + ' in Current.',
-          inputLabel: 'New ticket # for the coated batch',
-          inputValue: suggestLrTicket(card.ticket),
-          placeholder: base + '-LR1',
-          confirmText: 'Coat & send to WIP',
-          onConfirm: function (v) { submit(v); }
-        });
+        showConfirm('Coat & send to WIP',
+          'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch moves to WIP with an auto-assigned -LR# ticket; the remaining ' + (origQty - ran) + ' sheets stay as ' + base + ' in Current.',
+          function () { submit(''); });
       } else {
         submit('');
       }
@@ -3195,18 +3192,14 @@
           });
       }
 
+      // Partial skid: coated batch becomes a new -LR# ticket, auto-assigned by the worker. Naming
+      // prompt intentionally turned off (per request) so no one can renumber a ticket during a split.
       if (isPartialSkid) {
         var baseTk = clientBaseTicket(entry ? entry.ticket : '');
         var ran = Number(sheetsRun) || 0;
-        showPromptModal({
-          title: 'Name the coated skid',
-          message: 'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch gets this ticket and joins the job; the remaining ' + (origQty - ran) + ' sheets stay as ' + baseTk + ' in Current.',
-          inputLabel: 'New ticket # for the coated batch',
-          inputValue: suggestLrTicket(entry ? entry.ticket : ''),
-          placeholder: baseTk + '-LR1',
-          confirmText: 'Add to Job',
-          onConfirm: function (v) { submit(v); }
-        });
+        showConfirm('Add to Job',
+          'Coating ' + ran + ' of ' + origQty + ' sheets. The coated batch joins the job with an auto-assigned -LR# ticket; the remaining ' + (origQty - ran) + ' sheets stay as ' + baseTk + ' in Current.',
+          function () { submit(''); });
       } else {
         submit('');
       }
