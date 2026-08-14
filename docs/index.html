@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.26.2</span>
+      <span class="version" id="appVersion">v1.27.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1123,9 +1123,7 @@
         '</div>' +
         '<button class="btn" id="runReportBtn" style="width:100%">Generate report</button>' +
       '</div>' +
-      '<div id="reportResults"></div>' +
-      '<div class="card"><button class="btn secondary" id="migrateUsedBtn" style="width:100%">⚙️ One-time: move old “Finished On” into “Used At”</button>' +
-        '<div class="sub" style="margin-top:6px">Run this once before deleting the old “Finished On” column, so past used-dates keep showing in reports.</div></div>';
+      '<div id="reportResults"></div>';
 
     var from = document.getElementById('reportFrom');
     var to = document.getElementById('reportTo');
@@ -1149,22 +1147,6 @@
         .withSuccessHandler(function (r) { renderReportResults(r); })
         .withFailureHandler(function (err) { results.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>'; })
         .getDepartmentReport(f, t, dept);
-    };
-
-    document.getElementById('migrateUsedBtn').onclick = function () {
-      var btn = this;
-      showConfirm('Move old “Finished On” dates into “Used At”?',
-        'One-time cleanup. It copies each skid’s old Finished On date into Used At (only where Used At is empty), so nothing drops out of the reports when you delete the Finished On column. Safe to run more than once.',
-        function () {
-          btn.disabled = true; btn.textContent = 'Working…';
-          runMutation('migrateUsedDates', [],
-            function (res) {
-              var n = (res && res.migrated != null) ? res.migrated : 0;
-              showInfo('Done', n + ' skid' + (n === 1 ? '' : 's') + ' updated.' + (res && res.note ? ' ' + res.note : '') +
-                ' You can now delete the old “Finished On” column from the sheet.', function () { renderReports(); });
-            },
-            function (err) { toast('Error: ' + err.message); btn.disabled = false; btn.textContent = '⚙️ One-time: move old “Finished On” into “Used At”'; });
-        });
     };
   }
 

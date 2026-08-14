@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-35' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-36' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -158,8 +158,6 @@ async function handle(fn, args, env) {
       return finishRun(sheets, args[0], args[1], args[2], args[3]);
     case 'markUsedDirect': // (skidIds[], usedDate, opId)
       return markUsedDirect(sheets, args[0], args[1], args[2]);
-    case 'migrateUsedDates': // () one-time: copy Finished On -> Used At
-      return migrateUsedDates(sheets);
     case 'cutCoil': // (coilSkidId, cutDate, coilLine, skids[{weight,qty}], finish, opId)
       return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'getRawTable': // (tableKey: 'steel' | 'tx')
@@ -1426,24 +1424,6 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
   }
   return { ok: true, marked: results.filter((r) => r.ok && !r.reused).length, reused: results.filter((r) => r.reused).length,
     skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
-}
-
-// One-time maintenance: the skid "used" date moved from 'Finished On' to 'Used At'. This copies any
-// existing 'Finished On' value into 'Used At' where 'Used At' is still blank, so historical used
-// skids keep showing in the reports once the old 'Finished On' column is deleted from the sheet.
-// Idempotent — safe to run more than once (it only fills blanks and never overwrites).
-async function migrateUsedDates(sheets) {
-  let master = await readTab(sheets, MASTER);
-  const e = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
-  master = await readTab(sheets, MASTER);
-  if (!master.map['Finished On']) return { ok: true, migrated: 0, note: 'No "Finished On" column found — nothing to migrate.' };
-  const uaCol = master.map['Used At'];
-  const data = [];
-  master.rows.forEach((o) => {
-    if (o['Finished On'] && !o['Used At']) data.push({ range: "'" + MASTER + "'!" + colLetter(uaCol) + o.__row, values: [[o['Finished On']]] });
-  });
-  if (data.length) await sheets.batchUpdate(data);
-  return { ok: true, migrated: data.length };
 }
 
 // ================= COIL LINE (cut a received coil into child skids) ==================
