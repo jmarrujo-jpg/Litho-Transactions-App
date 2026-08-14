@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.27.0</span>
+      <span class="version" id="appVersion">v1.28.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3361,10 +3361,15 @@
     var view = document.getElementById('view');
     view.innerHTML =
       '<div class="sub" style="margin:4px 0 16px;font-size:16px">Which department are you working in?</div>' +
-      '<button class="btn" id="metalsPickLines" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
-      '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
-      '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
+      // Metal Lines / Press / Slitter are temporarily disabled (greyed out, not clickable) but kept
+      // in place — all their code stays; remove the `disabled` attribute below to turn them back on.
+      '<button class="btn" id="metalsPickLines" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
+      '<button class="btn" id="metalsPickPress" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
+      '<button class="btn" id="metalsPickSlitter" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
+      '<div class="sub" style="margin:-6px 0 14px;text-align:center">Metal Lines, Press and Slitter are temporarily unavailable.</div>' +
       '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>';
+    // Handlers kept for the disabled buttons (they can't fire while disabled) so re-enabling is a
+    // one-line change — just drop the `disabled` attribute above.
     document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
