@@ -212,7 +212,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.25.3</span>
+      <span class="version" id="appVersion">v1.26.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3133,6 +3133,21 @@
       '<div id="jobAddedList" class="sub">None yet.</div>' +
       '</div>';
 
+    // Add another coating to the job's recipe (applies to tickets already on it). Same control as
+    // the Review Jobs view, so a resumed job can grow its recipe without going through Review.
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a coating to this job</h3>' +
+      '<div class="sub" style="margin-bottom:8px">Applies to every ticket already on the job.</div>' +
+      '<div class="row">' +
+        selectField('jobAddCoatGroup', 'Size / Group', rateGroups(), null) +
+        selectField('jobAddCoatSub', '#OUT', [], null) +
+        selectField('jobAddCoatItem', 'Coating Item', [], null) +
+        selectField('jobAddCoatChem', 'Chem Code', [], null) +
+      '</div>' +
+      operatorFieldHtml('jobAddCoatOperator') +
+      '<div id="jobAddCoatPreview" class="sub" style="margin:6px 0"></div>' +
+      '<button class="btn secondary" id="jobAddCoatBtn">Add Coating</button>' +
+      '</div>';
+
     html += '<div class="card">' +
       '<div class="sub" style="margin-bottom:10px">Tickets you add are logged as <strong>Pending</strong>. Review and approve the job in <strong>Review Jobs</strong> to send them all to WIP.</div>' +
       '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — Back to Tickets</button>' +
@@ -3152,6 +3167,25 @@
     }
 
     renderJobAddedList();
+
+    // Add-coating cascade + button (grows the job's recipe from this screen).
+    var acGroup = document.getElementById('jobAddCoatGroup'), acSub = document.getElementById('jobAddCoatSub'),
+        acItem = document.getElementById('jobAddCoatItem'), acChem = document.getElementById('jobAddCoatChem'),
+        acCost = document.getElementById('jobAddCoatPreview');
+    wireCoatingCascade(acGroup, acSub, acItem, acChem, acCost, function (c) { return 'Adds ' + money(c) + ' per ticket.'; });
+    document.getElementById('jobAddCoatBtn').onclick = function () {
+      var operator = document.getElementById('jobAddCoatOperator').value.trim();
+      if (!acGroup.value || !acItem.value) { toast('Pick a group and coating item'); return; }
+      if (!operator) { toast('Enter an operator name'); return; }
+      var btn = document.getElementById('jobAddCoatBtn'); btn.disabled = true;
+      runMutation('addCoatingToJob', [currentJob.jobId, { group: acGroup.value, sub: acSub.value, item: acItem.value }, operator, newOpId()],
+        function () {
+          currentJob.coatings.push({ group: acGroup.value, sub: acSub.value, item: acItem.value });
+          toast('Coating added to job');
+          renderCreateJobAddTickets();   // refresh the recipe line and reset the picker
+        },
+        function (err) { showModal({ title: 'Could not add coating', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
+    };
 
     document.getElementById('finishJobBtn').onclick = function () {
       document.getElementById('backBtn').click();
