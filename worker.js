@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-38' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-39' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -107,6 +107,8 @@ async function handle(fn, args, env) {
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
     case 'getOpenJobs': return getOpenJobs(sheets, args[0]);
+    case 'snapshotCurrentWip': // (opId) -> writes a dated Current+WIP tab into the snapshots spreadsheet
+      return snapshotCurrentWip(sheets, env, args[0]);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
     // ---- writes (Stage 2) ----
     case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, coatedTicket)
@@ -309,6 +311,20 @@ async function makeSheets(env) {
       return call(base + ':batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }) });
     },
+    // ---- cross-spreadsheet helpers (write to a DIFFERENT spreadsheet the SA has been shared on;
+    //      used for the snapshots archive). Only the `spreadsheets` scope is needed. ----
+    async metaOf(spreadsheetId) {
+      return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=' + encodeURIComponent('sheets.properties(title)'), { headers: auth });
+    },
+    async addSheetTo(spreadsheetId, title, rowCount, columnCount) {
+      return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests: [{ addSheet: { properties: { title, gridProperties: { rowCount: Math.max(rowCount, 1), columnCount: Math.max(columnCount, 1) } } } }] }) });
+    },
+    async writeValues(spreadsheetId, rangeA1, values) {
+      return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
+        { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) });
+    },
   };
 }
 function serialToYMD(serial, tz) {
@@ -478,6 +494,37 @@ async function getOpenJobs(sheets, includeApproved) {
       description: o['Description'], coatings: o['Coatings'], ticketCount: num(o['Ticket Count']), status: o['Status'],
     }))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+// Point-in-time snapshot: writes the current Current + WIP rows (exactly as they are, all columns)
+// into a NEW dated tab in a separate "snapshots" spreadsheet you own and have shared with the
+// service account (SNAPSHOT_SHEET_ID). Each tab is right-sized to the data so the archive uses the
+// fewest cells possible. Only the spreadsheets scope is required.
+async function snapshotCurrentWip(sheets, env, opId) {
+  const snapId = (env && env.SNAPSHOT_SHEET_ID) || '';
+  if (!snapId) {
+    throw new Error('No snapshots spreadsheet is set up yet. Create a Google Sheet, share it with the service account as Editor, and set SNAPSHOT_SHEET_ID to its ID.');
+  }
+  const master = await readObjects(sheets, MASTER);
+  const headers = master.headers.slice();
+  const rows = master.rows.filter((o) => {
+    const s = String(o['Status'] || '').trim();
+    return s === STATUS.CURRENT || s === STATUS.WIP;
+  });
+  const current = rows.filter((o) => String(o['Status']).trim() === STATUS.CURRENT).length;
+  const wip = rows.filter((o) => String(o['Status']).trim() === STATUS.WIP).length;
+  // Grid = header row + one row per skid, values in header order.
+  const grid = [headers];
+  rows.forEach((o) => grid.push(headers.map((h) => (o[h] == null ? '' : o[h]))));
+  // Tab name = today's date; if a snapshot already exists for today, add "(2)", "(3)"...
+  let existing = new Set();
+  try { existing = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title)); }
+  catch (e) { throw new Error('Could not open the snapshots spreadsheet (' + snapId + '). Make sure it is shared with the service account as Editor. ' + e.message); }
+  const dateName = todayYMD();
+  let title = dateName; let n = 2;
+  while (existing.has(title)) { title = dateName + ' (' + n + ')'; n++; }
+  await sheets.addSheetTo(snapId, title, grid.length, headers.length);
+  await sheets.writeValues(snapId, "'" + title + "'!A1", grid);
+  return { ok: true, tab: title, current, wip, total: rows.length, spreadsheetId: snapId };
 }
 async function getJobDetail(sheets, jobId) {
   const jobs = await readObjects(sheets, JOBS, true);
