@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.28.2</span>
+      <span class="version" id="appVersion">v1.29.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2609,7 +2609,7 @@
   }
 
   // ---------------- Review Jobs (a day's coating runs, then approve -> WIP) ----------------
-  var reviewDate = ''; // yyyy-MM-dd; '' means today
+  var reviewScope = 'pending'; // 'pending' = all pending jobs; 'all' = pending + approved
 
   function todayStr() {
     var d = new Date();
@@ -2626,17 +2626,20 @@
     state.view = 'review';
     var view = document.getElementById('view');
     var tok = nextViewToken();
-    var day = reviewDate || todayStr();
+    var chips = [['pending', 'Pending'], ['all', 'All']].map(function (c) {
+      return '<button data-rscope="' + c[0] + '"' + (reviewScope === c[0] ? ' class="active"' : '') + '>' + c[1] + '</button>';
+    }).join('');
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Review jobs</h3>' +
-        '<div class="field"><label>Day</label><input type="date" id="reviewDay" value="' + esc(day) + '"></div>' +
-        '<div class="sub">Jobs created that day. Open one to add tickets/coatings and approve — approving moves its tickets to WIP.</div>' +
+        '<div class="tabbar">' + chips + '</div>' +
+        '<div class="sub">' + (reviewScope === 'all' ? 'All jobs, newest first.' : 'All pending jobs, newest first.') +
+          ' Open one to add tickets/coatings and approve — approving moves its tickets to WIP.</div>' +
       '</div>' +
       '<div id="reviewList"><div class="loading">Loading jobs&hellip;</div></div>';
-    document.getElementById('reviewDay').onchange = function () {
-      reviewDate = this.value; renderReview();
-    };
+    Array.prototype.forEach.call(view.querySelectorAll('[data-rscope]'), function (b) {
+      b.onclick = function () { reviewScope = b.getAttribute('data-rscope'); renderReview(); };
+    });
     google.script.run.withSuccessHandler(function (jobs) {
       if (tok !== viewToken) return;
       renderReviewList(jobs);
@@ -2644,20 +2647,24 @@
       if (tok !== viewToken) return;
       var el = document.getElementById('reviewList');
       if (el) el.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
-    }).getJobsForDate(reviewDate);
+    }).getOpenJobs(reviewScope === 'all');
   }
 
   function renderReviewList(jobs) {
     var el = document.getElementById('reviewList');
     if (!el) return;
-    if (!jobs || !jobs.length) { el.innerHTML = '<div class="card empty">No jobs created that day.</div>'; return; }
+    if (!jobs || !jobs.length) { el.innerHTML = '<div class="card empty">' + (reviewScope === 'all' ? 'No jobs yet.' : 'No pending jobs.') + '</div>'; return; }
     var html = '<div class="card">';
     jobs.forEach(function (j) {
-      var badge = j.status === 'Approved' ? '<span class="badge wip">Approved</span>' : '<span class="badge inprogress">Pending</span>';
+      var approved = j.status === 'Approved';
+      var badge = approved ? '<span class="badge wip">Approved</span>' : '<span class="badge inprogress">Pending</span>';
+      // Created date next to every job; for an approved job also show when it ran (was approved).
+      var dateLine = 'Created ' + esc(j.createdAt || '—') + (approved && j.approvedAt ? ' &middot; Ran ' + esc(j.approvedAt) : '');
       html += '<div class="queue-item" data-job="' + esc(j.jobId) + '">' +
         '<div style="min-width:0">' +
           '<div class="ticket-id">' + esc(j.description || '(untitled job)') + ' <span class="sub" style="font-weight:400">' + esc(j.jobId) + '</span></div>' +
           '<div class="sub">' + esc(j.coatings || '') + '</div>' +
+          '<div class="sub">' + dateLine + '</div>' +
           '<div class="sub">' + (j.ticketCount || 0) + ' ticket(s) &middot; by ' + esc(j.createdBy) + '</div>' +
         '</div>' +
         '<div style="text-align:right;white-space:nowrap">' + badge + '</div>' +

@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-37' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-38' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -106,7 +106,7 @@ async function handle(fn, args, env) {
     case 'getOperatorNames': return [];
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
-    case 'getOpenJobs': return getOpenJobs(sheets);
+    case 'getOpenJobs': return getOpenJobs(sheets, args[0]);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
     // ---- writes (Stage 2) ----
     case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, coatedTicket)
@@ -465,14 +465,16 @@ async function getJobsForDate(sheets, dateStr) {
     description: o['Description'], coatings: o['Coatings'], ticketCount: o['Ticket Count'], status: o['Status'],
   }));
 }
-// Every unapproved (still "Pending") job, newest first — powers the "open jobs" tiles on the
-// main Litho screen so an unfinished job can be resumed after a crash or a walk-away.
-async function getOpenJobs(sheets) {
+// Jobs newest first, across all dates. Pending only by default (powers the "open jobs" tiles on
+// the main Litho screen and the Review Jobs list); pass includeApproved to also return approved
+// jobs (Review Jobs "All" view). Carries both the created date and the approved ("ran") date.
+async function getOpenJobs(sheets, includeApproved) {
   const { rows } = await readObjects(sheets, JOBS, true);
   return rows
-    .filter((o) => o['Job ID'] && String(o['Status'] || '').trim() !== 'Approved')
+    .filter((o) => o['Job ID'] && (includeApproved || String(o['Status'] || '').trim() !== 'Approved'))
     .map((o) => ({
       jobId: o['Job ID'], createdBy: o['Created By'], createdAt: toYMD(o['Created At']),
+      approvedAt: o['Approved At'] ? toYMD(o['Approved At']) : '',
       description: o['Description'], coatings: o['Coatings'], ticketCount: num(o['Ticket Count']), status: o['Status'],
     }))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
