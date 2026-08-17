@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.30.0</span>
+      <span class="version" id="appVersion">v1.31.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -822,9 +822,9 @@
       '<div class="sub" id="dbCount" style="margin:8px 0"></div>' +
       '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>' +
       '<div class="card" style="margin-top:16px">' +
-        '<h3 style="margin-top:0;font-size:15px">Snapshot Current + WIP</h3>' +
-        '<div class="sub" style="margin-bottom:10px">Saves the Current + WIP rows exactly as they are right now into a new date-named tab in your <b>Litho Snapshots</b> spreadsheet. Safe — it never changes the live data.</div>' +
-        '<button class="btn" id="dbSnapshotBtn" style="width:100%">📸 Snapshot Current + WIP now</button>' +
+        '<h3 style="margin-top:0;font-size:15px">Snapshot active tickets</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Saves the Current + WIP + Pending rows exactly as they are right now into a new date-named tab in your <b>Litho Snapshots</b> spreadsheet. Safe — it never changes the live data. This also runs automatically every day at 3 PM.</div>' +
+        '<button class="btn" id="dbSnapshotBtn" style="width:100%">📸 Snapshot active tickets now</button>' +
       '</div>' +
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
         '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP tabs</h3>' +
@@ -849,14 +849,14 @@
     btn.disabled = true; btn.textContent = 'Saving snapshot…';
     runMutation('snapshotCurrentWip', [newOpId()],
       function (res) {
-        btn.disabled = false; btn.textContent = '📸 Snapshot Current + WIP now';
+        btn.disabled = false; btn.textContent = '📸 Snapshot active tickets now';
         var n = (res && res.total != null) ? res.total : 0;
         showInfo('Snapshot saved',
-          'Saved ' + n + ' row' + (n === 1 ? '' : 's') + ' (' + ((res && res.current) || 0) + ' Current, ' + ((res && res.wip) || 0) + ' WIP) to the tab "' + ((res && res.tab) || '') + '" in your Litho Snapshots spreadsheet.',
+          'Saved ' + n + ' row' + (n === 1 ? '' : 's') + ' (' + ((res && res.current) || 0) + ' Current, ' + ((res && res.wip) || 0) + ' WIP, ' + ((res && res.pending) || 0) + ' Pending) to the tab "' + ((res && res.tab) || '') + '" in your Litho Snapshots spreadsheet.',
           function () {});
       },
       function (err) {
-        btn.disabled = false; btn.textContent = '📸 Snapshot Current + WIP now';
+        btn.disabled = false; btn.textContent = '📸 Snapshot active tickets now';
         showModal({ title: 'Could not snapshot', message: err.message, confirmText: 'OK' });
       });
   }

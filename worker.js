@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-39' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-40' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -93,7 +93,28 @@ export default {
       return json({ ok: false, error: e && e.message ? e.message : String(e) }, 200);
     }
   },
+  // Daily snapshot. Configure a Cloudflare Cron Trigger of "0 22,23 * * *" (UTC): that fires at
+  // both 22:00 and 23:00 UTC so that, in either half of the year, exactly one firing lands on
+  // 3 PM Pacific. We gate on the local hour so daylight-saving shifts don't matter, and
+  // skipIfExists guarantees at most one snapshot tab per day even if both firings match.
+  async scheduled(event, env, ctx) {
+    try {
+      const targetHour = Number(env.SNAPSHOT_HOUR != null ? env.SNAPSHOT_HOUR : 15); // 3 PM Pacific
+      if (localHour(TZ) !== targetHour) return;
+      const sheets = await makeSheets(env);
+      const res = await snapshotCurrentWip(sheets, env, 'cron-' + todayYMD(), { skipIfExists: true });
+      console.log('scheduled snapshot: ' + JSON.stringify(res));
+    } catch (e) {
+      console.log('scheduled snapshot failed: ' + (e && e.message ? e.message : String(e)));
+    }
+  },
 };
+// Current hour (0-23) in the given IANA timezone, DST-aware.
+function localHour(tz) {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false }).formatToParts(new Date());
+  const h = p.find((x) => x.type === 'hour');
+  return h ? (Number(h.value) % 24) : -1;
+}
 
 // ---------------- dispatcher ----------------
 async function handle(fn, args, env) {
@@ -495,11 +516,14 @@ async function getOpenJobs(sheets, includeApproved) {
     }))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
-// Point-in-time snapshot: writes the current Current + WIP rows (exactly as they are, all columns)
-// into a NEW dated tab in a separate "snapshots" spreadsheet you own and have shared with the
-// service account (SNAPSHOT_SHEET_ID). Each tab is right-sized to the data so the archive uses the
-// fewest cells possible. Only the spreadsheets scope is required.
-async function snapshotCurrentWip(sheets, env, opId) {
+// Point-in-time snapshot: writes the active rows (Current + WIP + Pending, exactly as they are,
+// all columns) into a NEW dated tab in a separate "snapshots" spreadsheet you own and have shared
+// with the service account (SNAPSHOT_SHEET_ID). Each tab is right-sized to the data so the archive
+// uses the fewest cells possible. Only the spreadsheets scope is required.
+// opts.skipIfExists (used by the daily scheduler): if a tab for today already exists, do nothing
+// and report skipped instead of writing a second "(2)" tab.
+async function snapshotCurrentWip(sheets, env, opId, opts) {
+  opts = opts || {};
   const snapId = (env && env.SNAPSHOT_SHEET_ID) || '';
   if (!snapId) {
     throw new Error('No snapshots spreadsheet is set up yet. Create a Google Sheet, share it with the service account as Editor, and set SNAPSHOT_SHEET_ID to its ID.');
@@ -508,23 +532,28 @@ async function snapshotCurrentWip(sheets, env, opId) {
   const headers = master.headers.slice();
   const rows = master.rows.filter((o) => {
     const s = String(o['Status'] || '').trim();
-    return s === STATUS.CURRENT || s === STATUS.WIP;
+    return s === STATUS.CURRENT || s === STATUS.WIP || s === STATUS.PENDING;
   });
   const current = rows.filter((o) => String(o['Status']).trim() === STATUS.CURRENT).length;
   const wip = rows.filter((o) => String(o['Status']).trim() === STATUS.WIP).length;
+  const pending = rows.filter((o) => String(o['Status']).trim() === STATUS.PENDING).length;
   // Grid = header row + one row per skid, values in header order.
   const grid = [headers];
   rows.forEach((o) => grid.push(headers.map((h) => (o[h] == null ? '' : o[h]))));
-  // Tab name = today's date; if a snapshot already exists for today, add "(2)", "(3)"...
+  // Tab name = today's date (Pacific).
   let existing = new Set();
   try { existing = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title)); }
   catch (e) { throw new Error('Could not open the snapshots spreadsheet (' + snapId + '). Make sure it is shared with the service account as Editor. ' + e.message); }
   const dateName = todayYMD();
+  if (opts.skipIfExists && existing.has(dateName)) {
+    return { ok: true, skipped: true, tab: dateName, current, wip, pending, total: rows.length, spreadsheetId: snapId };
+  }
+  // Manual re-runs the same day get "(2)", "(3)"...
   let title = dateName; let n = 2;
   while (existing.has(title)) { title = dateName + ' (' + n + ')'; n++; }
   await sheets.addSheetTo(snapId, title, grid.length, headers.length);
   await sheets.writeValues(snapId, "'" + title + "'!A1", grid);
-  return { ok: true, tab: title, current, wip, total: rows.length, spreadsheetId: snapId };
+  return { ok: true, tab: title, current, wip, pending, total: rows.length, spreadsheetId: snapId };
 }
 async function getJobDetail(sheets, jobId) {
   const jobs = await readObjects(sheets, JOBS, true);
