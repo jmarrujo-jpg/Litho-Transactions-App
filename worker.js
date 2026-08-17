@@ -19,7 +19,7 @@
 const DEFAULT_SHEET_ID = '12Irb-isWOO14SrlGglcgnHc8oi0mLwW54LNo7pBHKjg';
 const TZ = 'America/Los_Angeles';
 const MASTER = 'Steel Tickets';
-const TRANSACTIONS = 'Litho Transactions';
+const TRANSACTIONS = 'Transactions';
 const JOBS = 'Litho Jobs';
 const RATE = 'Litho Rate Table';
 const PRODUCTION = 'Production Runs';
@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-36' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-37' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -493,7 +493,7 @@ async function getJobDetail(sheets, jobId) {
 
 // ================= WRITES (Stage 2) =================================================
 // Pragmatic concurrency: IDs are derived from the sheet and retries are deduped by opId
-// (recorded in an "Op ID" column on Litho Transactions). Good for a few tablets; if true
+// (recorded in an "Op ID" column on Transactions). Good for a few tablets; if true
 // simultaneous writes ever become an issue we can add a Durable Object.
 
 function colLetter(n) { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
@@ -598,7 +598,7 @@ async function findRemainderTicketId(masterRows, ticket, kind) {
   throw new Error('Too many existing splits of ticket ' + base + '. Rename manually.');
 }
 
-// opId dedup via an "Op ID" column on Litho Transactions (strongly consistent; catches the
+// opId dedup via an "Op ID" column on Transactions (strongly consistent; catches the
 // retry case where a first attempt succeeded but its response was lost).
 async function opAlreadyDone(sheets, opId) {
   if (!opId) return false;
@@ -1581,12 +1581,12 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
 
 // ================= FRESH-START IMPORT (convert 'Current' + 'WIP' tabs) ===============
 // The operator pastes their Access data into two staging tabs — 'Current' and 'WIP' — one per
-// state. This wipes Steel Tickets + Litho Transactions and rebuilds Steel Tickets from those tabs:
+// state. This wipes Steel Tickets + Transactions and rebuilds Steel Tickets from those tabs:
 // every row becomes a CLEAN single-column Steel Tickets row (fresh SKD id, Status taken from which
 // tab it came from), mapped BY COLUMN NAME so it tolerates whatever columns each tab actually has.
 // Rows are written at exact positions (no append drift), and the header is rebuilt clean — so this
 // also permanently escapes the duplicate-column / staircase mess. Repeatable: re-run it whenever the
-// Access data is refreshed. Litho Transactions is cleared too, so a reused SKD id can't inherit an
+// Access data is refreshed. Transactions is cleared too, so a reused SKD id can't inherit an
 // old skid's history. opId-deduped like the other mutations.
 const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 
