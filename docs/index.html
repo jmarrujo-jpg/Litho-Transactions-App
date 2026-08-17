@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.32.0</span>
+      <span class="version" id="appVersion">v1.33.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -825,6 +825,8 @@
         '<h3 style="margin-top:0;font-size:15px">Snapshot active tickets</h3>' +
         '<div class="sub" style="margin-bottom:10px">Saves the Current + WIP + Pending rows exactly as they are right now into a new date-named tab in your <b>Litho Snapshots</b> spreadsheet. Safe — it never changes the live data. This also runs automatically every day at 3 PM.</div>' +
         '<button class="btn" id="dbSnapshotBtn" style="width:100%">📸 Snapshot active tickets now</button>' +
+        '<div class="sub" style="margin:12px 0 6px">Test the archive: create back-dated day tabs from the current data so you can see what a few days looks like.</div>' +
+        '<button class="btn" id="dbSeedBtn" style="width:100%">🧪 Seed 5 test snapshots (last 5 days)</button>' +
       '</div>' +
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
         '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP tabs</h3>' +
@@ -840,7 +842,26 @@
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
     document.getElementById('dbImportBtn').onclick = dbFreshImport;
     document.getElementById('dbSnapshotBtn').onclick = dbSnapshot;
+    document.getElementById('dbSeedBtn').onclick = dbSeedSnapshots;
     loadDbAndRender();
+  }
+
+  // TEST: seed a few back-dated day tabs so you can preview the daily archive without waiting.
+  function dbSeedSnapshots() {
+    var btn = document.getElementById('dbSeedBtn');
+    btn.disabled = true; btn.textContent = 'Seeding test snapshots…';
+    runMutation('seedSnapshots', [5, newOpId()],
+      function (res) {
+        btn.disabled = false; btn.textContent = '🧪 Seed 5 test snapshots (last 5 days)';
+        var dates = (res && res.days ? res.days : []).map(function (d) { return d.date + (d.skipped ? ' (already there)' : ''); });
+        showInfo('Test snapshots seeded',
+          'Created ' + ((res && res.created) || 0) + ' new day tab(s)' + (res && res.skipped ? ', skipped ' + res.skipped + ' that already existed' : '') + ' in your Litho Snapshots spreadsheet:\n\n' + dates.join('\n'),
+          function () {});
+      },
+      function (err) {
+        btn.disabled = false; btn.textContent = '🧪 Seed 5 test snapshots (last 5 days)';
+        showModal({ title: 'Could not seed snapshots', message: err.message, confirmText: 'OK' });
+      });
   }
 
   // Snapshot the current Current + WIP rows into a dated tab in the snapshots spreadsheet.

@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-40' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-41' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -128,8 +128,10 @@ async function handle(fn, args, env) {
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
     case 'getOpenJobs': return getOpenJobs(sheets, args[0]);
-    case 'snapshotCurrentWip': // (opId) -> writes a dated Current+WIP tab into the snapshots spreadsheet
+    case 'snapshotCurrentWip': // (opId) -> writes a dated Current+WIP+Pending tab into the snapshots spreadsheet
       return snapshotCurrentWip(sheets, env, args[0]);
+    case 'seedSnapshots': // (count, opId) -> TEST: seed N back-dated day tabs from current data
+      return seedSnapshots(sheets, env, args[0], args[1]);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
     // ---- writes (Stage 2) ----
     case 'applyCoating': // (skidId, group, sub, item, operator, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, coatedTicket)
@@ -544,7 +546,7 @@ async function snapshotCurrentWip(sheets, env, opId, opts) {
   let existing = new Set();
   try { existing = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title)); }
   catch (e) { throw new Error('Could not open the snapshots spreadsheet (' + snapId + '). Make sure it is shared with the service account as Editor. ' + e.message); }
-  const dateName = todayYMD();
+  const dateName = opts.dateName || todayYMD();
   if (opts.skipIfExists && existing.has(dateName)) {
     return { ok: true, skipped: true, tab: dateName, current, wip, pending, total: rows.length, spreadsheetId: snapId };
   }
@@ -554,6 +556,26 @@ async function snapshotCurrentWip(sheets, env, opId, opts) {
   await sheets.addSheetTo(snapId, title, grid.length, headers.length);
   await sheets.writeValues(snapId, "'" + title + "'!A1", grid);
   return { ok: true, tab: title, current, wip, pending, total: rows.length, spreadsheetId: snapId };
+}
+// Date string (YYYY-MM-DD, Pacific) for N days ago.
+function ymdDaysAgo(n) {
+  const d = new Date(Date.now() - (Number(n) || 0) * 86400000);
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); }
+  catch (e) { return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); }
+}
+// TEST helper: seed the snapshots spreadsheet with several back-dated day tabs (today, yesterday, ...)
+// using the current live data, so you can see what a few days of the daily archive looks like without
+// waiting. Idempotent — re-running skips days that already have a tab. Cap 14 days.
+async function seedSnapshots(sheets, env, count, opId) {
+  const n = Math.max(1, Math.min(Number(count) || 3, 14));
+  const days = [];
+  for (let i = n - 1; i >= 0; i--) {   // oldest first so tabs land in date order
+    const dateName = ymdDaysAgo(i);
+    const r = await snapshotCurrentWip(sheets, env, (opId || 'seed') + '-' + i, { dateName, skipIfExists: true });
+    days.push({ date: dateName, tab: r.tab, skipped: !!r.skipped, total: r.total, current: r.current, wip: r.wip, pending: r.pending });
+  }
+  const created = days.filter((d) => !d.skipped).length;
+  return { ok: true, requested: n, created, skipped: n - created, days };
 }
 async function getJobDetail(sheets, jobId) {
   const jobs = await readObjects(sheets, JOBS, true);
