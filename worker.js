@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-43' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-44' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -146,10 +146,18 @@ const SNAPSHOT_LOG_TAB = 'Failure Report';
 async function logSnapshotStatus(sheets, env, today, row) {
   const snapId = (env && env.SNAPSHOT_SHEET_ID) || '';
   if (!snapId) return;
+  const header = ['Date', 'Success', 'Failure'];
   const titles = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title));
   if (!titles.has(SNAPSHOT_LOG_TAB)) {
     await sheets.addSheetTo(snapId, SNAPSHOT_LOG_TAB, 2000, 3);
-    await sheets.writeValues(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [['Date', 'Success', 'Failure']]);
+    await sheets.writeValues(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [header]);
+  } else {
+    // Tab already exists — make sure row 1 is the header, even if it was created/emptied by hand,
+    // so appended rows start at row 2 and the watcher's "skip row 1" logic stays correct.
+    const head = await sheets.readFrom(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1:C1");
+    if (!head.length || !head[0].length) {
+      await sheets.writeValues(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [header]);
+    }
   }
   await sheets.appendTo(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [today, row.success, row.failure]);
 }
@@ -389,6 +397,10 @@ async function makeSheets(env) {
     async appendTo(spreadsheetId, rangeA1, row) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [row] }) });
+    },
+    async readFrom(spreadsheetId, rangeA1) {
+      const j = await call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1), { headers: auth });
+      return j.values || [];
     },
   };
 }
