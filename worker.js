@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-42' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-43' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -101,20 +101,23 @@ export default {
     const targetHour = Number(env.SNAPSHOT_HOUR != null ? env.SNAPSHOT_HOUR : 15); // 3 PM Pacific
     if (localHour(TZ) !== targetHour) return;
     const today = todayYMD();
-    let mail;
+    let sheets = null, row;
     try {
-      const sheets = await makeSheets(env);
+      sheets = await makeSheets(env);
       const res = await snapshotCurrentWip(sheets, env, 'cron-' + today, { skipIfExists: true });
       console.log('scheduled snapshot: ' + JSON.stringify(res));
-      mail = buildSnapshotEmail(today, res, null);
+      row = buildSnapshotLog(today, res, null);
     } catch (e) {
       const msg = (e && e.message ? e.message : String(e));
       console.log('scheduled snapshot failed: ' + msg);
-      mail = buildSnapshotEmail(today, null, msg);
+      row = buildSnapshotLog(today, null, msg);
     }
-    // Send the daily health email (success or failure). Never let an email problem crash the job.
-    try { await sendSnapshotEmail(env, mail.subject, mail.body); }
-    catch (e) { console.log('snapshot email failed: ' + (e && e.message ? e.message : String(e))); }
+    // Record the result in the "Failure Report" tab so a sheet-side Apps Script can email on failure.
+    // Never let a logging problem crash the job.
+    try {
+      if (!sheets) sheets = await makeSheets(env);
+      await logSnapshotStatus(sheets, env, today, row);
+    } catch (e) { console.log('snapshot log write failed: ' + (e && e.message ? e.message : String(e))); }
   },
 };
 // Current hour (0-23) in the given IANA timezone, DST-aware.
@@ -123,50 +126,32 @@ function localHour(tz) {
   const h = p.find((x) => x.type === 'hour');
   return h ? (Number(h.value) % 24) : -1;
 }
-// Compose the daily snapshot health email. Pure (no I/O) so it is easy to test.
-function buildSnapshotEmail(today, res, err) {
+// Compose the "Failure Report" log columns for a run. Pure (no I/O) so it is easy to test.
+// Returns { success, failure }: on success, `success` (col B) is filled and `failure` (col C) is
+// blank; on failure it is the reverse — so a sheet-side Apps Script can email whenever col C fills.
+function buildSnapshotLog(today, res, err) {
   if (err) {
-    return {
-      subject: 'Steel Snapshot ⚠️ FAILED — ' + today,
-      body: 'The daily Steel snapshot did NOT run today (' + today + ').\n\n'
-          + 'Error: ' + err + '\n\n'
-          + 'Likely causes: the Litho Snapshots sheet is not shared with the service account, '
-          + 'SNAPSHOT_SHEET_ID is not set, or Google Sheets was unreachable. Your live app data is unaffected.',
-    };
+    return { success: '', failure: 'Snapshot did not run: ' + err + ' (live app data is unaffected)' };
   }
-  const counts = (res.total || 0) + ' active rows (' + (res.current || 0) + ' Current, '
+  const counts = (res.total || 0) + ' rows (' + (res.current || 0) + ' Current, '
     + (res.wip || 0) + ' WIP, ' + (res.pending || 0) + ' Pending)';
   if (res.skipped) {
-    return {
-      subject: 'Steel Snapshot ✅ ' + today + ' (already present)',
-      body: 'Today’s snapshot (' + today + ') already existed, so no duplicate tab was created.\n\n' + counts + '.',
-    };
+    return { success: 'Success — already present, ' + counts, failure: '' };
   }
-  return {
-    subject: 'Steel Snapshot ✅ ' + today,
-    body: 'The daily Steel snapshot ran successfully and saved tab "' + res.tab + '".\n\n' + counts + '.\n\n'
-        + 'This is your automatic weekday confirmation. If you stop seeing it around 3 PM Pacific on a '
-        + 'workday, the snapshot job may need attention.',
-  };
+  return { success: 'Success — saved tab "' + res.tab + '", ' + counts, failure: '' };
 }
-// Send the snapshot email via SendGrid (v3 mail send). Configure these Cloudflare env vars:
-//   SENDGRID_API_KEY, SNAPSHOT_EMAIL_TO, SNAPSHOT_EMAIL_FROM (a SendGrid-verified sender address).
-// If any are missing it no-ops, so an unconfigured mailer never affects the snapshot itself.
-async function sendSnapshotEmail(env, subject, body) {
-  const key = env.SENDGRID_API_KEY, to = env.SNAPSHOT_EMAIL_TO, from = env.SNAPSHOT_EMAIL_FROM;
-  if (!key || !to || !from) { console.log('snapshot email not configured (SENDGRID_API_KEY / SNAPSHOT_EMAIL_TO / SNAPSHOT_EMAIL_FROM); skipping'); return; }
-  const payload = {
-    personalizations: [{ to: [{ email: to }] }],
-    from: { email: from },
-    subject: subject,
-    content: [{ type: 'text/plain', value: body }],
-  };
-  const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) { const t = await r.text(); throw new Error('SendGrid ' + r.status + ': ' + t.slice(0, 200)); }
+// Append a row to the "Failure Report" tab of the snapshots spreadsheet: A=date, B=success, C=failure.
+// Creates the tab with a header row the first time. No-ops if no snapshots sheet is configured.
+const SNAPSHOT_LOG_TAB = 'Failure Report';
+async function logSnapshotStatus(sheets, env, today, row) {
+  const snapId = (env && env.SNAPSHOT_SHEET_ID) || '';
+  if (!snapId) return;
+  const titles = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title));
+  if (!titles.has(SNAPSHOT_LOG_TAB)) {
+    await sheets.addSheetTo(snapId, SNAPSHOT_LOG_TAB, 2000, 3);
+    await sheets.writeValues(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [['Date', 'Success', 'Failure']]);
+  }
+  await sheets.appendTo(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [today, row.success, row.failure]);
 }
 
 // ---------------- dispatcher ----------------
@@ -400,6 +385,10 @@ async function makeSheets(env) {
     async writeValues(spreadsheetId, rangeA1, values) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
         { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) });
+    },
+    async appendTo(spreadsheetId, rangeA1, row) {
+      return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
+        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [row] }) });
     },
   };
 }
