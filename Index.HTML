@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.36.0</span>
+      <span class="version" id="appVersion">v1.36.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -233,7 +233,7 @@
   // to your Worker URL (LITHO_API_SECRET only if you set an API_SECRET script property).
   var LITHO_API_URL = 'https://litho-floor.jmarrujo.workers.dev'; // your Cloudflare Worker URL (GitHub Pages front end calls it). Ignored when Apps Script hosts the page.
   var LITHO_API_SECRET = ''; // optional; must match the API_SECRET script property if you set one
-  var PRINT_TICKETS_URL = 'http://desktop-1o5m8vo:5000/'; // local steel-ticket print service (opens in a new tab; only reachable on the shop network)
+  var PRINT_TICKETS_URL = 'http://desktop-1o5m8vo:5000/'; // local steel-ticket print service (opens in a new tab; only reachable on the local network)
   (function installHostingShim() {
     if (window.google && window.google.script && window.google.script.run) return; // real Apps Script bridge present
     function makeRunner() {
@@ -3381,7 +3381,7 @@
       '<div class="sub" style="margin:-6px 0 14px;text-align:center">Metal Lines, Press and Slitter are coming soon.</div>' +
       '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
       '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
-      '<div class="sub" style="margin:8px 0 0;text-align:center">Opens the steel-ticket printer (shop network only).</div>';
+      '<div class="sub" style="margin:8px 0 0;text-align:center">Opens the steel-ticket printer (local network only).</div>';
     // Handlers kept for the disabled buttons (they can't fire while disabled) so re-enabling is a
     // one-line change — just drop the `disabled` attribute above.
     document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
