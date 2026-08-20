@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-44' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-45' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -149,7 +149,7 @@ async function logSnapshotStatus(sheets, env, today, row) {
   const header = ['Date', 'Success', 'Failure'];
   const titles = new Set(((await sheets.metaOf(snapId)).sheets || []).map((s) => s.properties.title));
   if (!titles.has(SNAPSHOT_LOG_TAB)) {
-    await sheets.addSheetTo(snapId, SNAPSHOT_LOG_TAB, 2000, 3);
+    await sheets.addSheetTo(snapId, SNAPSHOT_LOG_TAB, 2000, 3, 0);
     await sheets.writeValues(snapId, "'" + SNAPSHOT_LOG_TAB + "'!A1", [header]);
   } else {
     // Tab already exists — make sure row 1 is the header, even if it was created/emptied by hand,
@@ -385,10 +385,12 @@ async function makeSheets(env) {
     async metaOf(spreadsheetId) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=' + encodeURIComponent('sheets.properties(title)'), { headers: auth });
     },
-    async addSheetTo(spreadsheetId, title, rowCount, columnCount) {
+    async addSheetTo(spreadsheetId, title, rowCount, columnCount, index) {
+      const properties = { title, gridProperties: { rowCount: Math.max(rowCount, 1), columnCount: Math.max(columnCount, 1) } };
+      if (typeof index === 'number') properties.index = index; // tab position: 0 = leftmost
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requests: [{ addSheet: { properties: { title, gridProperties: { rowCount: Math.max(rowCount, 1), columnCount: Math.max(columnCount, 1) } } } }] }) });
+          body: JSON.stringify({ requests: [{ addSheet: { properties } }] }) });
     },
     async writeValues(spreadsheetId, rangeA1, values) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
@@ -607,7 +609,9 @@ async function snapshotCurrentWip(sheets, env, opId, opts) {
   // Manual re-runs the same day get "(2)", "(3)"...
   let title = dateName; let n = 2;
   while (existing.has(title)) { title = dateName + ' (' + n + ')'; n++; }
-  await sheets.addSheetTo(snapId, title, grid.length, headers.length);
+  // Insert at index 1 so the newest date tab sits just right of "Failure Report" (index 0),
+  // pushing older date tabs further right — newest always stays leftmost-but-one.
+  await sheets.addSheetTo(snapId, title, grid.length, headers.length, 1);
   await sheets.writeValues(snapId, "'" + title + "'!A1", grid);
   return { ok: true, tab: title, current, wip, pending, total: rows.length, spreadsheetId: snapId };
 }
