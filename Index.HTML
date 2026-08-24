@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.5</span>
+      <span class="version" id="appVersion">v1.37.6</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1934,7 +1934,7 @@
   function travelerStyle() {
     return '<style>@media print {' +
       '@page { size: 6in 4in; margin: 0.12in; }' +
-      '#printArea .trav { width: 5.76in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
+      '#printArea .trav { width: 5.76in; padding-top: 0.5in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
       '#printArea .trav, #printArea .trav * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }' +
       '#printArea .trav .top { display:flex; align-items:flex-start; gap:10px; }' +
       '#printArea .trav .tlogo { flex:none; height:0.62in; width:auto; }' +
@@ -1945,7 +1945,6 @@
       '#printArea .trav .skid { font-size:9pt; font-weight:bold; margin-top:1px; }' +
       '#printArea .trav .dm { flex:none; text-align:center; }' +
       '#printArea .trav .dm svg { width:0.95in; height:0.95in; display:block; }' +
-      '#printArea .trav .dmcap { font-size:5.5pt; margin-top:1px; }' +
       '#printArea .trav table.specs { border-collapse:collapse; margin:5px 0 2px; width:100%; }' +
       '#printArea .trav table.specs td { border:0 !important; padding:0 4px 2px 0 !important; font-size:8pt; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; text-align:left !important; }' +
       '#printArea .trav table.specs td.v { font-weight:bold; padding-right:14px !important; }' +
@@ -2014,7 +2013,7 @@
             '<h2>Ticket ' + esc(card.ticket || '(none)') + '</h2>' +
             '<div class="skid">' + esc(card.skidId || '') + (card.status ? ' &middot; ' + esc(card.status) : '') + '</div>' +
           '</div>' +
-          (dm ? '<div class="dm">' + dm + '<div class="dmcap">scan for history</div></div>' : '') +
+          (dm ? '<div class="dm">' + dm + '</div>' : '') +
         '</div>' +
         '<table class="specs">' + specRows + '</table>' +
         '<hr>' +
