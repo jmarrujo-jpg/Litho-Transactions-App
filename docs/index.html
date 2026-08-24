@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.36.1</span>
+      <span class="version" id="appVersion">v1.37.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -226,6 +226,95 @@
 <div id="printArea"></div>
 
 <script>
+  // ===================================================================================================
+  // Data Matrix (ECC200) encoder — self-contained, no dependencies (works offline on the shop network).
+  // ASCII encodation (digit-pair compaction) + Reed-Solomon (GF(256), poly 0x12D) + ISO 16022 Annex F
+  // module placement. Validated against the ISO canonical vector "123456" -> data [142,164,186],
+  // ecc [114,25,5,88,102] (see scratchpad datamatrix.test.mjs, 19 checks). Used to print a scannable
+  // Data Matrix label on the skid traveler.
+  // ===================================================================================================
+  (function (root) {
+    'use strict';
+    var LOG = new Array(256), ALOG = new Array(256);
+    (function () { var p = 1; for (var i = 0; i < 255; i++) { ALOG[i] = p; LOG[p] = i; p <<= 1; if (p & 0x100) p ^= 0x12D; } ALOG[255] = ALOG[0]; })();
+    function mul(a, b) { return (a === 0 || b === 0) ? 0 : ALOG[(LOG[a] + LOG[b]) % 255]; }
+    function rsGenPoly(nc) { var g = [1]; for (var i = 1; i <= nc; i++) { g[i] = 1; for (var j = i - 1; j > 0; j--) { g[j] = g[j - 1] ^ mul(g[j], ALOG[i]); } g[0] = mul(g[0], ALOG[i]); } return g; }
+    function rsEncode(data, nc) { var g = rsGenPoly(nc); var ecc = new Array(nc); for (var i = 0; i < nc; i++) ecc[i] = 0;
+      for (var d = 0; d < data.length; d++) { var k = data[d] ^ ecc[0]; for (var j = 0; j < nc - 1; j++) { ecc[j] = ecc[j + 1] ^ mul(g[nc - 1 - j], k); } ecc[nc - 1] = mul(g[0], k); } return ecc; }
+    var SPECS = [
+      { region: 8, across: 1, data: 3, ecc: 5, blocks: 1 }, { region: 10, across: 1, data: 5, ecc: 7, blocks: 1 },
+      { region: 12, across: 1, data: 8, ecc: 10, blocks: 1 }, { region: 14, across: 1, data: 12, ecc: 12, blocks: 1 },
+      { region: 16, across: 1, data: 18, ecc: 14, blocks: 1 }, { region: 18, across: 1, data: 22, ecc: 18, blocks: 1 },
+      { region: 20, across: 1, data: 30, ecc: 20, blocks: 1 }, { region: 22, across: 1, data: 36, ecc: 24, blocks: 1 },
+      { region: 24, across: 1, data: 44, ecc: 28, blocks: 1 }, { region: 14, across: 2, data: 62, ecc: 36, blocks: 1 },
+      { region: 16, across: 2, data: 86, ecc: 42, blocks: 1 }, { region: 18, across: 2, data: 114, ecc: 48, blocks: 1 },
+      { region: 20, across: 2, data: 144, ecc: 56, blocks: 1 }, { region: 22, across: 2, data: 174, ecc: 68, blocks: 1 },
+      { region: 24, across: 2, data: 204, ecc: 84, blocks: 2 }, { region: 14, across: 4, data: 280, ecc: 112, blocks: 2 },
+      { region: 16, across: 4, data: 368, ecc: 144, blocks: 4 }, { region: 18, across: 4, data: 456, ecc: 192, blocks: 4 },
+      { region: 20, across: 4, data: 576, ecc: 224, blocks: 4 }, { region: 22, across: 4, data: 696, ecc: 272, blocks: 4 },
+      { region: 24, across: 4, data: 816, ecc: 336, blocks: 6 }, { region: 18, across: 6, data: 1050, ecc: 408, blocks: 6 },
+      { region: 20, across: 6, data: 1304, ecc: 496, blocks: 8 }, { region: 22, across: 6, data: 1558, ecc: 620, blocks: 10 }
+    ];
+    function encodeAscii(text) { var out = [], i = 0, n = text.length;
+      while (i < n) { var c = text.charCodeAt(i), c2 = i + 1 < n ? text.charCodeAt(i + 1) : -1;
+        if (c >= 48 && c <= 57 && c2 >= 48 && c2 <= 57) { out.push((c - 48) * 10 + (c2 - 48) + 130); i += 2; }
+        else if (c < 128) { out.push(c + 1); i += 1; }
+        else { out.push(235); out.push((c - 128) + 1); i += 1; } } return out; }
+    function padCodewords(cw, capacity) { if (cw.length < capacity) cw.push(129);
+      while (cw.length < capacity) { var pos = cw.length + 1, r = ((149 * pos) % 253) + 1, v = 129 + r; if (v > 254) v -= 254; cw.push(v); } return cw; }
+    function chooseSpec(len) { for (var i = 0; i < SPECS.length; i++) { if (SPECS[i].data >= len) return SPECS[i]; } throw new Error('Data too long for a Data Matrix symbol'); }
+    function buildFullCodewords(data, spec) { var blocks = spec.blocks, eccPer = spec.ecc / blocks, dataBlocks = [], eccBlocks = [];
+      for (var b = 0; b < blocks; b++) { dataBlocks.push([]); eccBlocks.push([]); }
+      for (var i = 0; i < data.length; i++) dataBlocks[i % blocks].push(data[i]);
+      for (var b2 = 0; b2 < blocks; b2++) eccBlocks[b2] = rsEncode(dataBlocks[b2], eccPer);
+      var full = data.slice(), maxE = 0;
+      for (var b3 = 0; b3 < blocks; b3++) maxE = Math.max(maxE, eccBlocks[b3].length);
+      for (var e = 0; e < maxE; e++) { for (var b4 = 0; b4 < blocks; b4++) { if (e < eccBlocks[b4].length) full.push(eccBlocks[b4][e]); } } return full; }
+    function placeBits(codewords, nrow, ncol) { var grid = [], r; for (r = 0; r < nrow; r++) { grid.push(new Array(ncol)); }
+      function bit(row, col, chr, mask) { if (row < 0) { row += nrow; col += 4 - ((nrow + 4) % 8); } if (col < 0) { col += ncol; row += 4 - ((ncol + 4) % 8); } grid[row][col] = (codewords[chr] >> mask) & 1; }
+      function utah(row, col, chr) { bit(row - 2, col - 2, chr, 7); bit(row - 2, col - 1, chr, 6); bit(row - 1, col - 2, chr, 5); bit(row - 1, col - 1, chr, 4); bit(row - 1, col, chr, 3); bit(row, col - 2, chr, 2); bit(row, col - 1, chr, 1); bit(row, col, chr, 0); }
+      function corner1(chr) { bit(nrow - 1, 0, chr, 7); bit(nrow - 1, 1, chr, 6); bit(nrow - 1, 2, chr, 5); bit(0, ncol - 2, chr, 4); bit(0, ncol - 1, chr, 3); bit(1, ncol - 1, chr, 2); bit(2, ncol - 1, chr, 1); bit(3, ncol - 1, chr, 0); }
+      function corner2(chr) { bit(nrow - 3, 0, chr, 7); bit(nrow - 2, 0, chr, 6); bit(nrow - 1, 0, chr, 5); bit(0, ncol - 4, chr, 4); bit(0, ncol - 3, chr, 3); bit(0, ncol - 2, chr, 2); bit(0, ncol - 1, chr, 1); bit(1, ncol - 1, chr, 0); }
+      function corner3(chr) { bit(nrow - 3, 0, chr, 7); bit(nrow - 2, 0, chr, 6); bit(nrow - 1, 0, chr, 5); bit(0, ncol - 2, chr, 4); bit(0, ncol - 1, chr, 3); bit(1, ncol - 1, chr, 2); bit(2, ncol - 1, chr, 1); bit(3, ncol - 1, chr, 0); }
+      function corner4(chr) { bit(nrow - 1, 0, chr, 7); bit(nrow - 1, ncol - 1, chr, 6); bit(0, ncol - 3, chr, 5); bit(0, ncol - 2, chr, 4); bit(0, ncol - 1, chr, 3); bit(1, ncol - 3, chr, 2); bit(1, ncol - 2, chr, 1); bit(1, ncol - 1, chr, 0); }
+      var chr = 0, row = 4, col = 0;
+      do {
+        if (row === nrow && col === 0) corner1(chr++);
+        if (row === nrow - 2 && col === 0 && (ncol % 4) !== 0) corner2(chr++);
+        if (row === nrow - 2 && col === 0 && (ncol % 8) === 4) corner3(chr++);
+        if (row === nrow + 4 && col === 2 && (ncol % 8) === 0) corner4(chr++);
+        do { if (row < nrow && col >= 0 && grid[row][col] === undefined) utah(row, col, chr++); row -= 2; col += 2; } while (row >= 0 && col < ncol);
+        row += 1; col += 3;
+        do { if (row >= 0 && col < ncol && grid[row][col] === undefined) utah(row, col, chr++); row += 2; col -= 2; } while (row < nrow && col >= 0);
+        row += 3; col += 1;
+      } while (row < nrow || col < ncol);
+      if (grid[nrow - 1][ncol - 1] === undefined) { grid[nrow - 1][ncol - 1] = 1; grid[nrow - 1][ncol - 2] = 1; }
+      return grid; }
+    function assemble(mapping, spec) { var region = spec.region, across = spec.across, symSide = (region + 2) * across, out = [], i;
+      for (i = 0; i < symSide; i++) { out.push(new Array(symSide).fill(0)); }
+      for (var rr = 0; rr < across; rr++) { for (var rc = 0; rc < across; rc++) { var baseR = rr * (region + 2), baseC = rc * (region + 2);
+        for (var k = 0; k < region + 2; k++) { out[baseR + k][baseC] = 1; out[baseR + region + 1][baseC + k] = 1; }
+        for (var t = 0; t < region + 2; t++) { out[baseR][baseC + t] = (t % 2 === 0) ? 1 : 0; out[baseR + t][baseC + region + 1] = (t % 2 === 0) ? 0 : 1; }
+        out[baseR][baseC + region + 1] = 0;
+        for (var dr = 0; dr < region; dr++) { for (var dc = 0; dc < region; dc++) { out[baseR + 1 + dr][baseC + 1 + dc] = mapping[rr * region + dr][rc * region + dc] || 0; } } } }
+      return out; }
+    function encode(text) { var data = encodeAscii(String(text)), spec = chooseSpec(data.length); padCodewords(data, spec.data);
+      var full = buildFullCodewords(data, spec), side = spec.region * spec.across, matrix = assemble(placeBits(full, side, side), spec);
+      return { size: matrix.length, matrix: matrix }; }
+    root.DataMatrix = { encode: encode };
+  })(window);
+
+  // Render a Data Matrix for `text` as a self-contained SVG string (black modules on white,
+  // with a quiet-zone border). `mod` = module size in px, `quiet` = quiet-zone modules.
+  function dataMatrixSVG(text, mod, quiet) {
+    mod = mod || 4; quiet = (quiet == null) ? 2 : quiet;
+    var sym = window.DataMatrix.encode(text), n = sym.size, m = sym.matrix;
+    var dim = (n + quiet * 2) * mod, rects = '';
+    for (var r = 0; r < n; r++) { for (var c = 0; c < n; c++) { if (m[r][c]) { rects += '<rect x="' + ((c + quiet) * mod) + '" y="' + ((r + quiet) * mod) + '" width="' + mod + '" height="' + mod + '"/>'; } } }
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + dim + '" height="' + dim + '" viewBox="0 0 ' + dim + ' ' + dim + '" shape-rendering="crispEdges" style="-webkit-print-color-adjust:exact;print-color-adjust:exact">' +
+      '<rect width="' + dim + '" height="' + dim + '" fill="#fff"/><g fill="#000">' + rects + '</g></svg>';
+  }
+
   // ---- Hosting shim ----------------------------------------------------------------------
   // When Apps Script serves this page, google.script.run already exists and this does nothing.
   // When it's served as a static page (e.g. GitHub Pages), we recreate google.script.run so the
@@ -1817,6 +1906,75 @@
     window.print();
   }
 
+  // ---- Skid traveler ---------------------------------------------------------------------
+  // A one-page printout of everything done to a skid: ticket + steel specs + every coating
+  // applied with its date and operator, plus a scannable Data Matrix label encoding the same.
+  // Replaces the hand-written sheet; scan the label with a 2D imager to pull the ticket +
+  // full coating/date history back out. Uses the same #printArea/window.print() flow as the
+  // check sheets, so it inherits the app's print styles.
+  function travelerDate(ts) { var m = String(ts || '').match(/\d{4}-\d{2}-\d{2}/); return m ? m[0] : String(ts || ''); }
+
+  // Join each active coating pass to its transaction row (same passNumber) to recover the date
+  // and operator, since the coating objects themselves carry no timestamp.
+  function travelerCoatings(card) {
+    var byPass = {};
+    (card.transactions || []).forEach(function (t) { if (t.passNumber >= 1 && t.group) byPass[t.passNumber] = t; });
+    return (card.coatings || []).map(function (c) {
+      var t = byPass[c.passNumber] || {};
+      return { passNumber: c.passNumber, item: c.item, group: c.group, sub: c.sub, cost: c.cost,
+        when: t.timestamp || '', operator: t.operator || '' };
+    });
+  }
+
+  function printTraveler(card) {
+    var steel = card.steel || {};
+    var coats = travelerCoatings(card);
+    var title = 'Skid Traveler';
+
+    // Data Matrix payload: ticket, then each coating "item YYYY-MM-DD", pipe-separated.
+    var payload = String(card.ticket || card.skidId || '');
+    coats.forEach(function (c) { payload += '|' + (c.item || '') + ' ' + travelerDate(c.when); });
+    var dm = '';
+    try { dm = dataMatrixSVG(payload, 4, 2); } catch (e) { dm = ''; }
+
+    var specs = [
+      ['Ticket', card.ticket], ['Skid ID', card.skidId], ['Status', card.status],
+      ['Basis Weight', steel['BW']], ['Type', steel['TC']], ['Temper', steel['TM']],
+      ['Length', steel['Length']], ['Width', steel['Width']], ['End Use', steel['End Use']],
+      ['Job', steel['Job ID']], ['Litho total', (card.litho != null ? money(card.litho) : '')]
+    ];
+    var specHtml = specs.filter(function (s) { return s[1] !== '' && s[1] != null; })
+      .map(function (s) { return '<span style="display:inline-block;margin:0 20px 5px 0;font-size:9.5pt"><span style="color:#646464">' + esc(s[0]) + ':</span> <strong>' + esc(s[1]) + '</strong></span>'; }).join('');
+
+    var rows = coats.map(function (c, i) {
+      return '<tr><td>' + (i + 1) + '</td><td class="tk">' + esc(c.item || '') + '</td>' +
+        '<td class="tk">' + esc(c.group || '') + (c.sub ? ' / ' + esc(c.sub) : '') + '</td>' +
+        '<td>' + esc(travelerDate(c.when)) + '</td><td class="tk">' + esc(c.operator || '') + '</td>' +
+        '<td>' + (c.cost != null ? money(c.cost) : '') + '</td></tr>';
+    }).join('');
+    var table = coats.length
+      ? '<table><thead><tr><th style="width:6%">#</th><th class="tk">Coating</th><th class="tk">Group / Sub</th>' +
+        '<th style="width:15%">Date</th><th class="tk" style="width:20%">Operator</th><th style="width:12%">Cost</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      : '<div style="font-size:10pt;margin-top:8px">No coatings recorded on this skid yet.</div>';
+
+    var body =
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<h2 style="margin:0">Ticket ' + esc(card.ticket || '(none)') + '</h2>' +
+          '<div class="pmeta">' + esc(card.skidId || '') + (card.status ? ' &middot; ' + esc(card.status) : '') + '</div>' +
+        '</div>' +
+        (dm ? '<div style="flex:none;text-align:center">' + dm +
+          '<div style="font-size:6.5pt;color:#646464;margin-top:2px">scan for ticket + history</div></div>' : '') +
+      '</div>' +
+      '<div style="margin:6px 0 2px">' + specHtml + '</div>' +
+      '<hr class="cs-rule">' +
+      '<div style="font-size:11pt;font-weight:bold;margin:4px 0 4px">Coatings applied</div>' +
+      table;
+
+    document.getElementById('printArea').innerHTML = csFooterStyle(title) + csHeader(title) + body;
+    window.print();
+  }
+
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
   function openReview() {
     enterDetailView();
@@ -2245,6 +2403,7 @@
         '<div class="stat"><div class="num">' + money(card.litho) + '</div><div class="label">Litho cost</div></div>' +
         '</div>';
     }
+    html += '<button class="btn secondary" id="printTravelerBtn" style="width:100%;margin-top:12px">🖨️&nbsp; Print skid traveler</button>';
     html += '</div>';
 
     if (status === 'Current') html += currentActionsHtml(card);
@@ -2285,6 +2444,8 @@
       wireCoatingsEditor(card);
     }
     wireTicketDetailsEditor(card);
+    var ptb = document.getElementById('printTravelerBtn');
+    if (ptb) ptb.onclick = function () { printTraveler(card); };
   }
 
   // ----- Edit a skid's steel details, Row number and Spoilage count -----
