@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-45' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-46' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -93,13 +93,15 @@ export default {
       return json({ ok: false, error: e && e.message ? e.message : String(e) }, 200);
     }
   },
-  // Daily snapshot. Configure a Cloudflare Cron Trigger of "0 22,23 * * *" (UTC): that fires at
-  // both 22:00 and 23:00 UTC so that, in either half of the year, exactly one firing lands on
-  // 3 PM Pacific. We gate on the local hour so daylight-saving shifts don't matter, and
-  // skipIfExists guarantees at most one snapshot tab per day even if both firings match.
+  // Daily snapshot. Configure a Cloudflare Cron Trigger of "0 22,23 * * *" (UTC, EVERY day): that
+  // fires at both 22:00 and 23:00 UTC so that, in either half of the year, exactly one firing lands
+  // on 3 PM Pacific. We do ALL the gating here in code (not in the cron's day-of-week field, which is
+  // evaluated in UTC and easy to get wrong): the local hour must match so daylight-saving shifts
+  // don't matter, AND it must be a Pacific weekday (Mon-Fri) so weekends are skipped. skipIfExists
+  // guarantees at most one snapshot tab per day even if both firings match.
   async scheduled(event, env, ctx) {
     const targetHour = Number(env.SNAPSHOT_HOUR != null ? env.SNAPSHOT_HOUR : 15); // 3 PM Pacific
-    if (localHour(TZ) !== targetHour) return;
+    if (!shouldSnapshot(localHour(TZ), localWeekday(TZ), targetHour)) return;
     const today = todayYMD();
     let sheets = null, row;
     try {
@@ -125,6 +127,17 @@ function localHour(tz) {
   const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false }).formatToParts(new Date());
   const h = p.find((x) => x.type === 'hour');
   return h ? (Number(h.value) % 24) : -1;
+}
+// Current weekday ('Mon'..'Sun') in the given IANA timezone, DST-aware.
+function localWeekday(tz) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(new Date());
+}
+// Should the daily snapshot run right now? Pure predicate (no I/O) so it is easy to test.
+// Runs only on the target local hour AND on a weekday (Mon-Fri) — weekends are skipped.
+function shouldSnapshot(hour, weekday, targetHour) {
+  if (hour !== targetHour) return false;
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  return true;
 }
 // Compose the "Failure Report" log columns for a run. Pure (no I/O) so it is easy to test.
 // Returns { success, failure }: on success, `success` (col B) is filled and `failure` (col C) is
