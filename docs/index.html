@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.7</span>
+      <span class="version" id="appVersion">v1.37.8</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1940,7 +1940,6 @@
       '#printArea .trav .tlogo { flex:none; height:0.62in; width:auto; }' +
       '#printArea .trav .hd { flex:1; min-width:0; }' +
       '#printArea .trav .co { font-size:8pt; font-weight:bold; }' +
-      '#printArea .trav .ttl { font-size:6.5pt; letter-spacing:.4px; text-transform:uppercase; }' +
       '#printArea .trav h2 { font-size:17pt; margin:2px 0 0; line-height:1; }' +
       '#printArea .trav .skid { font-size:9pt; font-weight:bold; margin-top:1px; }' +
       '#printArea .trav .dm { flex:none; text-align:center; }' +
@@ -1954,7 +1953,7 @@
       '#printArea .trav table.coats th { background:#000 !important; color:#fff !important; font-size:7pt; padding:2px 3px !important; text-align:left !important; white-space:normal !important; }' +
       '#printArea .trav table.coats td { border:0.5pt solid #000 !important; font-size:7.5pt; padding:2px 4px !important; text-align:left !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; word-break:break-word; }' +
       '#printArea .trav table.coats td.n { text-align:center !important; }' +
-      '#printArea .trav table.coats td.d, #printArea .trav table.coats td.c { white-space:nowrap !important; }' +
+      '#printArea .trav table.coats td.d { white-space:nowrap !important; }' +
       '}</style>';
   }
 
@@ -1973,7 +1972,7 @@
       ['Ticket', card.ticket], ['Skid ID', card.skidId], ['Status', card.status],
       ['Basis Wt', steel['BW']], ['Type', steel['TC']], ['Temper', steel['TM']],
       ['Length', steel['Length']], ['Width', steel['Width']], ['End Use', steel['End Use']],
-      ['Job', steel['Job ID']], ['Litho total', (card.litho != null ? money(card.litho) : '')]
+      ['Job', steel['Job ID']]
     ].filter(function (s) { return s[1] !== '' && s[1] != null; });
     // Three pairs per row — the landscape label is wide but short, so pack specs horizontally.
     var specRows = '';
@@ -1989,13 +1988,12 @@
     var rows = coats.map(function (c, i) {
       return '<tr><td class="n">' + (i + 1) + '</td><td>' + esc(c.item || '') + '</td>' +
         '<td>' + esc(c.group || '') + (c.sub ? ' / ' + esc(c.sub) : '') + '</td>' +
-        '<td class="d">' + esc(travelerDate(c.when)) + '</td><td>' + esc(c.operator || '') + '</td>' +
-        '<td class="c">' + (c.cost != null ? money(c.cost) : '') + '</td></tr>';
+        '<td class="d">' + esc(travelerDate(c.when)) + '</td><td>' + esc(c.operator || '') + '</td></tr>';
     }).join('');
     var table = coats.length
       ? '<table class="coats">' +
-        '<colgroup><col style="width:5%"><col style="width:30%"><col style="width:24%"><col style="width:14%"><col style="width:17%"><col style="width:10%"></colgroup>' +
-        '<thead><tr><th>#</th><th>Coating</th><th>Group / Sub</th><th>Date</th><th>Operator</th><th>Cost</th></tr></thead>' +
+        '<colgroup><col style="width:6%"><col style="width:34%"><col style="width:26%"><col style="width:16%"><col style="width:18%"></colgroup>' +
+        '<thead><tr><th>#</th><th>Coating</th><th>Group / Sub</th><th>Date</th><th>Operator</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table>'
       : '<div style="font-size:8pt">No coatings recorded on this skid yet.</div>';
 
@@ -2008,9 +2006,8 @@
         '<div class="top">' +
           (logo ? '<img class="tlogo" src="' + esc(logo) + '" alt="CSC">' : '') +
           '<div class="hd">' +
-            '<div class="co">Container Supply Company, Inc.</div>' +
-            '<div class="ttl">Skid Traveler &middot; ' + esc(csDateStr()) + '</div>' +
-            '<h2>Ticket ' + esc(card.ticket || '(none)') + '</h2>' +
+            '<div class="co">Container Supply CO.</div>' +
+            '<h2>Ticket - ' + esc(card.ticket || '(none)') + '</h2>' +
             '<div class="skid">' + esc(card.skidId || '') + (card.status ? ' &middot; ' + esc(card.status) : '') + '</div>' +
           '</div>' +
           (dm ? '<div class="dm">' + dm + '</div>' : '') +
