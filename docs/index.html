@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.1</span>
+      <span class="version" id="appVersion">v1.37.2</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1926,31 +1926,32 @@
     });
   }
 
-  // Sized for a 4in x 6in label printer (portrait). All styles are scoped to `.trav` and use
-  // !important where needed to override the app's generic #printArea print rules — in particular
-  // the nowrap/ellipsis on table cells, which otherwise truncates the coatings. Pure black only,
-  // since the label printer is 1-bit black/white.
+  // Sized for a 4x6 label printer running LANDSCAPE (6in wide x 4in tall) — the page size is
+  // matched to the physical label so the driver prints it 1:1 without shifting or clipping.
+  // All styles are scoped to `.trav` and use !important where needed to override the app's
+  // generic #printArea print rules — in particular the nowrap/ellipsis on table cells, which
+  // otherwise truncates the coatings. Pure black only, since the label printer is 1-bit B/W.
   function travelerStyle() {
     return '<style>@media print {' +
-      '@page { size: 4in 6in; margin: 0.14in; }' +
-      '#printArea .trav { width: 3.7in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
+      '@page { size: 6in 4in; margin: 0.12in; }' +
+      '#printArea .trav { width: 5.76in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
       '#printArea .trav, #printArea .trav * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }' +
-      '#printArea .trav .top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }' +
-      '#printArea .trav .co { font-size:7pt; font-weight:bold; }' +
-      '#printArea .trav .ttl { font-size:6pt; letter-spacing:.4px; text-transform:uppercase; }' +
-      '#printArea .trav h2 { font-size:15pt; margin:2px 0 0; line-height:1; }' +
-      '#printArea .trav .skid { font-size:8pt; font-weight:bold; margin-top:1px; }' +
+      '#printArea .trav .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }' +
+      '#printArea .trav .co { font-size:8pt; font-weight:bold; }' +
+      '#printArea .trav .ttl { font-size:6.5pt; letter-spacing:.4px; text-transform:uppercase; }' +
+      '#printArea .trav h2 { font-size:17pt; margin:2px 0 0; line-height:1; }' +
+      '#printArea .trav .skid { font-size:9pt; font-weight:bold; margin-top:1px; }' +
       '#printArea .trav .dm { flex:none; text-align:center; }' +
-      '#printArea .trav .dm svg { width:1in; height:1in; display:block; }' +
-      '#printArea .trav .dmcap { font-size:5pt; margin-top:1px; }' +
-      '#printArea .trav table.specs { border-collapse:collapse; margin:4px 0 2px; width:100%; }' +
-      '#printArea .trav table.specs td { border:0 !important; padding:0 4px 1px 0 !important; font-size:7.5pt; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; text-align:left !important; }' +
-      '#printArea .trav table.specs td.v { font-weight:bold; padding-right:10px !important; }' +
+      '#printArea .trav .dm svg { width:0.95in; height:0.95in; display:block; }' +
+      '#printArea .trav .dmcap { font-size:5.5pt; margin-top:1px; }' +
+      '#printArea .trav table.specs { border-collapse:collapse; margin:5px 0 2px; width:100%; }' +
+      '#printArea .trav table.specs td { border:0 !important; padding:0 4px 2px 0 !important; font-size:8pt; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; text-align:left !important; }' +
+      '#printArea .trav table.specs td.v { font-weight:bold; padding-right:14px !important; }' +
       '#printArea .trav hr { border:0; border-top:1pt solid #000; margin:3px 0; }' +
-      '#printArea .trav .h3 { font-size:9pt; font-weight:bold; margin:3px 0 2px; }' +
+      '#printArea .trav .h3 { font-size:9.5pt; font-weight:bold; margin:3px 0 2px; }' +
       '#printArea .trav table.coats { width:100%; border-collapse:collapse; table-layout:fixed !important; }' +
-      '#printArea .trav table.coats th { background:#000 !important; color:#fff !important; font-size:6.5pt; padding:2px 2px !important; text-align:left !important; white-space:normal !important; }' +
-      '#printArea .trav table.coats td { border:0.5pt solid #000 !important; font-size:6.5pt; padding:2px 3px !important; text-align:left !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; word-break:break-word; }' +
+      '#printArea .trav table.coats th { background:#000 !important; color:#fff !important; font-size:7pt; padding:2px 3px !important; text-align:left !important; white-space:normal !important; }' +
+      '#printArea .trav table.coats td { border:0.5pt solid #000 !important; font-size:7.5pt; padding:2px 4px !important; text-align:left !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; word-break:break-word; }' +
       '#printArea .trav table.coats td.n { text-align:center !important; }' +
       '#printArea .trav table.coats td.d, #printArea .trav table.coats td.c { white-space:nowrap !important; }' +
       '}</style>';
@@ -1973,11 +1974,15 @@
       ['Length', steel['Length']], ['Width', steel['Width']], ['End Use', steel['End Use']],
       ['Job', steel['Job ID']], ['Litho total', (card.litho != null ? money(card.litho) : '')]
     ].filter(function (s) { return s[1] !== '' && s[1] != null; });
+    // Three pairs per row — the landscape label is wide but short, so pack specs horizontally.
     var specRows = '';
-    for (var i = 0; i < specs.length; i += 2) {
-      var a = specs[i], b = specs[i + 1];
-      specRows += '<tr><td>' + esc(a[0]) + '</td><td class="v">' + esc(a[1]) + '</td>' +
-        (b ? '<td>' + esc(b[0]) + '</td><td class="v">' + esc(b[1]) + '</td>' : '<td></td><td></td>') + '</tr>';
+    for (var i = 0; i < specs.length; i += 3) {
+      var cells = '';
+      for (var j = 0; j < 3; j++) {
+        var s = specs[i + j];
+        cells += s ? '<td>' + esc(s[0]) + '</td><td class="v">' + esc(s[1]) + '</td>' : '<td></td><td></td>';
+      }
+      specRows += '<tr>' + cells + '</tr>';
     }
 
     var rows = coats.map(function (c, i) {
@@ -1988,7 +1993,7 @@
     }).join('');
     var table = coats.length
       ? '<table class="coats">' +
-        '<colgroup><col style="width:6%"><col style="width:28%"><col style="width:22%"><col style="width:18%"><col style="width:15%"><col style="width:11%"></colgroup>' +
+        '<colgroup><col style="width:5%"><col style="width:30%"><col style="width:24%"><col style="width:14%"><col style="width:17%"><col style="width:10%"></colgroup>' +
         '<thead><tr><th>#</th><th>Coating</th><th>Group / Sub</th><th>Date</th><th>Operator</th><th>Cost</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table>'
       : '<div style="font-size:8pt">No coatings recorded on this skid yet.</div>';
