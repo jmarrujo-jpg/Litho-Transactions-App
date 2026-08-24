@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.4</span>
+      <span class="version" id="appVersion">v1.37.5</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1936,7 +1936,9 @@
       '@page { size: 6in 4in; margin: 0.12in; }' +
       '#printArea .trav { width: 5.76in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
       '#printArea .trav, #printArea .trav * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }' +
-      '#printArea .trav .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }' +
+      '#printArea .trav .top { display:flex; align-items:flex-start; gap:10px; }' +
+      '#printArea .trav .tlogo { flex:none; height:0.62in; width:auto; }' +
+      '#printArea .trav .hd { flex:1; min-width:0; }' +
       '#printArea .trav .co { font-size:8pt; font-weight:bold; }' +
       '#printArea .trav .ttl { font-size:6.5pt; letter-spacing:.4px; text-transform:uppercase; }' +
       '#printArea .trav h2 { font-size:17pt; margin:2px 0 0; line-height:1; }' +
@@ -1998,10 +2000,15 @@
         '<tbody>' + rows + '</tbody></table>'
       : '<div style="font-size:8pt">No coatings recorded on this skid yet.</div>';
 
+    // Reuse the CSC logo already embedded in the app header (no duplicated image data).
+    var logoEl = document.querySelector('#appHeader .logo') || document.querySelector('.logo');
+    var logo = (logoEl && logoEl.src) ? logoEl.src : '';
+
     var html = travelerStyle() +
       '<div class="trav">' +
         '<div class="top">' +
-          '<div style="min-width:0">' +
+          (logo ? '<img class="tlogo" src="' + esc(logo) + '" alt="CSC">' : '') +
+          '<div class="hd">' +
             '<div class="co">Container Supply Company, Inc.</div>' +
             '<div class="ttl">Skid Traveler &middot; ' + esc(csDateStr()) + '</div>' +
             '<h2>Ticket ' + esc(card.ticket || '(none)') + '</h2>' +
