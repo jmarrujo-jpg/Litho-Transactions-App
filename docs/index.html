@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.2</span>
+      <span class="version" id="appVersion">v1.37.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1926,15 +1926,22 @@
     });
   }
 
-  // Sized for a 4x6 label printer running LANDSCAPE (6in wide x 4in tall) — the page size is
-  // matched to the physical label so the driver prints it 1:1 without shifting or clipping.
-  // All styles are scoped to `.trav` and use !important where needed to override the app's
-  // generic #printArea print rules — in particular the nowrap/ellipsis on table cells, which
-  // otherwise truncates the coatings. Pure black only, since the label printer is 1-bit B/W.
+  // For a 4x6 label printer: the media stays portrait (4in wide x 6in tall, the native feed) and
+  // the traveler is rotated 90deg inside it so it prints and reads LANDSCAPE (6in x 4in) no matter
+  // what the driver's orientation setting is. All styles are scoped to `.trav` and use !important
+  // where needed to override the app's generic #printArea print rules — in particular the
+  // nowrap/ellipsis on table cells, which otherwise truncates the coatings. Pure black only,
+  // since the label printer is 1-bit B/W.
   function travelerStyle() {
     return '<style>@media print {' +
-      '@page { size: 6in 4in; margin: 0.12in; }' +
-      '#printArea .trav { width: 5.76in; color:#000; font-family:Arial,Helvetica,sans-serif; }' +
+      // The label feeds portrait (4in wide x 6in tall), but the traveler must READ landscape, so
+      // the page stays portrait and the content is rotated 90deg to fill it. This forces a landscape
+      // result regardless of the printer driver's orientation setting.
+      '@page { size: 4in 6in; margin: 0; }' +
+      '#printArea .travwrap { position:relative; width:4in; height:6in; overflow:hidden; }' +
+      '#printArea .trav { position:absolute; top:0; left:0; box-sizing:border-box;' +
+        ' width:6in; height:4in; padding:0.12in; transform-origin:top left; transform:translate(4in,0) rotate(90deg);' +
+        ' color:#000; font-family:Arial,Helvetica,sans-serif; }' +
       '#printArea .trav, #printArea .trav * { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }' +
       '#printArea .trav .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }' +
       '#printArea .trav .co { font-size:8pt; font-weight:bold; }' +
@@ -1999,7 +2006,7 @@
       : '<div style="font-size:8pt">No coatings recorded on this skid yet.</div>';
 
     var html = travelerStyle() +
-      '<div class="trav">' +
+      '<div class="travwrap"><div class="trav">' +
         '<div class="top">' +
           '<div style="min-width:0">' +
             '<div class="co">Container Supply Company, Inc.</div>' +
@@ -2013,7 +2020,7 @@
         '<hr>' +
         '<div class="h3">Coatings applied</div>' +
         table +
-      '</div>';
+      '</div></div>';
 
     document.getElementById('printArea').innerHTML = html;
     window.print();
