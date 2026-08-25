@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.8</span>
+      <span class="version" id="appVersion">v1.37.9</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -396,6 +396,17 @@
   function rateGroups() { return rateData.groups || []; }
   function rateSubs(group) { var n = rateData.tree[group]; return n ? n.subs : []; }
   function rateItems(group, sub) { var n = rateData.tree[group]; return n ? (n.items[sub || ''] || []) : []; }
+  // When a group has several #OUT sub-variants, default to the highest number (e.g. 10-OUT over
+  // 5-OUT): that's what runs ~95% of the time, and the operator can still switch it. Returns null
+  // if none of the subs carry a number (nothing sensible to prefer).
+  function highestOutSub(subs) {
+    var best = null, bestN = -1;
+    (subs || []).forEach(function (s) {
+      var m = String(s).match(/\d+/);
+      if (m && Number(m[0]) > bestN) { bestN = Number(m[0]); best = s; }
+    });
+    return best;
+  }
 
   // ----- Coating Item <-> Chem Code pairing -----
   // Selecting an item fills its chem code; selecting a chem code narrows the item list
@@ -509,7 +520,10 @@
         subSelect.appendChild(o);
       });
       var subs = rateSubs(group);
-      if (subs.length === 1) { subSelect.value = subs[0] || ''; fillItemChem(group, subSelect.value, itemSelect, chemSelect, costPreview); }
+      // Auto-pick the sub so the operator rarely has to: a lone sub always, otherwise the highest
+      // #OUT (the usual run). Either way they can override from the dropdown.
+      var pick = subs.length === 1 ? subs[0] : highestOutSub(subs);
+      if (pick != null) { subSelect.value = pick || ''; fillItemChem(group, subSelect.value, itemSelect, chemSelect, costPreview); }
     }
     groupSelect.onchange = refreshSubs;
     subSelect.onchange = function () { fillItemChem(groupSelect.value, subSelect.value, itemSelect, chemSelect, costPreview); };
