@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.10</span>
+      <span class="version" id="appVersion">v1.37.11</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3376,6 +3376,9 @@
 
     var jobTicketSearch = document.getElementById('jobTicketSearch');
     jobTicketSearch.oninput = function () { renderJobQueuePicker(jobTicketSearch.value); };
+    // Land the cursor on the ticket-number field so you can start typing right away — this
+    // screen re-renders after each add, so the cursor returns here for the next ticket too.
+    if (jobTicketSearch.focus) jobTicketSearch.focus();
     if (!queueCache.length) {
       google.script.run.withSuccessHandler(function (all) {
         setCaches(all);
