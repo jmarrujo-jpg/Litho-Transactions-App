@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.9</span>
+      <span class="version" id="appVersion">v1.37.10</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3264,9 +3264,9 @@
       jobCoatings.push({ group: group, sub: sub, item: item });
       renderJobCoatingList();
       // Reset the coating picker for the next one, keeping the group so multi-coats on the
-      // same size are quick to add.
-      subSelect.value = ''; itemSelect.innerHTML = '<option value="">--</option>';
-      chemSelect.innerHTML = '<option value="">--</option>'; costPreview.textContent = '';
+      // same size are quick to add. Re-running the cascade re-defaults the sub to the highest
+      // #OUT (rather than blanking it) and clears the item/chem for a fresh pick.
+      groupSelect.onchange();
       toast('Coating added — add another or start adding tickets');
     };
 
