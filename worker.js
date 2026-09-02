@@ -76,7 +76,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-46' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-47' }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -349,11 +349,26 @@ async function makeSheets(env) {
   const base = 'https://sheets.googleapis.com/v4/spreadsheets/' + id;
   const auth = { Authorization: 'Bearer ' + token };
   async function call(url, opts) {
-    const r = await fetch(url, opts);
-    const t = await r.text();
-    let j; try { j = t ? JSON.parse(t) : {}; } catch (e) { throw new Error('Sheets API non-JSON: ' + t.slice(0, 200)); }
-    if (!r.ok) throw new Error('Sheets API ' + r.status + ': ' + (j.error && j.error.message ? j.error.message : t.slice(0, 200)));
-    return j;
+    // Google Sheets intermittently returns transient failures ("Sheets API 503: The service is
+    // currently unavailable", also 429/500/502/504). A single blip used to abort a whole
+    // multi-call job — that is exactly what lost two daily snapshots in a row. Retry transient
+    // failures with exponential backoff; fail fast on real errors (4xx like 403/404). A 5xx/429
+    // response means Google did not apply the request, so retrying a write is safe.
+    const RETRYABLE = [429, 500, 502, 503, 504];
+    let lastErr;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) await new Promise((res) => setTimeout(res, 400 * Math.pow(3, attempt - 1))); // 0.4s, 1.2s, 3.6s
+      let r;
+      try { r = await fetch(url, opts); }
+      catch (e) { lastErr = new Error('Sheets API request failed: ' + (e && e.message ? e.message : String(e))); continue; }
+      const t = await r.text();
+      let j; try { j = t ? JSON.parse(t) : {}; } catch (e) { throw new Error('Sheets API non-JSON: ' + t.slice(0, 200)); }
+      if (r.ok) return j;
+      const msg = 'Sheets API ' + r.status + ': ' + (j.error && j.error.message ? j.error.message : t.slice(0, 200));
+      if (RETRYABLE.indexOf(r.status) === -1) throw new Error(msg);
+      lastErr = new Error(msg);
+    }
+    throw lastErr;
   }
   return {
     id,
