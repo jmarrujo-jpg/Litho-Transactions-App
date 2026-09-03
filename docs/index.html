@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.11</span>
+      <span class="version" id="appVersion">v1.37.12</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -928,6 +928,9 @@
       '<div class="card" style="margin-top:16px">' +
         '<h3 style="margin-top:0;font-size:15px">Snapshots</h3>' +
         '<div class="sub">A snapshot of the Current + WIP + Pending rows is saved automatically to your <b>Litho Snapshots</b> spreadsheet every weekday at 3 PM. No action needed.</div>' +
+        '<div class="sub" style="margin:8px 0">Need one right now? Save one on demand — it adds a new dated tab (a second run the same day gets a &ldquo;(2)&rdquo;).</div>' +
+        '<button class="btn secondary" id="dbSnapshotBtn" style="width:100%">Run snapshot now</button>' +
+        '<div class="sub" id="dbSnapshotMsg" style="margin-top:8px"></div>' +
       '</div>' +
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
         '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP tabs</h3>' +
@@ -942,7 +945,31 @@
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
     document.getElementById('dbImportBtn').onclick = dbFreshImport;
+    document.getElementById('dbSnapshotBtn').onclick = dbRunSnapshot;
     loadDbAndRender();
+  }
+
+  // Manually save a snapshot on demand (same job the 3 PM scheduler runs) and report the result
+  // both inline and in a modal, so it's obvious whether it worked.
+  function dbRunSnapshot() {
+    var btn = document.getElementById('dbSnapshotBtn');
+    var msg = document.getElementById('dbSnapshotMsg');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving snapshot…'; }
+    if (msg) { msg.style.color = ''; msg.textContent = 'Saving…'; }
+    runMutation('snapshotCurrentWip', [newOpId()],
+      function (res) {
+        var counts = (res.total || 0) + ' rows (' + (res.current || 0) + ' Current, ' +
+          (res.wip || 0) + ' WIP, ' + (res.pending || 0) + ' Pending)';
+        if (msg) { msg.style.color = 'var(--good)'; msg.innerHTML = '✓ Saved to tab <b>' + esc(res.tab) + '</b> — ' + esc(counts) + '.'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Run snapshot now'; }
+        showInfo('Snapshot saved', 'Saved to tab "' + res.tab + '" — ' + counts + '.');
+      },
+      function (err) {
+        var m = (err && err.message ? err.message : 'unknown error');
+        if (msg) { msg.style.color = '#b3261e'; msg.textContent = '✗ Snapshot failed: ' + m; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Run snapshot now'; }
+        showInfo('Snapshot failed', 'It did not run: ' + m + ' Your live data is unaffected — try again in a moment.');
+      });
   }
 
   // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP staging tabs.
