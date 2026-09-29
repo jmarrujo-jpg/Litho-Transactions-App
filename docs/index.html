@@ -209,7 +209,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.37.12</span>
+      <span class="version" id="appVersion">v1.38.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -322,6 +322,8 @@
   // to your Worker URL (LITHO_API_SECRET only if you set an API_SECRET script property).
   var LITHO_API_URL = 'https://litho-floor.jmarrujo.workers.dev'; // your Cloudflare Worker URL (GitHub Pages front end calls it). Ignored when Apps Script hosts the page.
   var LITHO_API_SECRET = ''; // optional; must match the API_SECRET script property if you set one
+  var API_TIMEOUT_MS = 60000; // a server call with no answer after this long is reported as failed
+  var SLOW_FNS = { importStaging: 300000 }; // known-long jobs get more time (ms)
   var PRINT_TICKETS_URL = 'http://desktop-1o5m8vo:5000/'; // local steel-ticket print service (opens in a new tab; only reachable on the local network)
   (function installHostingShim() {
     if (window.google && window.google.script && window.google.script.run) return; // real Apps Script bridge present
@@ -337,16 +339,36 @@
           return function () { // any other name is a server function call
             var args = Array.prototype.slice.call(arguments);
             if (!LITHO_API_URL) { if (failure) failure(new Error('LITHO_API_URL is not set')); return proxy; }
+            // Give up after API_TIMEOUT_MS so a stalled Wi-Fi connection can't leave a button on
+            // "Saving…" forever. Errors are tagged so runMutation knows which ones are safe to retry:
+            //   err.fromServer — the server answered with an error (a real problem; don't retry)
+            //   err.transport  — we never got a usable answer (dropped connection, gateway error page)
+            //   err.timeout    — no answer in time; the server may still be finishing the save
+            var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+            var timedOut = false;
+            var limitMs = SLOW_FNS[String(prop)] || API_TIMEOUT_MS;
+            var timer = ctrl ? setTimeout(function () { timedOut = true; ctrl.abort(); }, limitMs) : null;
             fetch(LITHO_API_URL, {
               method: 'POST',
               // No custom headers => text/plain body => no CORS preflight (which Apps Script can't answer).
-              body: JSON.stringify({ fn: String(prop), args: args, secret: LITHO_API_SECRET })
-            }).then(function (r) { return r.json(); })
-              .then(function (res) {
+              body: JSON.stringify({ fn: String(prop), args: args, secret: LITHO_API_SECRET }),
+              signal: ctrl ? ctrl.signal : undefined
+            }).then(function (r) {
+              return r.json().catch(function () {
+                var e = new Error('The server sent back an unreadable reply (HTTP ' + r.status + ').');
+                e.transport = true; throw e;
+              });
+            }, function (netErr) {
+              var e = timedOut
+                ? new Error('No response from the server after ' + Math.round(limitMs / 1000) + ' seconds. It may still have saved — check before trying again.')
+                : new Error('Could not reach the server (' + (netErr && netErr.message ? netErr.message : 'network error') + '). Check the Wi-Fi.');
+              e.transport = true; e.timeout = timedOut; throw e;
+            }).then(function (res) {
+                if (timer) clearTimeout(timer);
                 if (res && res.ok) { if (success) success(res.result); }
-                else { throw new Error((res && res.error) || 'Request failed'); }
+                else { var e = new Error((res && res.error) || 'Request failed'); e.fromServer = true; throw e; }
               })
-              .catch(function (err) { if (failure) failure(err); });
+              .catch(function (err) { if (timer) clearTimeout(timer); if (failure) failure(err); });
             return proxy;
           };
         }
@@ -587,7 +609,11 @@
     setTimeout(function () { t.classList.remove('show'); }, 2200);
   }
 
-  function esc(s) { return (s === undefined || s === null) ? '' : String(s); }
+  // HTML-escape a value for innerHTML text and attribute values. Without this a comment like
+  // `2" edge dent` truncates at the quote inside value="…" (and Save writes the cut-off text
+  // back), and a stray `<` in a note swallows the rest of the line.
+  var ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  function esc(s) { return (s === undefined || s === null) ? '' : String(s).replace(/[&<>"']/g, function (c) { return ESC_MAP[c]; }); }
   function money(n) { return '$' + (Number(n) || 0).toFixed(2); }
 
   // Sheets-run entry can never exceed what's on the ticket. clampSheets keeps the input in
@@ -649,7 +675,9 @@
       '<h3>' + esc(opts.title || '') + '</h3>' +
       '<p>' + esc(opts.message || '') + '</p>' +
       '<div class="field" style="text-align:left;margin-bottom:10px"><label>' + esc(opts.inputLabel || '') + '</label>' +
-        '<input id="modalPromptInput" value="' + esc(opts.inputValue || '') + '" placeholder="' + esc(opts.placeholder || '') + '"></div>' +
+        '<input id="modalPromptInput"' + (opts.inputType ? ' type="' + esc(opts.inputType) + '"' : '') +
+          (opts.inputMode ? ' inputmode="' + esc(opts.inputMode) + '"' : '') + ' autocomplete="off"' +
+          ' value="' + esc(opts.inputValue || '') + '" placeholder="' + esc(opts.placeholder || '') + '"></div>' +
       '<div class="modal-actions">' +
         '<button class="btn secondary" id="modalCancel">Cancel</button>' +
         '<button class="btn ' + (opts.variant || 'success') + '" id="modalOk">' + esc(opts.confirmText || 'Confirm') + '</button>' +
@@ -683,13 +711,35 @@
     return 'op-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
   }
 
+  //
+  // Only a dropped connection is retried automatically. An error the server reports ("Only 40
+  // sheets on this ticket") is shown right away — retrying it just made every error take ~5 s.
+  // A timeout isn't auto-retried either: the server may still be working on it.
+  //
+  // If an action fails and the operator taps it again with the exact same inputs, it reuses the
+  // failed attempt's opId (stickyOps). The server then picks up where the failed attempt stopped
+  // instead of doing the finished parts a second time (e.g. adding a coating's cost twice).
+  // Once the action succeeds, the next identical tap is a brand-new action again.
+  var stickyOps = {};
+  function isOpId(a) { return typeof a === 'string' && /^op-\d+-[a-z0-9]+$/.test(a); }
+  function mutationKey(fnName, args) {
+    try { return fnName + '|' + JSON.stringify(args.map(function (a) { return isOpId(a) ? '#op' : a; })); }
+    catch (e) { return null; }
+  }
   function runMutation(fnName, args, onSuccess, onFailure) {
+    var key = mutationKey(fnName, args);
+    if (key && stickyOps[key]) args = args.map(function (a) { return isOpId(a) ? stickyOps[key] : a; });
     var attempts = 0;
     function attempt() {
       attempts++;
-      var runner = google.script.run.withSuccessHandler(onSuccess).withFailureHandler(function (err) {
-        if (attempts < 3) { setTimeout(attempt, attempts * 1500); return; }
-        onFailure(err);
+      var runner = google.script.run.withSuccessHandler(function (res) {
+        if (key) delete stickyOps[key];
+        onSuccess(res);
+      }).withFailureHandler(function (err) {
+        if (err && err.transport && !err.timeout && attempts < 3) { setTimeout(attempt, attempts * 1000); return; }
+        var op = args.filter(isOpId)[0];
+        if (key && op) stickyOps[key] = op;
+        if (onFailure) onFailure(err);
       });
       runner[fnName].apply(runner, args);
     }
@@ -888,13 +938,16 @@
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
   var DB_CODE = '1245';                          // passcode to open the Database tab
-  var dbUnlocked = false;                        // stays unlocked for the rest of the session once entered
+  var dbUnlocked = false;                        // in memory only: every page load (refresh) asks for the code again
+  // iOS Safari can restore a page from its back/forward cache without reloading it, which would
+  // otherwise keep the tab unlocked across what looks like a fresh visit. Re-lock in that case too.
+  window.addEventListener('pageshow', function (e) { if (e.persisted) dbUnlocked = false; });
 
   function openDatabase() {
     if (!dbUnlocked) {
       showPromptModal({
         title: 'Database — enter code', message: 'This area is protected.',
-        inputLabel: 'Code', placeholder: '••••', confirmText: 'Unlock',
+        inputLabel: 'Code', placeholder: '••••', confirmText: 'Unlock', inputType: 'password', inputMode: 'numeric',
         onConfirm: function (v) {
           if (String(v) === DB_CODE) { dbUnlocked = true; openDatabase(); }
           else { toast('Incorrect code'); }
@@ -1637,7 +1690,16 @@
   }
 
   // ----- Finish a stage -> review the not-found pallets -----
+  // Reload from the server first: another iPad may be counting other aisles, and this device's
+  // list only knows about its own check-offs. Without the refresh, every pallet the other device
+  // found would show here as "not found" (pre-selected to move/mark Missing).
   function finishCountStage() {
+    var btn = document.getElementById('countFinishBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking latest count…'; }
+    refreshCount(finishCountStageNow);
+  }
+  function finishCountStageNow() {
+    if (!countSession) { countMode = 'walk'; toast('This count was already finished on another device'); return renderCount(); }
     var st = countWalkStatus();
     var notFound = countCache.filter(function (t) { return (t.status || 'Current') === st && !countIsFound(t); });
     countReviewSel = {};
@@ -2260,7 +2322,9 @@
       if (tok !== viewToken) return;
       ensureRateData(function () {
         if (tok !== viewToken) return;
-        currentJob = { jobId: job.jobId, description: job.description, coatings: job.coatings || [], operator: job.createdBy || '', notes: job.notes || '' };
+        // resumed: the person picking the job back up may not be who created it, so the add-ticket
+        // screen asks for their name rather than logging their tickets under the creator's.
+        currentJob = { jobId: job.jobId, description: job.description, coatings: job.coatings || [], operator: job.createdBy || '', notes: job.notes || '', resumed: true };
         state.jobId = job.jobId;
         // Seed the "added so far" list with the tickets already on the job (detail columns unknown here).
         jobAddedTickets = (job.tickets || []).map(function (t) { return { ticket: t.ticket, skidId: t.skidId, sheetsRun: '', estimatedWeightUsed: '' }; });
@@ -2789,7 +2853,7 @@
     return '<div class="card">' +
       '<h3 style="margin-top:0;font-size:15px">Litho cost</h3>' +
       '<div class="row">' +
-        '<div class="field"><label>Current litho cost</label><input type="number" id="wipCostInput" value="' + esc(card.litho) + '"></div>' +
+        '<div class="field"><label>Current litho cost</label><input type="number" inputmode="decimal" step="0.01" min="0" id="wipCostInput" value="' + esc(card.litho) + '"></div>' +
         operatorFieldHtml('wipCostOperator') +
       '</div>' +
       '<div class="field"><label>Reason for change (optional)</label><input id="wipCostNotes" placeholder="e.g. correcting a typo"></div>' +
@@ -2818,9 +2882,11 @@
   function wireWipActions(card) {
     var saveWipCostBtn = document.getElementById('saveWipCostBtn');
     saveWipCostBtn.onclick = function () {
-      var newCost = document.getElementById('wipCostInput').value;
+      var newCost = String(document.getElementById('wipCostInput').value || '').replace(/[$,\s]/g, '');
       var operator = document.getElementById('wipCostOperator').value.trim();
       var notes = document.getElementById('wipCostNotes').value;
+      // A cleared box used to save as $0.00. Require an actual number (0 is fine if typed).
+      if (newCost === '' || isNaN(Number(newCost)) || Number(newCost) < 0) { toast('Enter the litho cost as a number, e.g. 12.50'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
       saveWipCostBtn.disabled = true;
       runMutation('updateWipLithoCost', [state.skid, newCost, operator, notes, newOpId()],
@@ -3302,22 +3368,26 @@
       var operator = document.getElementById('jobOperator').value.trim();
       var notes = document.getElementById('jobNotes').value;
 
-      // Fold in an un-added coating still sitting in the picker so it isn't lost.
+      // Fold in an un-added coating still sitting in the picker so it isn't lost. Build the recipe
+      // as a COPY: jobCoatings is only updated once the job is created, so tapping Start again
+      // after a failed attempt (or a missing operator name) can't add that coating a second time.
+      var coatings = jobCoatings.slice();
       var pendingGroup = groupSelect.value, pendingItem = itemSelect.value;
       if (pendingGroup && pendingItem) {
-        jobCoatings.push({ group: pendingGroup, sub: subSelect.value, item: pendingItem });
+        coatings.push({ group: pendingGroup, sub: subSelect.value, item: pendingItem });
       }
 
-      if (!jobCoatings.length) { toast('Add at least one coating'); return; }
+      if (!coatings.length) { toast('Add at least one coating'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
 
       var btn = document.getElementById('startJobSetupBtn');
       btn.disabled = true; btn.textContent = 'Creating job…';
-      runMutation('createJob', [jobName, operator, jobCoatings, notes, newOpId()],
+      runMutation('createJob', [jobName, operator, coatings, notes, newOpId()],
         function (result) {
+          jobCoatings = coatings;
           currentJob = {
             jobId: result.jobId, description: jobName,
-            coatings: jobCoatings.slice(), operator: operator, notes: notes
+            coatings: coatings.slice(), operator: operator, notes: notes
           };
           state.jobId = result.jobId;
           renderCreateJobAddTickets();
@@ -3390,6 +3460,7 @@
 
     html += '<div class="card">' +
       '<h3 style="margin-top:0;font-size:15px">Add a ticket</h3>' +
+      operatorFieldHtml('jobTicketOperator', 'Your name (logged on each ticket you add)', lastOperator || (currentJob.resumed ? '' : currentJob.operator)) +
       searchBarHtml('jobTicketSearch') +
       '<div id="jobQueuePicker" style="margin-top:10px"></div>' +
       '</div>';
@@ -3529,12 +3600,15 @@
       var isPartialSkid = !!(partialToggle && partialToggle.checked);
       var sErr = sheetsError(sheetsRun, origQty);
       if (sErr) { toast(sErr); return; }
+      var opEl = document.getElementById('jobTicketOperator');
+      var operator = opEl ? opEl.value.trim() : currentJob.operator;
+      if (!operator) { toast('Enter your name first'); if (opEl) opEl.focus(); return; }
       var btn = document.getElementById('addTicketToJobBtn');
 
       function submit(coatedTicket) {
-        btn.disabled = true; btn.textContent = 'Adding&hellip;';
+        btn.disabled = true; btn.textContent = 'Adding…';
         runMutation('jobAddTicket',
-          [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, currentJob.operator, newOpId(), coatedTicket || ''],
+          [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, newOpId(), coatedTicket || ''],
           function (result) {
             if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
             jobAddedTickets.push(result);

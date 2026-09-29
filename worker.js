@@ -11,13 +11,15 @@
  *   SHEET_ID            (var)     spreadsheet id (optional; defaults to the known one)
  *   ALLOWED_ORIGIN      (var)     e.g. https://jmarrujo-jpg.github.io  (optional; default *)
  *   API_TOKEN           (secret)  optional shared token; if set, the client must send it
- *
- * STAGE 1: read endpoints are live. Write endpoints return a clear "Stage 2" message so the
- * Apps Script app stays the writer until the migration is finished.
+ *   SNAPSHOT_SHEET_ID   (var)     spreadsheet id of the "Steel Snapshot" archive
+ *   WRITE_LOCK          (Durable Object binding -> class WriteLock)  recommended: makes every
+ *                       write run one at a time across all devices (see "write lock" below).
+ *                       Optional — without it the app still works, with a weaker per-server lock.
  */
 
 const DEFAULT_SHEET_ID = '12Irb-isWOO14SrlGglcgnHc8oi0mLwW54LNo7pBHKjg';
 const TZ = 'America/Los_Angeles';
+const SHEETS_TIMEOUT_MS = 30000;   // one Google call that hangs longer than this counts as failed
 const MASTER = 'Steel Tickets';
 const TRANSACTIONS = 'Transactions';
 const JOBS = 'Litho Jobs';
@@ -57,8 +59,51 @@ const TICKET_DETAIL_COLS = ['QTY/LOAD', 'Weight', 'B/C', 'TC', 'Length', 'Mill',
 const TICKET_COL_LABELS = { 'QTY/LOAD': 'QTY', 'Weight': 'Weight', 'B/C': 'B/C', 'TC': 'Type', 'Length': 'Length', 'Mill': 'Mill', 'BW': 'Basis Weight', 'C/S': 'Coil / Sheet', 'End Use': 'End Use', 'Supplier': 'Supplier', 'TM': 'Temper', 'Width': 'Width', 'Comments': 'Comments', 'Row': 'Row', 'Spoilage': 'Spoilage' };
 const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true };
 
+// ---------------- write lock ----------------
+// Every change to the sheet runs one at a time. Most writes are several Sheets calls (read the
+// sheet, pick the next Skid ID, write the row, log it); two running at once can hand out the same
+// Skid ID, write over each other's rows, or delete the wrong job after rows shift. Reads skip the
+// line — they never change anything.
+//
+// The lock lives in a Durable Object (binding WRITE_LOCK, class WriteLock below): one instance for
+// the whole app, so writes from every iPad queue up in one place. If the binding isn't set up yet,
+// writes still queue within this Worker instance — which covers the common case (the same device
+// double-tapping or retrying) but not two devices landing on different Cloudflare servers.
+const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
+  'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
+  'getSlitterDetail', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
+const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
+let lockChain = Promise.resolve();
+function serialize(task) {
+  const run = lockChain.then(() => task());
+  lockChain = Promise.race([run.then(() => {}, () => {}), new Promise((res) => setTimeout(res, LOCK_MAX_HOLD_MS))]);
+  return run;
+}
+async function runLocked(fn, args, env) {
+  if (READ_ONLY_FNS.has(fn)) return { ok: true, result: await handle(fn, args, env) };
+  if (env.WRITE_LOCK && env.WRITE_LOCK.idFromName) {
+    const stub = env.WRITE_LOCK.get(env.WRITE_LOCK.idFromName('litho-sheet'));
+    const r = await stub.fetch('https://write-lock/run', { method: 'POST', body: JSON.stringify({ fn, args }) });
+    return r.json();
+  }
+  return { ok: true, result: await serialize(() => handle(fn, args, env)) };
+}
+export class WriteLock {
+  constructor(state, env) { this.env = env; }
+  async fetch(request) {
+    const { fn, args } = await request.json();
+    try {
+      const result = await serialize(() => handle(fn, args || [], this.env));
+      return new Response(JSON.stringify({ ok: true, result }), { headers: { 'Content-Type': 'application/json' } });
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) }), { headers: { 'Content-Type': 'application/json' } });
+    }
+  }
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Echo the caller's Origin so the CORS header always matches (avoids a misconfigured
     // ALLOWED_ORIGIN silently blocking the app). If ALLOWED_ORIGIN is set to a specific origin,
     // only that origin is allowed; otherwise any origin is echoed back.
@@ -76,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'count-47' }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'lock-48', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -86,9 +131,12 @@ export default {
     if (env.API_TOKEN && String(payload.secret || '') !== String(env.API_TOKEN)) {
       return json({ ok: false, error: 'Unauthorized' }, 200);
     }
+    // waitUntil: if the iPad's connection drops mid-save, keep going until the save finishes
+    // (instead of being cut off half-done). The app's retry then finds it done, or waits its turn.
+    const work = runLocked(payload.fn, payload.args || [], env);
+    if (ctx && ctx.waitUntil) ctx.waitUntil(work.catch(() => {}));
     try {
-      const result = await handle(payload.fn, payload.args || [], env);
-      return json({ ok: true, result }, 200);
+      return json(await work, 200);
     } catch (e) {
       return json({ ok: false, error: e && e.message ? e.message : String(e) }, 200);
     }
@@ -214,7 +262,7 @@ async function handle(fn, args, env) {
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
       return removeTicketFromJob(sheets, args[0], args[1], args[2], args[3]);
     case 'approveJob': // (jobId, operator, opId)
-      return approveJob(sheets, args[0], args[1]);
+      return approveJob(sheets, args[0], args[1], args[2]);
     case 'deleteJob': // (jobId, operator, opId)
       return deleteJob(sheets, args[0], args[1], args[2]);
     // ---- production ----
@@ -348,65 +396,107 @@ async function makeSheets(env) {
   const id = env.SHEET_ID || DEFAULT_SHEET_ID;
   const base = 'https://sheets.googleapis.com/v4/spreadsheets/' + id;
   const auth = { Authorization: 'Bearer ' + token };
-  async function call(url, opts) {
-    // Google Sheets intermittently returns transient failures ("Sheets API 503: The service is
-    // currently unavailable", also 429/500/502/504). A single blip used to abort a whole
-    // multi-call job — that is exactly what lost two daily snapshots in a row. Retry transient
-    // failures with exponential backoff; fail fast on real errors (4xx like 403/404). A 5xx/429
-    // response means Google did not apply the request, so retrying a write is safe.
+  // Google Sheets intermittently returns transient failures ("Sheets API 503: The service is
+  // currently unavailable", also 429/500/502/504). A single blip used to abort a whole multi-call
+  // job — that is exactly what lost two daily snapshots in a row — so transient failures are
+  // retried with backoff, and real errors (4xx like 403/404) fail fast.
+  //
+  // BUT a 5xx or a dropped connection does NOT prove Google skipped the request: it may have
+  // saved it and then failed to answer. Re-sending a read, or a write that sets exact cells, is
+  // harmless. Re-sending an append would add the row twice (a duplicate skid), and re-sending a
+  // row delete would delete a different row. So those calls pass unsafe=true: only a 429 (Google
+  // refused it outright) is retried here, and any other failure is thrown with err.ambiguous set
+  // so the caller can look before retrying (see append / addSheet below).
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  async function call(url, opts, unsafe) {
     const RETRYABLE = [429, 500, 502, 503, 504];
     let lastErr;
     for (let attempt = 0; attempt < 4; attempt++) {
-      if (attempt > 0) await new Promise((res) => setTimeout(res, 400 * Math.pow(3, attempt - 1))); // 0.4s, 1.2s, 3.6s
-      let r;
-      try { r = await fetch(url, opts); }
-      catch (e) { lastErr = new Error('Sheets API request failed: ' + (e && e.message ? e.message : String(e))); continue; }
-      const t = await r.text();
-      let j; try { j = t ? JSON.parse(t) : {}; } catch (e) { throw new Error('Sheets API non-JSON: ' + t.slice(0, 200)); }
-      if (r.ok) return j;
-      const msg = 'Sheets API ' + r.status + ': ' + (j.error && j.error.message ? j.error.message : t.slice(0, 200));
+      if (attempt > 0) await sleep(400 * Math.pow(3, attempt - 1)); // 0.4s, 1.2s, 3.6s
+      let r, t;
+      try {
+        const o = Object.assign({}, opts);
+        if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) o.signal = AbortSignal.timeout(SHEETS_TIMEOUT_MS);
+        r = await fetch(url, o);
+        t = await r.text();
+      } catch (e) {
+        lastErr = new Error('Sheets API request failed: ' + (e && e.message ? e.message : String(e)));
+        if (unsafe) { lastErr.ambiguous = true; throw lastErr; }
+        continue;
+      }
+      let j = null;
+      try { j = t ? JSON.parse(t) : {}; } catch (e) { j = null; }   // 5xx pages are often HTML, not JSON
+      if (r.ok) {
+        if (j === null) throw new Error('Sheets API non-JSON: ' + t.slice(0, 200));
+        return j;
+      }
+      const msg = 'Sheets API ' + r.status + ': ' + (j && j.error && j.error.message ? j.error.message : t.slice(0, 200));
       if (RETRYABLE.indexOf(r.status) === -1) throw new Error(msg);
       lastErr = new Error(msg);
+      if (unsafe && r.status !== 429) { lastErr.ambiguous = true; throw lastErr; }
     }
     throw lastErr;
   }
+  // Retry an unsafe write only after checking it didn't already land. landed() answers "is it
+  // there now?"; with no way to check, the error is passed up rather than risk doing it twice.
+  async function callChecked(url, opts, landed) {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return await call(url, opts, true); }
+      catch (e) {
+        if (!e.ambiguous || !landed) throw e;
+        lastErr = e;
+        await sleep(600 * (attempt + 1));
+        let there;
+        try { there = await landed(); } catch (e2) { throw e; }   // can't tell -> don't guess
+        if (there) return {};
+      }
+    }
+    throw lastErr;
+  }
+  const json = (body) => ({ method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  async function tabTitles(spreadsheetId) {
+    const m = await call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=' + encodeURIComponent('sheets.properties(title)'), { headers: auth });
+    return new Set((m.sheets || []).map((x) => x.properties.title));
+  }
   return {
     id,
+    _hdr: {},     // per-request cache of each tab's header row (see tabHeaders)
+    _ops: null,   // per-request cache of the Transactions Op IDs (see opIdSet)
     async read(rangeA1, unformatted) {
       const q = unformatted ? '?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER' : '?valueRenderOption=FORMATTED_VALUE';
       const j = await call(base + '/values/' + encodeURIComponent(rangeA1) + q, { headers: auth });
       return j.values || [];
     },
-    async append(rangeA1, row) {
-      return call(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [row] }) });
+    // landed(): optional "did this row get saved?" check, used to retry safely after an unclear failure.
+    async append(rangeA1, row, landed) {
+      return callChecked(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
+        json({ values: [row] }), landed);
     },
     async update(rangeA1, values) {
       return call(base + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
         { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) });
     },
     async batchUpdate(data) {
-      return call(base + '/values:batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+      return call(base + '/values:batchUpdate', json({ valueInputOption: 'RAW', data }));
     },
     async addSheet(title) {
-      return call(base + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }) });
+      return callChecked(base + ':batchUpdate', json({ requests: [{ addSheet: { properties: { title } } }] }),
+        async () => (await tabTitles(id)).has(title));
     },
     async meta() {
       return call(base + '?fields=' + encodeURIComponent('sheets.properties(sheetId,title,gridProperties)'), { headers: auth });
     },
+    // Growing the grid twice just leaves a few extra blank rows/columns, so these can retry freely.
     async appendColumns(sheetId, count) {
-      return call(base + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ appendDimension: { sheetId, dimension: 'COLUMNS', length: count } }] }) });
+      return call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'COLUMNS', length: count } }] }));
     },
     async appendRows(sheetId, count) {
-      return call(base + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] }) });
+      return call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] }));
     },
+    // Never blindly re-sent: a repeated delete would remove whichever row moved up into the gap.
     async deleteRows(sheetId, startIndex, endIndex) {   // 0-based, half-open [startIndex, endIndex)
-      return call(base + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }) });
+      return call(base + ':batchUpdate', json({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }), true);
     },
     // ---- cross-spreadsheet helpers (write to a DIFFERENT spreadsheet the SA has been shared on;
     //      used for the snapshots archive). Only the `spreadsheets` scope is needed. ----
@@ -416,17 +506,18 @@ async function makeSheets(env) {
     async addSheetTo(spreadsheetId, title, rowCount, columnCount, index) {
       const properties = { title, gridProperties: { rowCount: Math.max(rowCount, 1), columnCount: Math.max(columnCount, 1) } };
       if (typeof index === 'number') properties.index = index; // tab position: 0 = leftmost
-      return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requests: [{ addSheet: { properties } }] }) });
+      return callChecked('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+        json({ requests: [{ addSheet: { properties } }] }),
+        async () => (await tabTitles(spreadsheetId)).has(title));
     },
     async writeValues(spreadsheetId, rangeA1, values) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
         { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) });
     },
+    // Snapshot "Failure Report" log line: a rare duplicate line is harmless, so this retries freely.
     async appendTo(spreadsheetId, rangeA1, row) {
       return call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [row] }) });
+        json({ values: [row] }));
     },
     async readFrom(spreadsheetId, rangeA1) {
       const j = await call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1), { headers: auth });
@@ -450,6 +541,11 @@ function todayYMD() {
 // Tolerates thousands-separator commas ("4,405" -> 4405) which appear in some weight cells;
 // plain Number() would read those as NaN and silently treat the weight as 0.
 function num(v) { return Number(String(v == null ? '' : v).replace(/,/g, '')) || 0; }
+// For numbers a person typed: "1,234" and "$12.50" are fine; blank or junk is NaN (never 0).
+function typedNum(v) {
+  const t = String(v == null ? '' : v).replace(/[,$\s]/g, '');
+  return t === '' ? NaN : Number(t);
+}
 // The skid's "used" date/time lives in 'Used At'. Historically it was 'Finished On' (date only);
 // we still read that as a fallback so pre-migration rows keep counting until the old column is gone.
 function usedAt(o) { return o['Used At'] || o['Finished On'] || ''; }
@@ -457,6 +553,7 @@ async function readObjects(sheets, tab, unformatted) {
   const values = await sheets.read(tab, unformatted);
   if (!values.length) return { headers: [], rows: [] };
   const headers = values[0].map((h) => String(h));
+  if (sheets._hdr) sheets._hdr[tab] = headers;
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const r = values[i] || [];
@@ -710,10 +807,27 @@ async function stampCells(sheets, tab, rowNum, map, fields) {
   if (data.length) await sheets.batchUpdate(data);
 }
 
+// Each tab's unique key column: after an unclear append failure we look this value up to see
+// whether the row actually got saved before trying again (so a retry can't add it twice).
+const APPEND_KEYS = { [MASTER]: 'Skid ID', [TRANSACTIONS]: 'Op ID', [JOBS]: 'Job ID', [PRODUCTION]: 'Run ID',
+  [SLITTER_SESSIONS]: 'Session ID', [SLITTER_PALLETS]: 'Pallet ID', [COUNTS]: 'Session ID' };
+
+// Is `value` already in column `name` of `tab`? (Reads just that one column.)
+async function columnHas(sheets, tab, headers, name, value) {
+  const c = mapOf(headers)[name];
+  if (!c) return false;
+  const L = colLetter(c);
+  const vals = await sheets.read("'" + tab + "'!" + L + '2:' + L);
+  const want = String(value).trim();
+  return vals.some((r) => String((r && r[0]) != null ? r[0] : '').trim() === want);
+}
+
 // Appends a row built from an object, in the sheet's header order.
 async function appendRowObj(sheets, tab, headers, obj) {
   const row = headers.map((h) => (obj.hasOwnProperty(h) ? obj[h] : ''));
-  await sheets.append(tab, row);
+  const key = APPEND_KEYS[tab];
+  const keyVal = key && obj[key] != null ? String(obj[key]).trim() : '';
+  await sheets.append(tab, row, keyVal ? () => columnHas(sheets, tab, headers, key, keyVal) : null);
 }
 
 // Looks up a tab's sheetId and current grid width so we can widen it before writing past
@@ -740,6 +854,7 @@ async function ensureColumn(sheets, tab, headers, name) {
   } catch (e) { /* best-effort widen; fall through to the write, which surfaces any real error */ }
   await sheets.update("'" + tab + "'!" + colLetter(col) + '1', [[name]]);
   const h2 = headers.concat([name]);
+  if (sheets._hdr) sheets._hdr[tab] = h2;
   return { headers: h2, map: mapOf(h2) };
 }
 
@@ -784,22 +899,67 @@ async function findRemainderTicketId(masterRows, ticket, kind) {
   throw new Error('Too many existing splits of ticket ' + base + '. Rename manually.');
 }
 
-// opId dedup via an "Op ID" column on Transactions (strongly consistent; catches the
-// retry case where a first attempt succeeded but its response was lost).
+// ---- opId bookkeeping: how a retried action avoids doing its work twice ----
+// Every user action carries an opId. The Transactions row that finishes the action is logged
+// with that opId, so a retry of an action that already finished is recognized and skipped.
+//
+// Many actions take several writes (update the skid, then log it; or mark 10 skids Used). If one
+// fails halfway, the retry (same opId) must pick up where it stopped — not redo the finished part
+// (e.g. add a coating's cost twice) and not skip the unfinished part. Two tools make that work:
+//   * subOp(opId, tag): each step's own log row gets "<opId>#<tag>", so a retry can see which
+//     steps already happened.
+//   * 'Last Op ID' on Steel Tickets: written in the SAME call as a skid's change, so a retry can
+//     tell "this skid was already updated by this action" even if the log row never got written.
+function subOp(opId, tag) { return opId ? opId + '#' + tag : ''; }
+function autoOpId() { return 'auto-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+
+// Header row of a tab (cached for the rest of this request).
+async function tabHeaders(sheets, tab) {
+  if (sheets._hdr && sheets._hdr[tab]) return sheets._hdr[tab];
+  const v = await sheets.read("'" + tab + "'!1:1");
+  const headers = (v[0] || []).map((h) => String(h));
+  if (sheets._hdr) sheets._hdr[tab] = headers;
+  return headers;
+}
+// Every Op ID in Transactions, read once per request (just that column) and kept up to date as
+// this request logs more rows.
+async function opIdSet(sheets) {
+  if (sheets._ops) return sheets._ops;
+  const set = new Set();
+  const headers = await tabHeaders(sheets, TRANSACTIONS);
+  const c = mapOf(headers)['Op ID'];
+  if (c) {
+    const L = colLetter(c);
+    (await sheets.read("'" + TRANSACTIONS + "'!" + L + '2:' + L)).forEach((r) => {
+      const v = String((r && r[0]) != null ? r[0] : '').trim(); if (v) set.add(v);
+    });
+  }
+  sheets._ops = set;
+  return set;
+}
 async function opAlreadyDone(sheets, opId) {
   if (!opId) return false;
-  const { rows, map } = await readTab(sheets, TRANSACTIONS);
-  if (!map['Op ID']) return false;
-  return rows.some((r) => String(r['Op ID'] || '').trim() === String(opId).trim());
+  return (await opIdSet(sheets)).has(String(opId).trim());
 }
 
 async function appendTx(sheets, obj, opId) {
-  let { headers } = await readTab(sheets, TRANSACTIONS);
+  let headers = await tabHeaders(sheets, TRANSACTIONS);
   if (headers.indexOf('Op ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Op ID'); headers = e.headers; }
   if (headers.indexOf('Job ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Job ID'); headers = e.headers; }
-  obj['Op ID'] = opId || '';
+  // Every row gets an Op ID (a generated one for rows that aren't an action's own record), so an
+  // unclear append failure can always be checked before retrying.
+  obj['Op ID'] = opId || autoOpId();
   await appendRowObj(sheets, TRANSACTIONS, headers, obj);
+  if (sheets._ops) sheets._ops.add(obj['Op ID']);
 }
+
+// Make sure Steel Tickets has the 'Last Op ID' column; returns the (possibly re-read) master tab.
+async function withLastOpCol(sheets, master) {
+  if (master.map['Last Op ID']) return master;
+  await ensureColumn(sheets, MASTER, master.headers, 'Last Op ID');
+  return readTab(sheets, MASTER);
+}
+function stampedBy(obj, opId) { return !!opId && String((obj && obj['Last Op ID']) || '').trim() === String(opId).trim(); }
 async function logCoatingTx(sheets, o, opId) {
   await appendTx(sheets, {
     'Timestamp': nowStamp(), 'Ticket': o.ticket, 'Pass Number': o.passNumber, 'Operator': o.operator || '',
@@ -830,9 +990,11 @@ async function normalizeMasterRows(sheets) {
   }
 }
 
-async function ticketCardResult(sheets, skidId) { return getTicketCard(sheets, skidId); }
-
 // ---- applyCoating: the core write (Current -> WIP/Pending, or add a coat to WIP/Pending) ----
+// Retry-safe (see "opId bookkeeping"): the skid's change is ONE write that also stamps
+// 'Last Op ID', and the coating's Transactions row (carrying the opId) is written last. If the
+// action dies in between, the retry sees the stamp, skips the skid change, and just writes the
+// missing log row — instead of stacking the cost a second time.
 async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId, coatedTicket) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
@@ -840,7 +1002,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   if (!match) throw new Error('Could not find rate for item: ' + itemName);
   await normalizeMasterRows(sheets);
 
-  const master = await readTab(sheets, MASTER);
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   const map = master.map;
   if (!map['Litho']) throw new Error('Steel Tickets sheet has no Litho column.');
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
@@ -852,15 +1014,30 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
 
   const hist = await getTransactionHistory(sheets, skidId, ticket);
   const nextPass = hist.length ? Math.max.apply(null, hist.map((h) => num(h.passNumber))) + 1 : 1;
-
-  async function appendLithoNote(text) {
-    if (!text || !map['Litho Notes']) return;
+  const mergedNotes = (text) => {   // Litho Notes after appending `text` (written in the same call as the skid change)
     const existing = obj['Litho Notes'] || '';
-    await stampCells(sheets, MASTER, row, map, { 'Litho Notes': (existing ? existing + ' | ' : '') + text });
-  }
+    return text ? (existing ? existing + ' | ' : '') + text : existing;
+  };
 
   const result = { skidId, ticket, sheetsRun: null, estimatedWeightUsed: null, isPartial: false,
     remainderTicket: null, remainderSheets: 0, remainderWeight: 0, scrapSheets: 0, scrapWeight: 0 };
+
+  // RESUME: an earlier attempt of this same action already updated the skid (and made the split
+  // leftover, if any) but didn't get to log it. Finish the logging only.
+  if (stampedBy(obj, opId)) {
+    const rem = master.rows.filter((o) => o !== obj && stampedBy(o, opId))[0];
+    if (rem && !(await opAlreadyDone(sheets, subOp(opId, 'split')))) {
+      await eventTx(sheets, { skidId: rem['Skid ID'], ticket: rem['Ticket'], itemText: 'SPLIT REMAINDER CREATED', operator: operatorName,
+        note: num(rem['QTY/LOAD']) + ' sheets (~' + num(rem['Weight']) + ' lbs, estimated) of ' + baseTicketOf(ticket) + ' left in Current; coated batch is ' + ticket, runningTotal: 0 }, subOp(opId, 'split'));
+    }
+    await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match,
+      runningTotal: num(obj['Litho']), notes, jobName, jobId: jobId || obj['Job ID'] || '' }, opId);
+    Object.assign(result, { ticket, litho: num(obj['Litho']), sheetsRun: num(obj['QTY/LOAD']), isPartial: !!rem,
+      remainderTicket: rem ? rem['Ticket'] : null, remainderSheets: rem ? num(rem['QTY/LOAD']) : 0, remainderWeight: rem ? num(rem['Weight']) : 0 });
+    if (rem) result.coatedTicket = ticket;
+    result.detail = await getTicketCard(sheets, skidId);
+    return result;
+  }
 
   // Another coat on a Pending/WIP skid: stack the cost on top of what it already has. When this
   // happens inside a job (jobId provided) — i.e. an already-coated WIP skid is added to a job for
@@ -868,13 +1045,13 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   // review/approve flow (approve -> WIP). Ad-hoc re-coats from the card pass no jobId and just add cost.
   if (status === STATUS.WIP || status === STATUS.PENDING) {
     const newTotal = Math.round(((num(obj['Litho'])) + match.totalCost) * 100) / 100;
-    const stamp = { 'Litho': newTotal, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
+    const stamp = { 'Litho': newTotal, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '', 'Last Op ID': opId || '' };
+    if (lithoNoteClean) stamp['Litho Notes'] = mergedNotes(lithoNoteClean);
     if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; stamp['Row'] = ''; }   // attached to a job -> leaving its storage row
     await stampCells(sheets, MASTER, row, map, stamp);
-    await appendLithoNote(lithoNoteClean);
     await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName, jobId: jobId || obj['Job ID'] || '' }, opId);
     result.litho = newTotal;
-    result.detail = await ticketCardResult(sheets, skidId);
+    result.detail = await getTicketCard(sheets, skidId);
     return result;
   }
   if (status !== STATUS.CURRENT) throw new Error('Ticket ' + ticket + ' is "' + status + '" — coatings can only be logged while Current, Pending or WIP.');
@@ -900,54 +1077,70 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   const base = baseTicketOf(ticket);
   let coatedTicketFinal = ticket;   // full skid / scrap: ticket is unchanged
   let leftoverTicket = null;
+  // A leftover already made by an earlier attempt of this action (it died before updating the
+  // coated skid): reuse it rather than splitting off a second one.
+  const priorRem = isPartialSkid ? master.rows.filter((o) => o !== obj && stampedBy(o, opId))[0] : null;
   if (usedFewer && isPartialSkid) {
     coatedTicketFinal = String(coatedTicket || '').trim() || await findRemainderTicketId(master.rows, ticket, 'LR');
     const pref = base + '-LR';
     const okName = coatedTicketFinal.indexOf(pref) === 0 && /^\d+$/.test(coatedTicketFinal.slice(pref.length));
     if (!okName) throw new Error('New ticket must look like ' + base + '-LR1 (the original number plus -LR and a number).');
-    if (master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === coatedTicketFinal)) {
+    if (master.rows.some((o) => o !== obj && o !== priorRem && String(o['Ticket']).trim() === coatedTicketFinal)) {
       throw new Error('Ticket ' + coatedTicketFinal + ' is already in use — pick a different number.');
     }
-    // Leftover keeps the bare original ticket, unless some other live row already holds it.
-    const baseFree = !master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === base);
-    leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': coatedTicketFinal }]), ticket, 'LR');
+    if (priorRem) leftoverTicket = priorRem['Ticket'];
+    else {
+      // Leftover keeps the bare original ticket, unless some other live row already holds it.
+      const baseFree = !master.rows.some((o) => o !== obj && String(o['Ticket']).trim() === base);
+      leftoverTicket = baseFree ? base : await findRemainderTicketId(master.rows.concat([{ 'Ticket': coatedTicketFinal }]), ticket, 'LR');
+    }
   }
 
-  const stamp = { 'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost, 'Row': '',   // coated -> moved out of its storage row
-    'First Coated At': nowStamp(), 'First Coated By': operatorName || '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
-  if (usedFewer) { stamp['QTY/LOAD'] = sheets_; stamp['Weight'] = estimatedWeightUsed; }
-  if (usedFewer && isPartialSkid) { stamp['Ticket'] = coatedTicketFinal; } // this record becomes the coated -LR# piece
-  await stampCells(sheets, MASTER, row, map, stamp);
-
   let scrapNote = '';
+  // The split leftover is created BEFORE the coated skid is changed, so a retry still has the
+  // original sheet count/weight to work from (the leftover is found again by its Last Op ID).
   if (usedFewer && isPartialSkid) {
     result.remainderTicket = leftoverTicket;   // the ORIGINAL ticket, returned to Current
     result.coatedTicket = coatedTicketFinal;
     result.remainderSheets = originalQty - sheets_;
     result.remainderWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
-    const remainderSkid = await nextSkidId(sheets);
-    const ensSN = await ensureColumn(sheets, MASTER, master.headers, 'System Notes');
-    master.headers = ensSN.headers; master.map = ensSN.map;
-    const remObj = {};
-    master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
-    delete remObj.__row;
-    Object.assign(remObj, {
-      'Ticket': leftoverTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT, 'Job ID': '', 'Split Of': skidId,
-      'QTY/LOAD': result.remainderSheets, 'Weight': result.remainderWeight, 'Litho': '',
-      'Comments': obj['Comments'] || '',                      // carry the human comment; system note goes to System Notes
-      'System Notes': (obj['System Notes'] ? obj['System Notes'] + ' | ' : '') + 'Leftover of ' + base + ' after coating ' + sheets_ + ' of ' + originalQty + ' sheets (coated batch is ' + coatedTicketFinal + ') on ' + nowStamp().slice(0, 10),
-      'First Coated At': '', 'First Coated By': '', 'Litho Notes': '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
-    });
-    await appendRowObj(sheets, MASTER, master.headers, remObj);
-    await eventTx(sheets, { skidId: remainderSkid, ticket: leftoverTicket, itemText: 'SPLIT REMAINDER CREATED', operator: operatorName, note: result.remainderSheets + ' sheets (~' + result.remainderWeight + ' lbs, estimated) of ' + base + ' left in Current; coated ' + sheets_ + ' became ' + coatedTicketFinal, runningTotal: 0 }, '');
+    if (!priorRem) {
+      const remainderSkid = await nextSkidId(sheets);
+      const ensSN = await ensureColumn(sheets, MASTER, master.headers, 'System Notes');
+      master.headers = ensSN.headers; master.map = ensSN.map;
+      const remObj = {};
+      master.headers.forEach((h) => { if (obj.hasOwnProperty(h)) remObj[h] = obj[h]; });
+      delete remObj.__row;
+      Object.assign(remObj, {
+        'Ticket': leftoverTicket, 'Skid ID': remainderSkid, 'Status': STATUS.CURRENT, 'Job ID': '', 'Split Of': skidId,
+        'QTY/LOAD': result.remainderSheets, 'Weight': result.remainderWeight, 'Litho': '',
+        'Comments': obj['Comments'] || '',                      // carry the human comment; system note goes to System Notes
+        'System Notes': (obj['System Notes'] ? obj['System Notes'] + ' | ' : '') + 'Leftover of ' + base + ' after coating ' + sheets_ + ' of ' + originalQty + ' sheets (coated batch is ' + coatedTicketFinal + ') on ' + nowStamp().slice(0, 10),
+        'First Coated At': '', 'First Coated By': '', 'Litho Notes': '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
+        'Last Op ID': opId || '',
+      });
+      await appendRowObj(sheets, MASTER, master.headers, remObj);
+      await eventTx(sheets, { skidId: remainderSkid, ticket: leftoverTicket, itemText: 'SPLIT REMAINDER CREATED', operator: operatorName, note: result.remainderSheets + ' sheets (~' + result.remainderWeight + ' lbs, estimated) of ' + base + ' left in Current; coated ' + sheets_ + ' became ' + coatedTicketFinal, runningTotal: 0 }, subOp(opId, 'split'));
+    } else if (!(await opAlreadyDone(sheets, subOp(opId, 'split')))) {
+      await eventTx(sheets, { skidId: priorRem['Skid ID'], ticket: leftoverTicket, itemText: 'SPLIT REMAINDER CREATED', operator: operatorName, note: result.remainderSheets + ' sheets (~' + result.remainderWeight + ' lbs, estimated) of ' + base + ' left in Current; coated ' + sheets_ + ' became ' + coatedTicketFinal, runningTotal: 0 }, subOp(opId, 'split'));
+    }
   } else if (usedFewer) {
     result.scrapSheets = originalQty - sheets_;
     result.scrapWeight = Math.round((originalWeight - estimatedWeightUsed) * 100) / 100;
     scrapNote = 'Scrapped ' + result.scrapSheets + ' sheets (~' + result.scrapWeight + ' lbs, estimated) of ' + originalQty + ' on hand';
-    if (map['Spoilage']) await stampCells(sheets, MASTER, row, map, { 'Spoilage': num(obj['Spoilage']) + result.scrapSheets });
   }
 
-  await appendLithoNote([lithoNoteClean, scrapNote].filter(Boolean).join(' | '));
+  // One write for the whole skid change (status, cost, qty, spoilage, notes, Last Op ID).
+  const stamp = { 'Status': firstStatus || STATUS.WIP, 'Job ID': jobId || '', 'Litho': match.totalCost, 'Row': '',   // coated -> moved out of its storage row
+    'First Coated At': nowStamp(), 'First Coated By': operatorName || '', 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '',
+    'Last Op ID': opId || '' };
+  if (usedFewer) { stamp['QTY/LOAD'] = sheets_; stamp['Weight'] = estimatedWeightUsed; }
+  if (usedFewer && isPartialSkid) { stamp['Ticket'] = coatedTicketFinal; } // this record becomes the coated -LR# piece
+  if (result.scrapSheets && map['Spoilage']) stamp['Spoilage'] = num(obj['Spoilage']) + result.scrapSheets;
+  const noteText = [lithoNoteClean, scrapNote].filter(Boolean).join(' | ');
+  if (noteText) stamp['Litho Notes'] = mergedNotes(noteText);
+  await stampCells(sheets, MASTER, row, map, stamp);
+
   await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName, jobId: jobId || '' }, opId);
 
   result.ticket = coatedTicketFinal;   // the coated piece now carries the -LR# ticket (obj kept its SKD)
@@ -955,7 +1148,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   result.estimatedWeightUsed = estimatedWeightUsed;
   result.isPartial = isPartialSkid;
   result.litho = match.totalCost;
-  result.detail = await ticketCardResult(sheets, skidId);
+  result.detail = await getTicketCard(sheets, skidId);
   return result;
 }
 
@@ -966,9 +1159,16 @@ async function createManualTicket(sheets, ticket, fields, operatorName, opId) {
   ticket = String(ticket || '').trim();
   fields = fields || {};
   await normalizeMasterRows(sheets);
-  let master = await readTab(sheets, MASTER);
+  let master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   let headers = master.headers;
   for (const k of TICKET_DETAIL_COLS) { if (headers.indexOf(k) === -1) { const e = await ensureColumn(sheets, MASTER, headers, k); headers = e.headers; } }
+  // Retry of an attempt that saved the skid but not its log entry: log it, don't add a 2nd skid.
+  const prior = master.rows.filter((o) => stampedBy(o, opId))[0];
+  if (prior) {
+    await eventTx(sheets, { skidId: prior['Skid ID'], ticket: prior['Ticket'], itemText: 'MANUAL TICKET CREATED', operator: operatorName,
+      note: prior['Ticket'] ? 'Ticket manually created in app' : 'Skid created without a ticket number (ticket not available)', runningTotal: 0 }, opId);
+    return getTicketCard(sheets, prior['Skid ID']);
+  }
 
   // A known ticket number that's already on the floor routes to the existing skid instead of
   // duplicating (Current -> open it; Pending -> it's tied up in a job). Bypassed tickets always
@@ -984,7 +1184,7 @@ async function createManualTicket(sheets, ticket, fields, operatorName, opId) {
   }
 
   const skidId = await nextSkidId(sheets);
-  const row = { 'Ticket': ticket, 'Skid ID': skidId, 'Status': STATUS.CURRENT, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '' };
+  const row = { 'Ticket': ticket, 'Skid ID': skidId, 'Status': STATUS.CURRENT, 'Last Updated At': nowStamp(), 'Last Updated By': operatorName || '', 'Last Op ID': opId || '' };
   TICKET_DETAIL_COLS.forEach((k) => { if (fields.hasOwnProperty(k) && String(fields[k]).trim() !== '') row[k] = fields[k]; });
   await appendRowObj(sheets, MASTER, headers, row);
   await eventTx(sheets, { skidId, ticket, itemText: 'MANUAL TICKET CREATED', operator: operatorName,
@@ -1019,20 +1219,21 @@ async function validateCoatings(sheets, coatings) {
 async function updateWipLithoCost(sheets, skidId, newCost, operator, notes, opId) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   await normalizeMasterRows(sheets);
-  const master = await readTab(sheets, MASTER);
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   if (!master.map['Litho']) throw new Error('Steel Tickets sheet has no Litho column.');
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
-  const oldCost = num(obj['Litho']);
-  const n = Number(newCost);
-  if (isNaN(n) || n < 0) throw new Error('Enter a valid non-negative cost.');
-  await stampCells(sheets, MASTER, obj.__row, master.map, { 'Litho': n, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+  const n = typedNum(newCost);   // a blank box used to become $0.00 here
+  if (isNaN(n) || n < 0) throw new Error('Enter the litho cost as a number (0 or more).');
+  const resumed = stampedBy(obj, opId);   // earlier attempt already saved the cost; just log it
+  const oldCost = resumed ? NaN : num(obj['Litho']);
+  if (!resumed) await stampCells(sheets, MASTER, obj.__row, master.map, { 'Litho': n, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' });
   const hist = await getTransactionHistory(sheets, skidId, obj['Ticket']);
   const nextPass = hist.length ? Math.max.apply(null, hist.map((h) => num(h.passNumber))) + 1 : 1;
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': obj['Ticket'], 'Pass Number': nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'MANUAL COST ADJUSTMENT', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
-    'Pass Total Cost': Math.round((n - oldCost) * 100) / 100, 'Running Total After Pass': n,
-    'Notes': 'Litho cost changed from ' + oldCost.toFixed(2) + ' to ' + n.toFixed(2) + (notes ? ' — ' + notes : ''), 'Job Name': '', 'Skid ID': skidId }, opId);
+    'Pass Total Cost': resumed ? 0 : Math.round((n - oldCost) * 100) / 100, 'Running Total After Pass': n,
+    'Notes': (resumed ? 'Litho cost set to ' + n.toFixed(2) : 'Litho cost changed from ' + oldCost.toFixed(2) + ' to ' + n.toFixed(2)) + (notes ? ' — ' + notes : ''), 'Job Name': '', 'Skid ID': skidId }, opId);
   return getTicketCard(sheets, skidId);
 }
 
@@ -1044,9 +1245,14 @@ async function updateTicketDetails(sheets, skidId, fields, operator, opId) {
   let master = await readTab(sheets, MASTER);
   let headers = master.headers;
   for (const k of editable) { if (fields.hasOwnProperty(k) && headers.indexOf(k) === -1) { const e = await ensureColumn(sheets, MASTER, headers, k); headers = e.headers; } }
-  master = await readTab(sheets, MASTER);
+  master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
+  if (stampedBy(obj, opId)) {   // earlier attempt saved the edits but not the log entry
+    const saved = editable.filter((k) => fields.hasOwnProperty(k)).map((k) => (TICKET_COL_LABELS[k] || k) + ' "' + String(obj[k] == null ? '' : obj[k]) + '"');
+    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'TICKET DETAILS EDITED', operator, note: 'Saved: ' + saved.join('; '), runningTotal: num(obj['Litho']) }, opId);
+    return getTicketCard(sheets, skidId);
+  }
 
   const changes = {}, notes = [];
   for (const k of editable) {
@@ -1055,7 +1261,7 @@ async function updateTicketDetails(sheets, skidId, fields, operator, opId) {
     if (TICKET_NUMERIC_COLS[k]) {
       const raw = fields[k];
       if (raw === '' || raw == null) continue; // leave numeric fields untouched when blank
-      const nv = Number(raw);
+      const nv = typedNum(raw);   // accepts "1,234"
       if (isNaN(nv) || nv < 0) throw new Error(label + ' must be a non-negative number.');
       const ov = num(obj[k]);
       if (nv !== ov) { changes[k] = nv; notes.push(label + ' ' + ov + ' -> ' + nv); }
@@ -1066,7 +1272,7 @@ async function updateTicketDetails(sheets, skidId, fields, operator, opId) {
     }
   }
   if (!Object.keys(changes).length) return getTicketCard(sheets, skidId);
-  changes['Last Updated At'] = nowStamp(); changes['Last Updated By'] = operator || '';
+  changes['Last Updated At'] = nowStamp(); changes['Last Updated By'] = operator || ''; changes['Last Op ID'] = opId || '';
   await stampCells(sheets, MASTER, obj.__row, master.map, changes);
   await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'TICKET DETAILS EDITED', operator, note: notes.join('; '), runningTotal: num(obj['Litho']) }, opId);
   return getTicketCard(sheets, skidId);
@@ -1074,7 +1280,7 @@ async function updateTicketDetails(sheets, skidId, fields, operator, opId) {
 
 async function loadCoatingForEdit(sheets, skidId, passNumber) {
   await normalizeMasterRows(sheets);
-  const master = await readTab(sheets, MASTER);
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
   const history = await getTransactionHistory(sheets, skidId, obj['Ticket']);
@@ -1085,6 +1291,10 @@ async function loadCoatingForEdit(sheets, skidId, passNumber) {
   return { map: master.map, row: obj.__row, obj, target, nextPass };
 }
 
+// Order matters for retries: (1) the skid's new cost + Last Op ID, (2) the replacement coating's
+// log row, (3) the VOID of the old pass, which carries the opId and so marks the action done. Until
+// (3) is written the old pass is still "active", so a retry passes the checks and finishes the
+// remaining steps without re-applying the cost change.
 async function editTicketCoating(sheets, skidId, passNumber, group, sub, item, operator, opId) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   if (!group || !item) throw new Error('Pick a size/group and coating item.');
@@ -1092,37 +1302,44 @@ async function editTicketCoating(sheets, skidId, passNumber, group, sub, item, o
   if (!match) throw new Error('Could not find rate for item: ' + item);
   const ctx = await loadCoatingForEdit(sheets, skidId, passNumber);
   const oldCost = num(ctx.target.cost), newCost = num(match.totalCost);
+  const resumed = stampedBy(ctx.obj, opId);
   const currentLitho = num(ctx.obj['Litho']);
-  const afterVoid = Math.round((currentLitho - oldCost) * 100) / 100;
-  const afterNew = Math.round((afterVoid + newCost) * 100) / 100;
+  const afterNew = resumed ? currentLitho : Math.round((currentLitho - oldCost + newCost) * 100) / 100;
+  const afterVoid = Math.round((afterNew - newCost) * 100) / 100;
   const ticket = ctx.obj['Ticket'], jobId = ctx.obj['Job ID'] || '';
+  if (!resumed) await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterNew, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' });
+  if (!(await opAlreadyDone(sheets, subOp(opId, 'new')))) {
+    await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId, jobId }, subOp(opId, 'new'));
+  }
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': ticket, 'Pass Number': ctx.nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'COATING CHANGED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': -oldCost, 'Running Total After Pass': afterVoid,
     'Notes': 'VOID#' + passNumber + ': corrected ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ') -> ' + item + ' (' + newCost.toFixed(2) + ')', 'Job Name': jobId, 'Job ID': jobId, 'Skid ID': skidId }, opId);
-  await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId, jobId }, '');
-  await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterNew, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   return getTicketCard(sheets, skidId);
 }
 
+// Same idea: the cost change (with Last Op ID) first, then the VOID row that marks it done.
 async function removeTicketCoating(sheets, skidId, passNumber, operator, opId) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   const ctx = await loadCoatingForEdit(sheets, skidId, passNumber);
   const oldCost = num(ctx.target.cost);
-  const afterVoid = Math.round((num(ctx.obj['Litho']) - oldCost) * 100) / 100;
+  const resumed = stampedBy(ctx.obj, opId);
+  const afterVoid = resumed ? num(ctx.obj['Litho']) : Math.round((num(ctx.obj['Litho']) - oldCost) * 100) / 100;
+  if (!resumed) await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterVoid, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' });
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': ctx.obj['Ticket'], 'Pass Number': ctx.nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'COATING REMOVED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': -oldCost, 'Running Total After Pass': afterVoid,
     'Notes': 'VOID#' + passNumber + ': removed ' + ctx.target.item + ' (' + oldCost.toFixed(2) + ')', 'Job Name': ctx.obj['Job ID'] || '', 'Job ID': ctx.obj['Job ID'] || '', 'Skid ID': skidId }, opId);
-  await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterVoid, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   return getTicketCard(sheets, skidId);
 }
 
 // ---- jobs ----
 async function createJob(sheets, description, operator, coatings, notes, opId) {
   const jobs0 = await readTab(sheets, JOBS);
-  if (opId && jobs0.headers.indexOf('Op ID') !== -1 && jobs0.rows.some((r) => String(r['Op ID'] || '').trim() === String(opId).trim())) {
-    return { duplicate: true };
+  const prior = opId && jobs0.headers.indexOf('Op ID') !== -1 ? jobs0.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0] : null;
+  if (prior) {   // retry of a create that already worked: hand back that job so the app carries on with it
+    let recipe = []; try { recipe = JSON.parse(prior['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
+    return { duplicate: true, jobId: prior['Job ID'], description: prior['Description'] || '', coatings: recipe, status: prior['Status'] || 'Pending' };
   }
   await validateCoatings(sheets, coatings);
   const jobId = fmtId('JOB-', maxIdNumber(jobs0.rows, 'Job ID', 'JOB-') + 1);
@@ -1135,6 +1352,9 @@ async function createJob(sheets, description, operator, coatings, notes, opId) {
   return { jobId, description: description || '', coatings, status: 'Pending' };
 }
 
+// Applies the job's whole recipe to one skid. Each coat is its own retry-safe step (coat 0 uses
+// the opId, coat i uses "<opId>#c<i>"), so a retry after a failure part-way through the recipe
+// finishes the missing coats instead of stopping at "already recorded".
 async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket) {
   await normalizeMasterRows(sheets);
   const jobs = await readTab(sheets, JOBS);
@@ -1146,99 +1366,127 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
   const desc = job['Description'];
   const master0 = await readTab(sheets, MASTER);
   const existing = master0.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
-  if (existing && String(existing['Job ID']).trim() === String(jobId).trim() && (existing['Status'] || STATUS.CURRENT) !== STATUS.CURRENT) {
-    throw new Error('Ticket ' + (existing['Ticket'] || skidId) + ' is already on job ' + jobId + '.');
+  const resuming = !!opId && !!existing && String(existing['Last Op ID'] || '').indexOf(opId) === 0;   // this action already started on it
+  if (existing && !resuming) {
+    const onJob = String(existing['Job ID'] || '').trim();
+    const st = existing['Status'] || STATUS.CURRENT;
+    if (onJob === String(jobId).trim() && st !== STATUS.CURRENT) {
+      throw new Error('Ticket ' + (existing['Ticket'] || skidId) + ' is already on job ' + jobId + '.');
+    }
+    if (onJob && onJob !== String(jobId).trim() && st === STATUS.PENDING) {
+      throw new Error('Ticket ' + (existing['Ticket'] || skidId) + ' is Pending on another job (' + onJob + '). Remove it from that job first.');
+    }
   }
   let result = null;
   for (let i = 0; i < recipe.length; i++) {
     const c = recipe[i];
     const r = await applyCoating(sheets, skidId, c.group, c.sub, c.item, operator, '',
       i === 0 ? sheetsRun : '', i === 0 ? isPartialSkid : false, i === 0 ? lithoNote : '',
-      desc, i === 0 ? opId : '', STATUS.PENDING, jobId, i === 0 ? coatedTicket : '');
-    if (i === 0) { if (r && r.duplicate) return { duplicate: true, skidId }; result = r; }
-    else if (r && r.litho !== undefined) result.litho = r.litho;
+      desc, i === 0 ? opId : subOp(opId, 'c' + i), STATUS.PENDING, jobId, i === 0 ? coatedTicket : '');
+    if (r && !r.duplicate) {
+      if (!result) result = r;
+      else if (r.litho !== undefined) { result.litho = r.litho; result.detail = r.detail; }
+    }
   }
   const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).length;
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Ticket Count': count });
-  result = result || { skidId };
+  if (!result) {   // every coat was already recorded (a retry of an add that had finished)
+    const card = await getTicketCard(sheets, skidId);
+    result = { skidId, ticket: card.ticket, litho: card.litho, detail: card, isPartial: false, remainderTicket: null, remainderSheets: 0, scrapSheets: 0 };
+  }
   result.jobId = jobId;
   return result;
 }
 
+// The recipe entry remembers the opId that added it, and each Pending skid gets the coat under
+// "<opId>#<skidId>" — so a retry neither adds the coating to the recipe twice nor coats a skid twice.
 async function addCoatingToJob(sheets, jobId, coating, operator, opId) {
-  if (await opAlreadyDone(sheets, opId)) return getJobDetail(sheets, jobId);
   await validateCoatings(sheets, [coating]);
   const jobs = await readTab(sheets, JOBS);
   const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
   if (!job) throw new Error('Job not found: ' + jobId);
   if (String(job['Status']) === 'Approved') throw new Error('Job is approved and locked.');
   let recipe = []; try { recipe = JSON.parse(job['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
-  recipe.push({ group: coating.group, sub: coating.sub || '', item: coating.item });
-  await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Coatings JSON': JSON.stringify(recipe), 'Coatings': coatingSummary(recipe) });
+  if (!(opId && recipe.some((c) => c && c.op === opId))) {
+    const entry = { group: coating.group, sub: coating.sub || '', item: coating.item };
+    if (opId) entry.op = opId;
+    recipe.push(entry);
+    await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Coatings JSON': JSON.stringify(recipe), 'Coatings': coatingSummary(recipe) });
+  }
   const desc = job['Description'];
   const pend = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim() && (o['Status'] || '') === STATUS.PENDING);
   for (let i = 0; i < pend.length; i++) {
-    await applyCoating(sheets, pend[i]['Skid ID'], coating.group, coating.sub, coating.item, operator, '', '', false, '', desc, i === 0 ? opId : '', STATUS.PENDING, jobId);
+    await applyCoating(sheets, pend[i]['Skid ID'], coating.group, coating.sub, coating.item, operator, '', '', false, '', desc, subOp(opId, pend[i]['Skid ID']), STATUS.PENDING, jobId);
   }
   return getJobDetail(sheets, jobId);
 }
 
-async function reabsorbSplitRemainders(sheets, parentSkid, parentObj, master, operator) {
-  if (!master.map['Split Of']) return;
-  let addQty = 0, addWeight = 0;
-  for (const o of master.rows) {
-    if (String(o['Split Of']).trim() !== String(parentSkid).trim()) continue;
-    if ((o['Status'] || STATUS.CURRENT) !== STATUS.CURRENT) continue;
-    if (num(o['Litho']) > 0) continue;
-    addQty += num(o['QTY/LOAD']); addWeight += num(o['Weight']);
-    await stampCells(sheets, MASTER, o.__row, master.map, { 'Status': 'Void', 'QTY/LOAD': 0, 'Weight': 0, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
-    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'SPLIT REABSORBED', operator, note: 'Remainder folded back into ' + parentSkid + ' when its ticket left the job', runningTotal: 0 }, '');
-  }
-  if (addQty || addWeight) {
-    await stampCells(sheets, MASTER, parentObj.__row, master.map, {
-      'QTY/LOAD': num(parentObj['QTY/LOAD']) + addQty,
-      'Weight': Math.round((num(parentObj['Weight']) + addWeight) * 100) / 100,
-    });
-  }
+// Remainders split off `parentSkid` that are still untouched (Current, no litho). They fold back
+// into the parent when its ticket leaves the job.
+function splitRemaindersOf(master, parentSkid) {
+  if (!master.map['Split Of']) return [];
+  return master.rows.filter((o) => String(o['Split Of']).trim() === String(parentSkid).trim()
+    && (o['Status'] || STATUS.CURRENT) === STATUS.CURRENT && !(num(o['Litho']) > 0));
 }
 
+// Order for retries: the skid's reset — including the sheets/weight folded back from its split
+// remainders — is ONE write that stamps Last Op ID; then the remainders are voided (a no-op once
+// done); then the Ticket Count; and the log row carrying the opId last.
 async function removeTicketFromJob(sheets, jobId, skidId, operator, opId) {
   if (await opAlreadyDone(sheets, opId)) return getJobDetail(sheets, jobId);
   const jobs = await readTab(sheets, JOBS);
   const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
   if (!job) throw new Error('Job not found: ' + jobId);
   if (String(job['Status']) === 'Approved') throw new Error('Job is approved and locked.');
-  const master = await readTab(sheets, MASTER);
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
-  if (String(obj['Job ID']).trim() !== String(jobId).trim()) throw new Error('Skid is not part of this job.');
-  const litho = num(obj['Litho']);
-  await stampCells(sheets, MASTER, obj.__row, master.map, { 'Status': STATUS.CURRENT, 'Job ID': '', 'Litho': '',
-    'First Coated At': '', 'First Coated By': '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+  const resumed = stampedBy(obj, opId);
+  if (!resumed && String(obj['Job ID']).trim() !== String(jobId).trim()) throw new Error('Skid is not part of this job.');
+  const litho = resumed ? 0 : num(obj['Litho']);
+  const rems = splitRemaindersOf(master, skidId);
+  if (!resumed) {
+    const addQty = rems.reduce((n, o) => n + num(o['QTY/LOAD']), 0);
+    const addWeight = rems.reduce((n, o) => n + num(o['Weight']), 0);
+    const stamp = { 'Status': STATUS.CURRENT, 'Job ID': '', 'Litho': '', 'First Coated At': '', 'First Coated By': '',
+      'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' };
+    if (addQty || addWeight) {
+      stamp['QTY/LOAD'] = num(obj['QTY/LOAD']) + addQty;
+      stamp['Weight'] = Math.round((num(obj['Weight']) + addWeight) * 100) / 100;
+    }
+    await stampCells(sheets, MASTER, obj.__row, master.map, stamp);
+  }
+  for (const o of rems) {
+    await stampCells(sheets, MASTER, o.__row, master.map, { 'Status': 'Void', 'QTY/LOAD': 0, 'Weight': 0, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
+    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'SPLIT REABSORBED', operator, note: 'Remainder folded back into ' + skidId + ' when its ticket left the job', runningTotal: 0 }, '');
+  }
+  const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).length;
+  await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Ticket Count': count });
   const hist = await getTransactionHistory(sheets, skidId, obj['Ticket']);
   const nextPass = hist.length ? Math.max.apply(null, hist.map((h) => num(h.passNumber))) + 1 : 1;
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': obj['Ticket'], 'Pass Number': nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'REMOVED FROM JOB (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
     'Pass Total Cost': -litho, 'Running Total After Pass': 0, 'Notes': 'Removed from job ' + jobId + ' before approval; pending coatings voided', 'Job Name': '', 'Skid ID': skidId }, opId);
-  await reabsorbSplitRemainders(sheets, skidId, obj, master, operator);
-  const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).length;
-  await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Ticket Count': count });
   return getJobDetail(sheets, jobId);
 }
 
-async function approveJob(sheets, jobId, operator) {
-  // No opId guard: approval is idempotent (already-WIP skipped, Approved job returns early),
-  // so a retry after a partial run just finishes the rest.
+async function approveJob(sheets, jobId, operator, opId) {
+  // Approval is naturally repeatable (already-WIP skids are skipped, an Approved job returns
+  // early), so a retry after a partial run just finishes the rest. Each skid's move to WIP stamps
+  // "<opId>#<skidId>" so a retry also writes any "JOB APPROVED" log entry that got missed.
   const jobs = await readTab(sheets, JOBS);
   const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
   if (!job) throw new Error('Job not found: ' + jobId);
   if (String(job['Status']) === 'Approved') return getJobDetail(sheets, jobId);
-  const master = await readTab(sheets, MASTER);
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   for (const o of master.rows) {
     if (String(o['Job ID']).trim() !== String(jobId).trim()) continue;
-    if ((o['Status'] || '') !== STATUS.PENDING) continue;
-    await stampCells(sheets, MASTER, o.__row, master.map, { 'Status': STATUS.WIP, 'Approved At': nowStamp(), 'Approved By': operator || '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
-    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'JOB APPROVED', operator, note: 'Approved in job ' + jobId + ' — moved to WIP', jobId: jobId, runningTotal: num(o['Litho']) }, '');
+    const step = subOp(opId, o['Skid ID']);
+    const st = o['Status'] || '';
+    const halfDone = st === STATUS.WIP && stampedBy(o, step) && !(await opAlreadyDone(sheets, step));
+    if (st !== STATUS.PENDING && !halfDone) continue;
+    if (!halfDone) await stampCells(sheets, MASTER, o.__row, master.map, { 'Status': STATUS.WIP, 'Approved At': nowStamp(), 'Approved By': operator || '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': step });
+    await eventTx(sheets, { skidId: o['Skid ID'], ticket: o['Ticket'], itemText: 'JOB APPROVED', operator, note: 'Approved in job ' + jobId + ' — moved to WIP', jobId: jobId, runningTotal: num(o['Litho']) }, step);
   }
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Status': 'Approved', 'Approved At': nowStamp(), 'Approved By': operator || '' });
   return getJobDetail(sheets, jobId);
@@ -1262,6 +1510,13 @@ async function deleteJob(sheets, jobId, operator, opId) {
   }
   const grid = await sheetGrid(sheets, JOBS);
   if (!grid) throw new Error('Could not locate the Litho Jobs tab.');
+  // Rows shift when anything above is deleted, so re-check that this row still holds THIS job
+  // right before deleting it (never delete a different job by position).
+  const idCol = colLetter(jobs.map['Job ID']);
+  const cell = await sheets.read("'" + JOBS + "'!" + idCol + job.__row);
+  if (String((cell[0] && cell[0][0]) || '').trim() !== String(jobId).trim()) {
+    throw new Error('The job list changed while deleting ' + jobId + ' — nothing was deleted. Refresh and try again.');
+  }
   await sheets.deleteRows(grid.sheetId, job.__row - 1, job.__row);   // job.__row is 1-based; deleteRows is 0-based half-open
   return { ok: true, jobId, description: job['Description'] || '' };
 }
@@ -1571,8 +1826,10 @@ async function finishRun(sheets, runId, usedMap, operator, opId) {
 // or malformed). By request, this flow is date-only: the chosen date is the single source of truth —
 // it lands in 'Used At' (and the audit entry) with NO wall-clock time recorded anywhere. (Runs write
 // a full date+time into 'Used At'; this quick-mark deliberately writes date only.)
+// Retry-safe per skid: each skid's change stamps "<opId>#<skidId>" and its log row carries the
+// same id, so a retry after a failure at skid 5 of 10 marks skids 5-10 instead of calling the whole
+// batch a duplicate — and never re-logs skids 1-4 as a second ("re-used") use.
 async function markUsedDirect(sheets, skidIds, usedDate, opId) {
-  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, marked: 0, reused: 0, skipped: 0, duplicate: true, results: [] };
   const ids = (skidIds || []).map((s) => String(s).trim()).filter(Boolean);
   if (!ids.length) throw new Error('No skids to mark.');
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(usedDate || '').trim()) ? String(usedDate).trim() : todayYMD();
@@ -1580,13 +1837,19 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');   // re-uses are appended here
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Last Op ID');
   master = await readTab(sheets, MASTER);
   const results = [];
-  let opRecorded = false;
   for (const skidId of ids) {
     const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === skidId)[0];
     if (!obj) { results.push({ skidId, ok: false, reason: 'not found' }); continue; }
-    if (String(obj['Status']) === STATUS.USED) {
+    const step = subOp(opId, skidId);
+    if (step && await opAlreadyDone(sheets, step)) {   // this skid was fully done by an earlier attempt
+      results.push({ skidId, ticket: obj['Ticket'], ok: true, already: true });
+      continue;
+    }
+    const halfDone = stampedBy(obj, step);   // earlier attempt changed the skid but didn't log it
+    if (String(obj['Status']) === STATUS.USED && !halfDone) {
       // Re-use: some skids get used on more than one occasion. Rather than rework the row into a
       // second Used record (the report reads one row per skid), we log the extra use two ways —
       // append "Re-used <date>" to System Notes (NOT Comments, which is the human "who it's for"
@@ -1594,19 +1857,21 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
       const prior = String(obj['System Notes'] || '').trim();
       const merged = (prior ? prior + '; ' : '') + 'Re-used ' + date;
       await stampCells(sheets, MASTER, obj.__row, master.map, {
-        'Used At': date, 'Used Via': 'Direct', 'System Notes': merged, 'Last Updated At': date });
+        'Used At': date, 'Used Via': 'Direct', 'System Notes': merged, 'Last Updated At': date, 'Last Op ID': step });
       await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION AGAIN (DIRECT)',
-        operator: '', note: 'Re-used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
-      opRecorded = true;
+        operator: '', note: 'Re-used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, step);
       results.push({ skidId, ticket: obj['Ticket'], ok: true, reused: true });
       continue;
     }
-    await stampCells(sheets, MASTER, obj.__row, master.map, {
-      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Direct', 'Last Updated At': date });
-    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'USED IN PRODUCTION (DIRECT)',
-      operator: '', note: 'Marked Used in Production (direct) for ' + date, timestamp: date, runningTotal: num(obj['Litho']) }, opRecorded ? '' : (opId || ''));
-    opRecorded = true;
-    results.push({ skidId, ticket: obj['Ticket'], ok: true });
+    if (!halfDone) {
+      await stampCells(sheets, MASTER, obj.__row, master.map, {
+        'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Direct', 'Last Updated At': date, 'Last Op ID': step });
+    }
+    // A half-done re-use left "Re-used <date>" at the end of System Notes; a first use doesn't touch it.
+    const reused = halfDone && String(obj['System Notes'] || '').trim().endsWith('Re-used ' + date);
+    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: reused ? 'USED IN PRODUCTION AGAIN (DIRECT)' : 'USED IN PRODUCTION (DIRECT)',
+      operator: '', note: (reused ? 'Re-used in Production (direct) for ' : 'Marked Used in Production (direct) for ') + date, timestamp: date, runningTotal: num(obj['Litho']) }, step);
+    results.push({ skidId, ticket: obj['Ticket'], ok: true, reused: reused || undefined });
   }
   return { ok: true, marked: results.filter((r) => r.ok && !r.reused).length, reused: results.filter((r) => r.reused).length,
     skipped: results.filter((r) => !r.ok).length, usedDate: date, results };
@@ -1621,8 +1886,12 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
 // cut number for the day — e.g. 080126-101, 080126-102 on line 1; 080126-201 on line 2. Children
 // start as Current stock with Split Of = the coil. Date-only, no operator. skids = [{ weight, qty }].
 async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opId) {
-  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, created: 0, tickets: [] };
   coilSkidId = String(coilSkidId || '').trim();
+  if (opId && await opAlreadyDone(sheets, opId)) {   // already finished: report what that cut made
+    const made = (await readTab(sheets, MASTER)).rows.filter((o) => stampedBy(o, opId) && String(o['Split Of']).trim() === coilSkidId)
+      .map((o) => ({ skidId: o['Skid ID'], ticket: o['Ticket'], weight: num(o['Weight']), qty: num(o['QTY/LOAD']) }));
+    return { ok: true, duplicate: true, created: made.length, coilSkidId, finished: finish !== false, tickets: made };
+  }
   if (!coilSkidId) throw new Error('Pick a coil to cut.');
   const list = (skids || []).map((s) => ({ weight: num(s && s.weight), qty: num(s && s.qty) }));
   if (!list.length) throw new Error('Add at least one cut skid.');
@@ -1637,10 +1906,14 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used At');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');   // cut-from-coil note lands here, not Comments
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Last Op ID');
   master = await readTab(sheets, MASTER);
   const coil = master.rows.filter((o) => String(o['Skid ID']).trim() === coilSkidId)[0];
   if (!coil) throw new Error('Coil not found: ' + coilSkidId);
-  if (String(coil['Status']) === STATUS.USED) throw new Error('That coil is already marked Used.');
+  // Children an earlier attempt of this same cut already wrote (it failed part-way): keep them and
+  // only write the rest, so a retry can't create a second set of skids.
+  const done = master.rows.filter((o) => stampedBy(o, opId) && String(o['Split Of']).trim() === coilSkidId);
+  if (String(coil['Status']) === STATUS.USED && !stampedBy(coil, opId)) throw new Error('That coil is already marked Used.');
   const coilTicket = coil['Ticket'] || '';
   const coilMill = coil['Mill'] || '';
   // Next Skid ID and next running cut number for THIS date + line (existing MMDDYY-<line>NN tickets).
@@ -1663,8 +1936,8 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     const need = writeRow + list.length - 1;             // last row we'll touch
     if (grid && grid.rowCount && need > grid.rowCount) await sheets.appendRows(grid.sheetId, need - grid.rowCount);
   } catch (e) { /* best-effort grow; the write below surfaces any real grid error */ }
-  const tickets = [];
-  for (const s of list) {
+  const tickets = done.map((o) => ({ skidId: o['Skid ID'], ticket: o['Ticket'], weight: num(o['Weight']), qty: num(o['QTY/LOAD']) }));
+  for (const s of list.slice(done.length)) {
     nextN += 1; seq += 1;
     const skidId = fmtId('SKD-', nextN);
     const ticket = prefix + (seq < 10 ? '0' + seq : String(seq));   // MMDDYY-<line>NN (2-digit min)
@@ -1680,6 +1953,7 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     row['Comments'] = coil['Comments'] || '';                 // carry the coil's human comment (who it's for)
     row['System Notes'] = 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
     row['Last Updated At'] = date; row['Last Updated By'] = 'coil line';
+    row['Last Op ID'] = opId || '';
     // Header-aligned row written at an exact position (A<writeRow>), so it lands in the same columns
     // as every existing row — no append table-detection, no rightward drift.
     const rowArr = master.headers.map((h) => (row.hasOwnProperty(h) ? row[h] : ''));
@@ -1692,9 +1966,9 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   // just continue under that day's date. Either way, stamp when it was last touched.
   if (finished) {
     await stampCells(sheets, MASTER, coil.__row, master.map, {
-      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date });   // 'Coil' distinguishes it from the direct quick-mark
+      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date, 'Last Op ID': opId || '' });   // 'Coil' distinguishes it from the direct quick-mark
   } else {
-    await stampCells(sheets, MASTER, coil.__row, master.map, { 'Last Updated At': date });
+    await stampCells(sheets, MASTER, coil.__row, master.map, { 'Last Updated At': date, 'Last Op ID': opId || '' });
   }
   await eventTx(sheets, { skidId: coilSkidId, ticket: coilTicket,
     itemText: finished ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator: '',

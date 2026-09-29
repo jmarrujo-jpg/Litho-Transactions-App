@@ -7,3 +7,13 @@
 name = "lithofloor"
 main = "worker.js"
 compatibility_date = "2024-11-06"
+
+# Write lock: one Durable Object that makes sheet writes run one at a time (see worker.js).
+# SQLite-backed Durable Objects work on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "WRITE_LOCK"
+class_name = "WriteLock"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WriteLock"]
