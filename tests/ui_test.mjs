@@ -151,6 +151,7 @@ const base = {
     await page.waitForTimeout(300);
     const ja = calls.filter((c) => c.fn === 'jobAddTicket');
     ok('logged as Bob', ja.length === 1 && ja[0].args[5] === 'Bob', ja.map((c) => c.args[5]));
+    ok('blank Tested BW sent as blank', ja[0] && ja[0].args[8] === '', ja[0] && ja[0].args);
     ok('button text has no raw entity', !(await page.textContent('#view')).includes('&hellip;'));
   } else ok('could open the picked ticket', false, await page.innerHTML('#jobQueuePicker'));
   await page.close();
@@ -344,6 +345,54 @@ const base = {
   const sent = calls.length - before;
   ok('requests past the cap are not sent', sent <= 60, sent);
   ok('blocked ones fail with a clear message', res.blocked >= 10, res);
+  await page.close();
+}
+
+// ---- 13. Tested BW on "add ticket to job": shown, checked, sent, displayed
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getJobDetail: () => R({ jobId: 'JOB-000009', description: 'Blue', createdBy: 'Ann', coatings: [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], tickets: [] }),
+    getAllTickets: () => R([ticket('SKD-8', '888', 'Current')]),
+    jobAddTicket: (args) => R({ skidId: args[1], ticket: '888', litho: 2.5, jobId: args[0], sheetsRun: 100, testedBw: args[8] ? Number(args[8]) : undefined }),
+  }));
+  await page.evaluate(() => resumeJob('JOB-000009'));
+  await page.waitForSelector('#jobTicketOperator');
+  await page.fill('#jobTicketOperator', 'Ann');
+  await page.fill('#jobTicketSearch', '888');
+  await page.waitForTimeout(200);
+  await page.click('#jobQueuePicker [data-pick]');
+  await page.waitForSelector('#jobTestedBw');
+  ok('Tested BW box shows the ticket BW as a hint', (await page.textContent('#jobPickedTicketCard')).includes('ticket says 75'));
+  ok('Tested BW box uses the decimal keypad', (await page.$eval('#jobTestedBw', (el) => el.inputMode)) === 'decimal');
+  await page.evaluate(() => { const el = document.getElementById('jobTestedBw'); el.type = 'text'; el.value = '7x'; });   // what a paste could leave
+  await page.click('#addTicketToJobBtn');
+  await page.waitForTimeout(150);
+  ok('bad Tested BW blocked before sending', calls.filter((c) => c.fn === 'jobAddTicket').length === 0);
+  await page.fill('#jobTestedBw', '75.3');
+  await page.click('#addTicketToJobBtn');
+  await page.waitForTimeout(300);
+  const ja = calls.filter((c) => c.fn === 'jobAddTicket');
+  ok('Tested BW sent with the add', ja.length === 1 && ja[0].args[8] === '75.3', ja.map((c) => c.args));
+  ok('added list shows the Tested BW', (await page.textContent('#jobAddedList')).includes('75.3'));
+  ok('no "not saved" warning when the server confirms it', !(await page.$('.modal-overlay')));
+  await page.close();
+}
+// ---- 14. An older Worker that ignores Tested BW: the operator is told
+{ const { page } = await boot(Object.assign({}, base, {
+    getJobDetail: () => R({ jobId: 'JOB-000010', description: 'Blue', createdBy: 'Ann', coatings: [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], tickets: [] }),
+    getAllTickets: () => R([ticket('SKD-9', '999', 'Current')]),
+    jobAddTicket: (args) => R({ skidId: args[1], ticket: '999', litho: 2.5, jobId: args[0] }),   // no testedBw echo
+  }));
+  await page.evaluate(() => resumeJob('JOB-000010'));
+  await page.waitForSelector('#jobTicketOperator');
+  await page.fill('#jobTicketOperator', 'Ann');
+  await page.fill('#jobTicketSearch', '999');
+  await page.waitForTimeout(200);
+  await page.click('#jobQueuePicker [data-pick]');
+  await page.waitForSelector('#jobTestedBw');
+  await page.fill('#jobTestedBw', '76.1');
+  await page.click('#addTicketToJobBtn');
+  await page.waitForTimeout(300);
+  ok('warns when the Tested BW was not saved', ((await page.textContent('#modalRoot')) || '').includes('Tested BW not saved'));
   await page.close();
 }
 

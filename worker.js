@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'cache-49', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'testedbw-50', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -255,8 +255,8 @@ async function handle(fn, args, env) {
       return removeTicketCoating(sheets, args[0], args[1], args[2], args[3]);
     case 'createJob': // (description, operator, coatings, notes, opId)
       return createJob(sheets, args[0], args[1], args[2], args[3], args[4]);
-    case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket)
-      return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+    case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket, testedBW)
+      return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
@@ -621,7 +621,7 @@ async function getAllTickets(sheets) {
   return rows.filter((o) => o['Ticket'] || o['Skid ID']).map((o) => ({
     skidId: o['Skid ID'] || '', ticket: o['Ticket'], supplier: o['Supplier'], endUse: o['End Use'],
     width: o['Width'], length: o['Length'], weight: o['Weight'], qty: o['QTY/LOAD'],
-    bw: o['BW'], type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
+    bw: o['BW'], testedBw: o['Tested BW'] != null ? o['Tested BW'] : '', type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
     row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', loadNo: o['Load #'] || '', cost: num(o['Cost']), countedOn: toYMD(o['Counted At']),
     cs: String(o['C/S'] || o['Coil/Sheet'] || '').trim(), splitOf: o['Split Of'] || '',
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
@@ -790,7 +790,7 @@ async function getJobDetail(sheets, jobId) {
   let recipe = []; try { recipe = JSON.parse(job['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
   const master = await readObjects(sheets, MASTER);
   const tickets = master.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).map((o) => ({
-    skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'], litho: num(o['Litho']), bw: o['BW'], type: o['TC'], temper: o['TM'], endUse: o['End Use'],
+    skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'], litho: num(o['Litho']), bw: o['BW'], testedBw: o['Tested BW'] != null ? o['Tested BW'] : '', type: o['TC'], temper: o['TM'], endUse: o['End Use'],
   }));
   return { jobId: job['Job ID'], description: job['Description'], createdBy: job['Created By'], createdAt: toYMD(job['Created At']),
     status: job['Status'], approvedAt: job['Approved At'] ? toYMD(job['Approved At']) : '', approvedBy: job['Approved By'],
@@ -1378,7 +1378,14 @@ async function createJob(sheets, description, operator, coatings, notes, opId) {
 // Applies the job's whole recipe to one skid. Each coat is its own retry-safe step (coat 0 uses
 // the opId, coat i uses "<opId>#c<i>"), so a retry after a failure part-way through the recipe
 // finishes the missing coats instead of stopping at "already recorded".
-async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket) {
+// testedBW (optional): the basis weight the floor measured on this skid. Saved to the skid's
+// 'Tested BW' column (added to Steel Tickets the first time it's used), next to the nominal BW.
+// For a partial skid it goes on the coated skid that joins the job. Re-writing it is harmless,
+// so a retried add simply sets it again.
+async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket, testedBW) {
+  const testedRaw = String(testedBW == null ? '' : testedBW).trim();
+  const tested = testedRaw === '' ? null : typedNum(testedRaw);
+  if (tested !== null && !(tested > 0)) throw new Error('Tested BW must be a number, e.g. 75.2');
   await normalizeMasterRows(sheets);
   const jobs = await readTab(sheets, JOBS);
   const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
@@ -1411,13 +1418,23 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
       else if (r.litho !== undefined) { result.litho = r.litho; result.detail = r.detail; }
     }
   }
-  const count = (await readTab(sheets, MASTER)).rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).length;
+  let masterNow = await readTab(sheets, MASTER);
+  if (tested !== null) {
+    if (!masterNow.map['Tested BW']) {
+      await ensureColumn(sheets, MASTER, masterNow.headers, 'Tested BW');
+      masterNow = await readTab(sheets, MASTER);
+    }
+    const onJob = masterNow.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
+    if (onJob) await stampCells(sheets, MASTER, onJob.__row, masterNow.map, { 'Tested BW': tested });
+  }
+  const count = masterNow.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).length;
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Ticket Count': count });
   if (!result) {   // every coat was already recorded (a retry of an add that had finished)
     const card = await getTicketCard(sheets, skidId);
     result = { skidId, ticket: card.ticket, litho: card.litho, detail: card, isPartial: false, remainderTicket: null, remainderSheets: 0, scrapSheets: 0 };
   }
   result.jobId = jobId;
+  if (tested !== null) result.testedBw = tested;   // the page checks this came back (an older Worker ignored the value)
   return result;
 }
 

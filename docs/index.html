@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.40.0</span>
+      <span class="version" id="appVersion">v1.41.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2417,7 +2417,7 @@
         currentJob = { jobId: job.jobId, description: job.description, coatings: job.coatings || [], operator: job.createdBy || '', notes: job.notes || '', resumed: true };
         state.jobId = job.jobId;
         // Seed the "added so far" list with the tickets already on the job (detail columns unknown here).
-        jobAddedTickets = (job.tickets || []).map(function (t) { return { ticket: t.ticket, skidId: t.skidId, sheetsRun: '', estimatedWeightUsed: '' }; });
+        jobAddedTickets = (job.tickets || []).map(function (t) { return { ticket: t.ticket, skidId: t.skidId, sheetsRun: '', estimatedWeightUsed: '', testedBw: t.testedBw || '' }; });
         renderCreateJobAddTickets();
       });
     }).withFailureHandler(function (err) {
@@ -2615,7 +2615,9 @@
       ' <span class="badge ' + badgeClassFor(status) + '">' + esc(status) + '</span>' +
       ' <span class="sub" style="font-weight:400">' + esc(card.skidId) + '</span></div>';
     html += '<div class="steel-meta">' +
-      metaBox('Basis Weight', steel['BW']) + metaBox('Type', steel['TC']) +
+      metaBox('Basis Weight', steel['BW']) +
+      (steel['Tested BW'] !== undefined && steel['Tested BW'] !== '' ? metaBox('Tested BW', steel['Tested BW']) : '') +
+      metaBox('Type', steel['TC']) +
       metaBox('Temper', steel['TM']) + metaBox('Length', steel['Length']) +
       metaBox('Width', steel['Width']) + metaBox('End Use', steel['End Use']) +
       '</div>';
@@ -3157,10 +3159,11 @@
     if (!job.tickets.length) html += '<div class="sub">None yet.</div>';
     else {
       html += '<div class="sub" style="margin-bottom:8px">Tap a ticket number to view it and change or remove its coatings.</div>';
-      html += '<table><thead><tr><th>Ticket</th><th>Skid</th><th>Status</th><th>Litho</th>' + (approved ? '' : '<th></th>') + '</tr></thead><tbody>';
+      html += '<table><thead><tr><th>Ticket</th><th>Skid</th><th>BW</th><th>Tested BW</th><th>Status</th><th>Litho</th>' + (approved ? '' : '<th></th>') + '</tr></thead><tbody>';
       job.tickets.forEach(function (t) {
         html += '<tr><td><span class="ticket-link" data-open-skid="' + esc(t.skidId) + '">' + esc(t.ticket) + '</span></td>' +
-          '<td class="sub">' + esc(t.skidId) + '</td><td>' + esc(t.status) + '</td><td>' + money(t.litho) + '</td>' +
+          '<td class="sub">' + esc(t.skidId) + '</td><td>' + esc(t.bw) + '</td><td>' + (t.testedBw !== undefined && t.testedBw !== '' ? esc(t.testedBw) : '&mdash;') + '</td>' +
+          '<td>' + esc(t.status) + '</td><td>' + money(t.litho) + '</td>' +
           (approved ? '' : '<td><button class="btn secondary" style="padding:4px 8px;font-size:12px" data-remove="' + esc(t.skidId) + '">Remove</button></td>') +
           '</tr>';
       });
@@ -3331,6 +3334,7 @@
           '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:6px"><input type="checkbox" id="jrPartial" style="width:18px;height:18px"> Partial skid — return leftovers to Current</label>'
         : '') +
       operatorFieldHtml('jrPickOperator') +
+      testedBwFieldHtml('jrTestedBw', entry) +
       '<div class="field"><label>Litho Notes (optional)</label><input id="jrLithoNote"></div>' +
       '<button class="btn" id="jrAddTicketBtn">Add to Job</button>';
     if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
@@ -3343,10 +3347,13 @@
       var lithoNote = document.getElementById('jrLithoNote').value;
       var sErr = sheetsError(sheets, origQty);
       if (sErr) { toast(sErr); return; }
+      var testedBw = readTestedBw('jrTestedBw');
+      if (testedBw === null) { toast('Tested BW must be a number, e.g. 75.2'); return; }
       var btn = document.getElementById('jrAddTicketBtn'); btn.disabled = true;
-      runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId()],
-        function () {
+      runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId(), '', testedBw],
+        function (result) {
           toast('Ticket added');
+          warnIfTestedBwDropped(testedBw, result);
           dropFromQueueCache(skidId); // no longer Current — keep it out of the picker; the list reloads on the next visit
           renderJob();
         },
@@ -3632,6 +3639,26 @@
     });
   }
 
+  // Tested BW: the basis weight measured on the floor for this skid (the ticket's BW is nominal).
+  // Optional; saved to the skid's 'Tested BW' column when the ticket is added to a job.
+  function testedBwFieldHtml(id, entry) {
+    return '<div class="field"><label>Tested BW (optional' + (entry && entry.bw ? ' — ticket says ' + esc(entry.bw) : '') + ')</label>' +
+      '<input type="number" inputmode="decimal" step="0.01" min="0" id="' + id + '" placeholder="e.g. 75.2" value="' + esc(entry && entry.testedBw ? entry.testedBw : '') + '"></div>';
+  }
+  // Returns '' (left blank), the cleaned number as a string, or null if it isn't a valid number.
+  function readTestedBw(id) {
+    var el = document.getElementById(id);
+    var v = el ? String(el.value || '').replace(/[,\s]/g, '') : '';
+    if (v === '') return '';
+    return (isFinite(Number(v)) && Number(v) > 0) ? v : null;
+  }
+
+  // An older Worker ignores the Tested BW without saying so; it only confirms it when saved.
+  function warnIfTestedBwDropped(sent, result) {
+    if (sent && !(result && result.testedBw != null && result.testedBw !== ''))
+      showModal({ title: 'Tested BW not saved', message: 'The ticket was added, but the server didn’t save the Tested BW (' + sent + '). The server needs its latest update — enter it in the Database tab for now.', confirmText: 'OK' });
+  }
+
   function renderPickedTicketCard(skidId, entry) {
     var card = document.getElementById('jobPickedTicketCard');
     var origQty = entry ? Number(entry.qty) || 0 : 0;
@@ -3656,6 +3683,7 @@
           '</label>' +
           '<div class="sub" id="sheetsRunPreview" style="margin-bottom:10px"></div>'
         : '<div class="sub" style="margin-bottom:10px">No sheet count on this ticket — the whole skid runs as-is.</div>') +
+      testedBwFieldHtml('jobTestedBw', entry) +
       '<div class="field"><label>Litho Notes (optional)</label>' +
         '<input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
       '<button class="btn" id="addTicketToJobBtn">Add to Job</button>';
@@ -3693,6 +3721,8 @@
       var isPartialSkid = !!(partialToggle && partialToggle.checked);
       var sErr = sheetsError(sheetsRun, origQty);
       if (sErr) { toast(sErr); return; }
+      var testedBw = readTestedBw('jobTestedBw');
+      if (testedBw === null) { toast('Tested BW must be a number, e.g. 75.2'); return; }
       var opEl = document.getElementById('jobTicketOperator');
       var operator = opEl ? opEl.value.trim() : currentJob.operator;
       if (!operator) { toast('Enter your name first'); if (opEl) opEl.focus(); return; }
@@ -3701,9 +3731,10 @@
       function submit(coatedTicket) {
         btn.disabled = true; btn.textContent = 'Adding…';
         runMutation('jobAddTicket',
-          [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, newOpId(), coatedTicket || ''],
+          [currentJob.jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, newOpId(), coatedTicket || '', testedBw],
           function (result) {
             if (result && result.duplicate) { toast('Already recorded'); btn.disabled = false; btn.textContent = 'Add to Job'; return; }
+            warnIfTestedBwDropped(testedBw, result);
             jobAddedTickets.push(result);
             var msg = 'Added ' + result.ticket;
             if (result.isPartial && result.remainderTicket) msg += ' — ' + result.remainderSheets + ' sheets stay as ' + result.remainderTicket;
@@ -3745,7 +3776,7 @@
     if (countEl) countEl.textContent = jobAddedTickets.length;
     if (!container) return;
     if (!jobAddedTickets.length) { container.innerHTML = 'None yet.'; return; }
-    var html = '<table><thead><tr><th>Ticket</th><th>Sheets Run</th><th>Est. Weight</th><th>Remainder / Scrap</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Ticket</th><th>Sheets Run</th><th>Est. Weight</th><th>Tested BW</th><th>Remainder / Scrap</th></tr></thead><tbody>';
     jobAddedTickets.forEach(function (r) {
       var last = r.remainderTicket
         ? esc(r.remainderTicket) + ' (' + esc(r.remainderSheets) + ' sheets)'
@@ -3754,7 +3785,7 @@
       var sheetsCell = (r.sheetsRun || r.sheetsRun === 0) ? esc(r.sheetsRun) : '&mdash;';
       var weightCell = (r.estimatedWeightUsed || r.estimatedWeightUsed === 0) ? esc(r.estimatedWeightUsed) + ' lbs' : '&mdash;';
       html += '<tr><td>' + esc(r.ticket) + '</td><td>' + sheetsCell + '</td><td>' + weightCell + '</td>' +
-        '<td>' + last + '</td></tr>';
+        '<td>' + (r.testedBw ? esc(r.testedBw) : '&mdash;') + '</td><td>' + last + '</td></tr>';
     });
     html += '</tbody></table>';
     container.innerHTML = html;

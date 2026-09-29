@@ -337,5 +337,33 @@ await concurrency(envBase, 'in-worker lock');
   ok('job detail returned lists 6 tickets', r.result && r.result.tickets && r.result.tickets.length === 6, r.result && r.result.tickets && r.result.tickets.length);
 }
 
+// 16. Tested BW: saved on the skid (column added on first use), bad values refused, retry-safe
+{ const f = fresh();
+  const j = await call('createJob', ['bw test', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], '', 'op-16-a']);
+  const jid = j.result.jobId;
+  const bad = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Ann', 'op-16-bad', '', 'abc']);
+  ok('non-number Tested BW refused', !bad.ok && /Tested BW/.test(bad.error), bad);
+  ok('refused add changed nothing', skidRow(f, 'SKD-000001')['Status'] === 'Current' && txFor(f, 'SKD-000001').length === 0);
+  const r = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Ann', 'op-16-b', '', '75.2']);
+  ok('add with Tested BW ok', r.ok, r);
+  ok('server confirms the saved Tested BW', r.result && r.result.testedBw === 75.2, r.result && r.result.testedBw);
+  ok('Tested BW column created and set', String(skidRow(f, 'SKD-000001')['Tested BW']) === '75.2', skidRow(f, 'SKD-000001'));
+  ok('nominal BW untouched', String(skidRow(f, 'SKD-000001')['BW']) === '', skidRow(f, 'SKD-000001')['BW']);
+  const again = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Ann', 'op-16-b', '', '75.2']);
+  ok('retry of the same add is fine', again.ok && txFor(f, 'SKD-000001').length === 1, [again, txFor(f, 'SKD-000001').length]);
+  const blank = await call('jobAddTicket', [jid, 'SKD-000002', '', false, '', 'Ann', 'op-16-c', '', '']);
+  ok('blank Tested BW allowed, left empty', blank.ok && String(skidRow(f, 'SKD-000002')['Tested BW'] || '') === '', skidRow(f, 'SKD-000002'));
+  const part = await call('jobAddTicket', [jid, 'SKD-000004', 100, true, '', 'Ann', 'op-16-d', '', '74.9']);
+  ok('partial add ok', part.ok, part);
+  const rem = f.rows(SID, 'Steel Tickets').filter((o) => o['Split Of'] === 'SKD-000004')[0];
+  ok('partial: Tested BW on the coated skid in the job', String(skidRow(f, 'SKD-000004')['Tested BW']) === '74.9' && skidRow(f, 'SKD-000004')['Job ID'] === jid);
+  ok('partial: remainder left blank', rem && String(rem['Tested BW'] || '') === '', rem);
+  const d = await call('getJobDetail', [jid]);
+  const t1 = d.result.tickets.filter((t) => t.skidId === 'SKD-000001')[0];
+  ok('job detail reports Tested BW', t1 && String(t1.testedBw) === '75.2', t1);
+  const all = await call('getAllTickets', []);
+  ok('ticket list reports Tested BW', String(all.result.filter((t) => t.skidId === 'SKD-000001')[0].testedBw) === '75.2');
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
