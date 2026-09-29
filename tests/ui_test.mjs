@@ -37,6 +37,14 @@ async function boot(handlers) {
   return { page, calls };
 }
 const R = (result) => ({ ok: true, result });
+// Litho Department asks for a name first.
+async function enterLitho(page, name) {
+  await page.click('#tileLitho');
+  await page.waitForSelector('#lithoUserSelect');
+  await page.selectOption('#lithoUserSelect', { label: name });
+  await page.click('#lithoLoginBtn');
+  await page.waitForTimeout(250);
+}
 const card = (steel, extra) => Object.assign({ skidId: steel['Skid ID'], ticket: steel['Ticket'], status: steel['Status'], steel, litho: Number(steel['Litho']) || 0,
   passCount: 0, suggestedGroup: '603X408', coatings: [], transactions: [], family: { base: steel['Ticket'], members: [] } }, extra || {});
 const base = {
@@ -287,19 +295,19 @@ const base = {
   }));
   const n = (fn) => calls.filter((c) => c.fn === fn).length;
   ok('no operator-names request on page load', n('getOperatorNames') === 0);
-  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  await enterLitho(page, 'Alex');
   ok('Litho list loads once', n('getAllTickets') === 1 && n('getOpenJobs') === 1, [n('getAllTickets'), n('getOpenJobs')]);
   await page.click('#backBtn'); await page.waitForTimeout(100);
-  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  await enterLitho(page, 'Alex');
   ok('coming back within minutes reuses the list', n('getAllTickets') === 1 && n('getOpenJobs') === 1, [n('getAllTickets'), n('getOpenJobs')]);
   ok('reused list still shows the tickets', (await page.textContent('#allListContainer')).includes('A1'));
   await page.evaluate(() => new Promise((res) => runMutation('updateTicketDetails', ['SKD-A', {}, 'Ann', '', newOpId()], res, res)));
   await page.click('#backBtn'); await page.waitForTimeout(100);
-  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  await enterLitho(page, 'Alex');
   ok('after a save the list reloads', n('getAllTickets') === 2 && n('getOpenJobs') === 2, [n('getAllTickets'), n('getOpenJobs')]);
   await page.evaluate(() => { ticketsLoadedAt -= 4 * 60 * 1000; openJobsAt -= 4 * 60 * 1000; });   // 4 minutes pass
   await page.click('#backBtn'); await page.waitForTimeout(100);
-  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  await enterLitho(page, 'Alex');
   ok('after 3+ minutes the list reloads', n('getAllTickets') === 3 && n('getOpenJobs') === 3, [n('getAllTickets'), n('getOpenJobs')]);
   await page.close();
 }
@@ -393,6 +401,61 @@ const base = {
   await page.click('#addTicketToJobBtn');
   await page.waitForTimeout(300);
   ok('warns when the Tested BW was not saved', ((await page.textContent('#modalRoot')) || '').includes('Tested BW not saved'));
+  await page.close();
+}
+
+// ---- 15. Litho sign-in: pick a name; managers and workers get different screens
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-A', 'A1', 'Current')]),
+    getOpenJobs: () => R([{ jobId: 'JOB-000004', description: 'Blue run', ticketCount: 2, coatings: 'SIZE' }]),
+  }));
+  await page.click('#tileLitho');
+  await page.waitForSelector('#lithoUserSelect');
+  const names = await page.$$eval('#lithoUserSelect option', (os) => os.map((o) => o.textContent));
+  ok('name list: placeholder + Alex, Joel, Jonathan, Worker', JSON.stringify(names) === JSON.stringify(['Select name…', 'Alex', 'Joel', 'Jonathan', 'Worker']), names);
+  await page.click('#lithoLoginBtn'); await page.waitForTimeout(100);
+  ok('must pick a name', await page.$('#lithoUserSelect') !== null && !(await page.$('#newJobBtn')));
+  ok('no ticket list loaded before signing in', calls.filter((c) => c.fn === 'getAllTickets').length === 0);
+
+  // Manager
+  await page.selectOption('#lithoUserSelect', { label: 'Joel' });
+  await page.click('#lithoLoginBtn'); await page.waitForTimeout(300);
+  let txt = await page.textContent('#view');
+  ok('manager: greeted by name', txt.includes('Joel') && txt.includes('Manager'));
+  ok('manager: New Job + Review Jobs', !!(await page.$('#newJobBtn')) && !!(await page.$('#reviewJobsBtn')));
+  ok('manager: sees the ticket list', (await page.textContent('#allListContainer')).includes('A1'));
+  await page.click('#reviewJobsBtn'); await page.waitForTimeout(200);
+  ok('manager: Review Jobs opens', await page.evaluate(() => state.view === 'review'));
+  await page.click('#backBtn'); await page.waitForTimeout(200);
+  ok('Back from Review Jobs returns to the manager home', await page.evaluate(() => state.view === 'all') && !!(await page.$('#reviewJobsBtn')));
+  await page.evaluate(() => openCreateJob()); await page.waitForTimeout(150);
+  ok('operator name pre-filled with the signed-in name', (await page.$eval('#jobOperator', (el) => el.value)) === 'Joel');
+
+  // Worker
+  await page.click('#backBtn'); await page.waitForTimeout(150);
+  await page.click('#lithoSwitchBtn'); await page.waitForTimeout(150);
+  ok('Change name shows the picker with the current name selected', (await page.$eval('#lithoUserSelect', (el) => el.options[el.selectedIndex].textContent)) === 'Joel');
+  const loadsBefore = calls.filter((c) => c.fn === 'getAllTickets').length;
+  await page.selectOption('#lithoUserSelect', { label: 'Worker' });
+  await page.click('#lithoLoginBtn'); await page.waitForTimeout(300);
+  txt = await page.textContent('#view');
+  ok('worker: New Job, Open Jobs, Add Ticket', !!(await page.$('#newJobBtn')) && !!(await page.$('#openJobsBtn')) && !!(await page.$('#addTicketBtn')));
+  ok('worker: no Review Jobs', !(await page.$('#reviewJobsBtn')));
+  ok('worker: no ticket list', !(await page.$('#allListContainer')) && !txt.includes('A1'));
+  ok('worker: not labelled manager', !txt.includes('Manager'));
+  ok('worker home does not load the ticket list', calls.filter((c) => c.fn === 'getAllTickets').length === loadsBefore);
+  await page.evaluate(() => openReview()); await page.waitForTimeout(150);
+  ok('worker: Review Jobs blocked even if reached directly', await page.evaluate(() => state.view !== 'review'));
+  await page.click('#openJobsBtn'); await page.waitForTimeout(300);
+  ok('worker: Open Jobs lists the open job', (await page.textContent('#view')).includes('Blue run'));
+  await page.click('#backBtn'); await page.waitForTimeout(150);
+  ok('Back from Open Jobs returns to the worker home', !!(await page.$('#openJobsBtn')));
+  await page.click('#backBtn'); await page.waitForTimeout(150);
+  ok('Back from the Litho home goes to the landing screen', !!(await page.$('#tileLitho')));
+  await page.reload(); await page.waitForTimeout(300);
+  await page.click('#tileLitho'); await page.waitForTimeout(150);
+  ok('after a refresh nobody is pre-selected', (await page.$eval('#lithoUserSelect', (el) => el.value)) === '');
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
 
