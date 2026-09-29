@@ -216,6 +216,68 @@ const base = {
   await page.close();
 }
 
+// ---- 8. A scan that finds nothing reloads the list once (ticket added on another iPad)
+{ let added = false;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-A', 'A1', 'Current')].concat(added ? [ticket('SKD-N', '5550', 'Current')] : [])),
+  }));
+  const loads = () => calls.filter((c) => c.fn === 'getAllTickets').length;
+  await page.click('#tileSearch');
+  await page.waitForTimeout(200);
+  ok('search box has focus on open', await page.evaluate(() => document.activeElement && document.activeElement.id === 'globalSearch'));
+  const before = loads();
+  added = true;                                        // another iPad adds ticket 5550 now
+  await page.keyboard.type('5550');
+  await page.waitForTimeout(150);
+  ok('miss says it is checking', (await page.textContent('#searchActiveList')).includes('Checking for newly added'));
+  ok('no reload while still typing', loads() === before, [before, loads()]);
+  await page.waitForTimeout(1000);
+  ok('one reload after the pause', loads() === before + 1, [before, loads()]);
+  ok('new ticket found after reload', (await page.textContent('#searchActiveList')).includes('5550'));
+  await page.fill('#globalSearch', 'ZZZ');
+  await page.waitForTimeout(1000);
+  const afterZ = loads();
+  await page.evaluate(() => renderSearchActive());     // same miss re-rendered: no second request
+  await page.waitForTimeout(1000);
+  ok('a real "no match" costs one request, not a loop', loads() === afterZ && afterZ === before + 2, [before, afterZ, loads()]);
+  ok('final miss message has no "checking"', !(await page.textContent('#searchActiveList')).includes('Checking'));
+
+  // Used in Production: Enter on an unknown skid reloads right away and adds it if it now exists
+  added = false;
+  await page.evaluate(() => { setCaches([]); allCache = [ticket0()]; function ticket0() { return { skidId: 'SKD-A', ticket: 'A1', status: 'Current' }; } renderUsedHome(); });
+  await page.waitForSelector('#usedAddInput');
+  ok('used scan box has focus', await page.evaluate(() => document.activeElement && document.activeElement.id === 'usedAddInput'));
+  added = true;
+  const b2 = loads();
+  await page.fill('#usedAddInput', 'SKD-N');
+  await page.press('#usedAddInput', 'Enter');
+  await page.waitForTimeout(600);
+  ok('Enter on unknown skid reloads once', loads() === b2 + 1, [b2, loads()]);
+  ok('reloaded skid is added to the list', (await page.textContent('#usedListBox')).includes('5550'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 9. iPad basics: numeric keypads, no field under 16px, 44px buttons
+{ const { page } = await boot(Object.assign({}, base, {
+    getTicketCard: () => R(card({ 'Skid ID': 'SKD-1', 'Ticket': '100', 'Status': 'Current', 'Litho': '' })),
+  }));
+  await page.setViewportSize({ width: 1024, height: 1366 });   // iPad portrait: the phone CSS does NOT apply
+  await page.evaluate(() => openCard('SKD-1'));
+  await page.waitForSelector('#edSpoil');
+  const info = await page.evaluate(() => ({
+    numNoMode: Array.from(document.querySelectorAll('input[type=number]')).filter((i) => !i.getAttribute('inputmode')).map((i) => i.id || i.className),
+    small: Array.from(document.querySelectorAll('input:not([type=checkbox]):not([type=radio]), select, textarea')).filter((i) => parseFloat(getComputedStyle(i).fontSize) < 16).map((i) => i.id),
+    shortBtns: Array.from(document.querySelectorAll('.btn')).filter((b) => b.offsetParent && b.getBoundingClientRect().height < 44).map((b) => b.id || b.textContent.trim()),
+    weightMode: (document.querySelector('#edWeight') || {}).inputMode,
+  }));
+  ok('every number field sets a keypad', !info.numNoMode.length, info.numNoMode);
+  ok('no field text under 16px on iPad', !info.small.length, info.small);
+  ok('no visible button under 44px', !info.shortBtns.length, info.shortBtns);
+  ok('weight gets the decimal keypad', info.weightMode === 'decimal', info.weightMode);
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

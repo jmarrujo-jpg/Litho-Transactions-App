@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'lock-48', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'cache-49', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -455,6 +455,22 @@ async function makeSheets(env) {
     throw lastErr;
   }
   const json = (body) => ({ method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  // Per-request read cache. A single save used to read the same tab many times over (adding a
+  // coating to a 6-ticket job read the rate table 13 times and Steel Tickets 20 times: 62 Google
+  // calls, over the Workers Free plan's 50-per-request cap). Reads are kept for the rest of this
+  // request only, and a tab's entries are dropped before AND after any write to it, so a read never
+  // returns data older than this request's own last write (and the "did it land?" checks after an
+  // unclear failure always read fresh). Writes are serialized by the write lock, so nobody else
+  // changes the sheet mid-request. Callers get their own copy, since some edit the rows they read.
+  const readCache = new Map();   // tab -> Map(range|mode -> values)
+  function tabOfRange(rangeA1) {
+    const m = /^'((?:[^']|'')*)'/.exec(rangeA1);
+    return m ? m[1].replace(/''/g, "'") : String(rangeA1).split('!')[0];
+  }
+  const copyRows = (v) => v.map((r) => r.slice());
+  function drop(tabs) { if (tabs === null) readCache.clear(); else tabs.forEach((t) => readCache.delete(t)); }
+  async function writing(tabs, fn) { drop(tabs); try { return await fn(); } finally { drop(tabs); } }
+  const freshCheck = (tabs, landed) => landed && (async () => { drop(tabs); return landed(); });
   async function tabTitles(spreadsheetId) {
     const m = await call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=' + encodeURIComponent('sheets.properties(title)'), { headers: auth });
     return new Set((m.sheets || []).map((x) => x.properties.title));
@@ -464,39 +480,46 @@ async function makeSheets(env) {
     _hdr: {},     // per-request cache of each tab's header row (see tabHeaders)
     _ops: null,   // per-request cache of the Transactions Op IDs (see opIdSet)
     async read(rangeA1, unformatted) {
+      const tab = tabOfRange(rangeA1), key = rangeA1 + (unformatted ? '|u' : '|f');
+      let byTab = readCache.get(tab);
+      if (byTab && byTab.has(key)) return copyRows(byTab.get(key));
       const q = unformatted ? '?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER' : '?valueRenderOption=FORMATTED_VALUE';
       const j = await call(base + '/values/' + encodeURIComponent(rangeA1) + q, { headers: auth });
-      return j.values || [];
+      const values = j.values || [];
+      if (!readCache.has(tab)) readCache.set(tab, new Map());
+      readCache.get(tab).set(key, values);
+      return copyRows(values);
     },
     // landed(): optional "did this row get saved?" check, used to retry safely after an unclear failure.
     async append(rangeA1, row, landed) {
-      return callChecked(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
-        json({ values: [row] }), landed);
+      const tabs = [tabOfRange(rangeA1)];
+      return writing(tabs, () => callChecked(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
+        json({ values: [row] }), freshCheck(tabs, landed)));
     },
     async update(rangeA1, values) {
-      return call(base + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
-        { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) });
+      return writing([tabOfRange(rangeA1)], () => call(base + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
+        { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) }));
     },
     async batchUpdate(data) {
-      return call(base + '/values:batchUpdate', json({ valueInputOption: 'RAW', data }));
+      return writing(data.map((d) => tabOfRange(d.range)), () => call(base + '/values:batchUpdate', json({ valueInputOption: 'RAW', data })));
     },
     async addSheet(title) {
-      return callChecked(base + ':batchUpdate', json({ requests: [{ addSheet: { properties: { title } } }] }),
-        async () => (await tabTitles(id)).has(title));
+      return writing(null, () => callChecked(base + ':batchUpdate', json({ requests: [{ addSheet: { properties: { title } } }] }),
+        async () => (await tabTitles(id)).has(title)));
     },
     async meta() {
       return call(base + '?fields=' + encodeURIComponent('sheets.properties(sheetId,title,gridProperties)'), { headers: auth });
     },
     // Growing the grid twice just leaves a few extra blank rows/columns, so these can retry freely.
     async appendColumns(sheetId, count) {
-      return call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'COLUMNS', length: count } }] }));
+      return writing(null, () => call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'COLUMNS', length: count } }] })));
     },
     async appendRows(sheetId, count) {
-      return call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] }));
+      return writing(null, () => call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] })));
     },
     // Never blindly re-sent: a repeated delete would remove whichever row moved up into the gap.
     async deleteRows(sheetId, startIndex, endIndex) {   // 0-based, half-open [startIndex, endIndex)
-      return call(base + ':batchUpdate', json({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }), true);
+      return writing(null, () => call(base + ':batchUpdate', json({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }), true));
     },
     // ---- cross-spreadsheet helpers (write to a DIFFERENT spreadsheet the SA has been shared on;
     //      used for the snapshots archive). Only the `spreadsheets` scope is needed. ----

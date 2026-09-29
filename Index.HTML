@@ -102,8 +102,12 @@
   .field { flex: 1; min-width: 160px; margin-bottom: 12px; }
   .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .field select, .field input, .field textarea {
-    width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 15px;
+    width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 16px;
   }
+  /* iPad: iOS zooms the page when a focused field's text is under 16px, so no field goes below it
+     (this also beats the small inline sizes some list inputs set). Tap targets are at least 44px. */
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size: 16px !important; }
+  .btn, header button, .tabbar button { min-height: 44px; min-width: 44px; }
   .stat { text-align: center; }
   .stat .num { font-size: 26px; font-weight: 700; }
   .stat .label { font-size: 12px; color: var(--muted); }
@@ -209,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.38.0</span>
+      <span class="version" id="appVersion">v1.39.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -779,7 +783,7 @@
       if (!f) return '';
       var val = steel[f.col] != null ? steel[f.col] : '';
       return '<div class="field"><label>' + esc(f.label) + '</label>' +
-        '<input id="' + prefix + f.id + '"' + (f.num ? ' type="number" min="0"' : '') + ' value="' + esc(val) + '"></div>';
+        '<input id="' + prefix + f.id + '"' + (f.num ? ' type="number" min="0" inputmode="' + (f.id === 'Weight' ? 'decimal' : 'numeric') + '"' : '') + ' value="' + esc(val) + '"></div>';
     }
     return '<div class="colgrid">' + TICKET_COLUMNS.map(function (col) {
       return '<div class="colstack">' + col.map(fieldHtml).join('') + '</div>';
@@ -1199,6 +1203,7 @@
 
     var searchInput = document.getElementById('globalSearch');
     searchInput.oninput = function () { renderSearchActive(); if (searchUsedOpen) renderSearchUsed(); };
+    searchInput.focus();   // ready for a scan without tapping the box first
     Array.prototype.forEach.call(document.querySelectorAll('#searchChips button'), function (btn) {
       btn.onclick = function () {
         searchFilter = btn.getAttribute('data-sfilter');
@@ -1250,7 +1255,8 @@
       return searchTermMatch(t, term);
     });
     if (!rows.length) {
-      container.innerHTML = '<div class="card empty">' + (term ? 'No live tickets match "' + esc(si.value) + '".' : 'No live tickets.') + '</div>';
+      var checking = recheckOnMiss(term, renderSearchActive);
+      container.innerHTML = '<div class="card empty">' + (term ? 'No live tickets match "' + esc(si.value) + '".' + (checking ? CHECKING_HTML : '') : 'No live tickets.') + '</div>';
       return;
     }
     var html = '<div class="card">';
@@ -1666,7 +1672,7 @@
     form.innerHTML =
       '<div class="row">' +
         '<div class="field"><label>Location</label><input id="ceLoc_' + esc(sk) + '" value="' + esc(t.row || '') + '"></div>' +
-        '<div class="field"><label>Sheets (qty)</label><input type="number" id="ceQty_' + esc(sk) + '" min="0" value="' + esc(t.qty || 0) + '"></div>' +
+        '<div class="field"><label>Sheets (qty)</label><input type="number" inputmode="numeric" id="ceQty_' + esc(sk) + '" min="0" value="' + esc(t.qty || 0) + '"></div>' +
       '</div>' +
       '<button class="btn success" id="ceSave_' + esc(sk) + '">Save</button> ' +
       '<button class="btn secondary" id="ceCancel_' + esc(sk) + '">Cancel</button>';
@@ -2202,6 +2208,7 @@
   }
 
   function setCaches(all) {
+    if (!missCheck.busy) missCheck.term = null;   // fresh list: a later miss is worth re-checking again
     allCache = all || [];
     queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
   }
@@ -2236,6 +2243,24 @@
     allCache.forEach(function (t) { if (t.skidId === skidId) t.status = status; });
     queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
   }
+
+  // The ticket list is loaded once and kept, so an iPad left open all shift doesn't see tickets
+  // added on another device (or straight into the sheet). When a search/scan finds nothing, reload
+  // the list once and run the lookup again. Waits for typing to pause (a scanner types the whole
+  // code at once), and asks only once per search term so a real "no match" costs one request.
+  var missCheck = { term: null, busy: false, timer: null };
+  function recheckOnMiss(term, rerun, now) {
+    term = String(term || '').trim().toLowerCase();
+    if (!term || missCheck.busy || term === missCheck.term) return false;
+    clearTimeout(missCheck.timer);
+    missCheck.timer = setTimeout(function () {
+      missCheck.busy = true; missCheck.term = term;
+      google.script.run.withSuccessHandler(function (all) { setCaches(all); missCheck.busy = false; rerun(); })
+        .withFailureHandler(function () { missCheck.busy = false; rerun(); }).getAllTickets();
+    }, now ? 0 : 700);
+    return true;
+  }
+  var CHECKING_HTML = ' <span class="sub">Checking for newly added tickets&hellip;</span>';
 
   function renderAll() {
     var view = document.getElementById('view');
@@ -2382,7 +2407,8 @@
     if (!rows.length) {
       if (term) {
         var t = searchTerm.trim();
-        container.innerHTML = '<div class="card empty">No tickets match "' + esc(searchTerm) + '".' +
+        var checking = recheckOnMiss(t, function () { var si = document.getElementById('mainSearch'); if (si) renderAllRows(si.value); });
+        container.innerHTML = '<div class="card empty">No tickets match "' + esc(searchTerm) + '".' + (checking ? CHECKING_HTML : '') +
           '<div style="margin-top:14px"><button class="btn" id="manualAddBtn">Start ticket "' + esc(t) + '" manually</button>' +
           '<div class="sub" style="margin-top:8px">Use this only if the skid is on the floor but missing from Steel Tickets.</div></div></div>';
         var manualBtn = document.getElementById('manualAddBtn');
@@ -2608,7 +2634,7 @@
       ticketFieldsHtml('ed', steel) +
       '<div class="row">' +
         '<div class="field"><label>Row number</label><input id="edRow" value="' + esc(steel['Row']) + '"></div>' +
-        '<div class="field"><label>Spoilage (sheets)</label><input type="number" id="edSpoil" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
+        '<div class="field"><label>Spoilage (sheets)</label><input type="number" inputmode="numeric" id="edSpoil" min="0" value="' + esc(Number(steel['Spoilage']) || 0) + '"></div>' +
       '</div>' +
       '<div class="row">' + operatorFieldHtml('editDetailsOperator', 'Operator name', whoRanIt(steel)) + '</div>' +
       '<button class="btn" id="saveTicketDetailsBtn">Save details</button>' +
@@ -2753,7 +2779,7 @@
       '<div id="itemCostPreview" class="sub" style="margin-bottom:10px"></div>' +
       (origQty > 0
         ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label>' +
-            '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+            '<input type="number" inputmode="numeric" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
             '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
             'This is a partial skid — return leftovers to Current Steel' +
@@ -3210,7 +3236,10 @@
     if (!c) return;
     term = (term || '').trim().toLowerCase();
     var rows = (term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache.slice(0, 15));
-    if (!rows.length) { c.innerHTML = '<div class="sub">No Current tickets match.</div>'; return; }
+    if (!rows.length) {
+      var checking = recheckOnMiss(term, function () { var i = document.getElementById('jobReviewSearch'); if (i) renderJobReviewPicker(i.value); });
+      c.innerHTML = '<div class="sub">No Current tickets match.' + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
     var html = '';
     rows.forEach(function (q) {
       html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
@@ -3233,7 +3262,7 @@
     card.innerHTML = '<h3 style="margin-top:0;font-size:15px">Add ticket to job</h3>' +
       '<div class="ticket-id">' + esc(entry ? entry.ticket : skidId) + '</div>' +
       (origQty > 0
-        ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label><input type="number" id="jrSheets" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+        ? '<div class="field"><label>Sheets run (of ' + esc(origQty) + ')</label><input type="number" inputmode="numeric" id="jrSheets" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:6px"><input type="checkbox" id="jrPartial" style="width:18px;height:18px"> Partial skid — return leftovers to Current</label>'
         : '') +
       operatorFieldHtml('jrPickOperator') +
@@ -3518,7 +3547,10 @@
     var term = (searchTerm || '').trim().toLowerCase();
     var rows = term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache.slice(0, 15);
 
-    if (!rows.length) { container.innerHTML = '<div class="sub">No matches.</div>'; return; }
+    if (!rows.length) {
+      var checking = recheckOnMiss(term, function () { var i = document.getElementById('jobTicketSearch'); if (i) renderJobQueuePicker(i.value); });
+      container.innerHTML = '<div class="sub">No matches.' + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
     var html = '';
     rows.forEach(function (q) {
       html += '<div class="queue-item" data-ticket="' + esc(q.ticket) + '" style="padding:6px 0">' +
@@ -3556,7 +3588,7 @@
       specsHtml +
       (origQty > 0
         ? '<div class="field"><label>Sheets run</label>' +
-            '<input type="number" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
+            '<input type="number" inputmode="numeric" id="sheetsRunInput" value="' + esc(origQty) + '" min="1" max="' + esc(origQty) + '"></div>' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;margin-bottom:6px">' +
             '<input type="checkbox" id="partialSkidToggle" style="width:18px;height:18px"> ' +
             'This is a partial skid — return leftovers to Current Steel' +
@@ -3777,6 +3809,7 @@
     input.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); usedQuickAdd(input.value); } };
     document.getElementById('usedAddBtn').onclick = function () { usedQuickAdd(input.value); };
     document.getElementById('usedMarkBtn').onclick = usedMarkAll;
+    input.focus();   // ready for a scan without tapping the box first
     ensureAllCache(function () { renderUsedList(); renderUsedPicker(input.value); });
     renderUsedList();
   }
@@ -3791,7 +3824,11 @@
       return String(t.ticket).toLowerCase() === lc || String(t.skidId).toLowerCase() === lc;
     });
     if (matches.length === 1) { usedAdd(matches[0].skidId); return; }
-    if (!matches.length) { toast('No available skid matches "' + term + '"'); return; }
+    if (!matches.length) {
+      // Not in this iPad's list — it may have been added elsewhere since. Reload once and retry.
+      if (recheckOnMiss(term, function () { usedQuickAdd(term); }, true)) { toast('Checking for "' + term + '"…'); return; }
+      toast('No available skid matches "' + term + '"'); return;
+    }
     renderUsedPicker(term); // multiple — let them pick from the list
   }
 
@@ -3818,7 +3855,10 @@
     var rows = usedEligible().filter(function (t) {
       return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1;
     }).slice(0, 10);
-    if (!rows.length) { c.innerHTML = '<div class="sub">No available skids match.</div>'; return; }
+    if (!rows.length) {
+      var checking = recheckOnMiss(term, function () { var i = document.getElementById('usedAddInput'); if (i) renderUsedPicker(i.value); });
+      c.innerHTML = '<div class="sub">No available skids match.' + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
     var html = '';
     rows.forEach(function (t) {
       var reuse = t.status === 'Used';
@@ -3997,7 +4037,10 @@
       if (!term) return true;
       return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1 || String(t.mill).toLowerCase().indexOf(term) !== -1;
     }).slice(0, 25);
-    if (!rows.length) { box.innerHTML = '<div class="sub">' + (allCache.length ? ('No coils' + (term ? ' match.' : ' available.')) : 'Loading&hellip;') + '</div>'; return; }
+    if (!rows.length) {
+      var checking = allCache.length && recheckOnMiss(term, function () { var i = document.getElementById('coilSearch'); if (i) renderCoilPicker(i.value); });
+      box.innerHTML = '<div class="sub">' + (allCache.length ? ('No coils' + (term ? ' match.' : ' available.')) : 'Loading&hellip;') + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
     var html = '';
     rows.forEach(function (t) {
       var cut = allCache.filter(function (x) { return x.splitOf === t.skidId; }).length;   // skids already cut off it
@@ -4036,8 +4079,8 @@
     var html = '';
     coilRows.forEach(function (r, i) {
       html += '<div class="row" data-crow="' + i + '" style="align-items:flex-end;margin-bottom:6px">' +
-        '<div class="field" style="flex:1;margin:0"><label>Weight</label><input type="number" class="crWeight" value="' + esc(r.weight) + '" placeholder="lbs"></div>' +
-        '<div class="field" style="flex:1;margin:0 8px"><label>Quantity</label><input type="number" class="crQty" value="' + esc(r.qty) + '" placeholder="sheets"></div>' +
+        '<div class="field" style="flex:1;margin:0"><label>Weight</label><input type="number" inputmode="decimal" class="crWeight" value="' + esc(r.weight) + '" placeholder="lbs"></div>' +
+        '<div class="field" style="flex:1;margin:0 8px"><label>Quantity</label><input type="number" inputmode="numeric" class="crQty" value="' + esc(r.qty) + '" placeholder="sheets"></div>' +
         '<button class="btn danger" data-crdel="' + i + '" style="padding:10px 12px">&times;</button></div>';
     });
     box.innerHTML = html;
@@ -4100,7 +4143,7 @@
         '<div class="sub" style="margin-bottom:12px">Start a work session on a ' + esc(machineType.toLowerCase()) + ', then load the skids you run. Submit for review when the day is done.</div>' +
         '<div class="row">' +
           operatorFieldHtml('runOperator') +
-          '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
+          '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" inputmode="numeric" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
         '</div>' +
         '<div class="field"><label>Notes (optional)</label><input id="runNotes" placeholder="e.g. day shift"></div>' +
         '<button class="btn success" id="startRunBtn">+ Start Work</button>' +
@@ -4255,7 +4298,7 @@
           '<div class="sub">' + esc(s.qty) + ' sheets on hand</div></div>' +
           '<div style="white-space:nowrap">' +
             (Number(s.qty) > 0
-              ? '<input type="number" class="partialRan" data-skid="' + esc(s.skidId) + '" data-max="' + esc(s.qty) + '" placeholder="ran" min="1" max="' + esc(s.qty) + '" style="width:78px;padding:6px;margin-right:6px"> ' +
+              ? '<input type="number" inputmode="numeric" class="partialRan" data-skid="' + esc(s.skidId) + '" data-max="' + esc(s.qty) + '" placeholder="ran" min="1" max="' + esc(s.qty) + '" style="width:78px;padding:6px;margin-right:6px"> ' +
                 '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-savepartial="' + esc(s.skidId) + '">Save</button>'
               : '<span class="sub">no count</span>') +
           '</div></div>';
@@ -4449,7 +4492,7 @@
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Run details</h3>' +
         '<div class="row">' +
           selectField('runEditType', 'Line / Press', ['Line', 'Press'], mp.type) +
-          '<div class="field"><label>Number</label><input type="number" id="runEditNum" min="1" value="' + esc(mp.num) + '"></div>' +
+          '<div class="field"><label>Number</label><input type="number" inputmode="numeric" id="runEditNum" min="1" value="' + esc(mp.num) + '"></div>' +
         '</div>' +
         '<button class="btn secondary" id="saveRunBtn">Save details</button></div>';
     }
@@ -4489,7 +4532,7 @@
         inProd.forEach(function (s) {
           html += '<div class="field"><label>' + esc(s.ticket) + ' — sheets that ran (of ' + esc(s.qty) + ')</label>' +
             (Number(s.qty) > 0
-              ? '<input type="number" data-used-skid="' + esc(s.skidId) + '" value="' + esc(s.qty) + '" min="0" max="' + esc(s.qty) + '">' +
+              ? '<input type="number" inputmode="numeric" data-used-skid="' + esc(s.skidId) + '" value="' + esc(s.qty) + '" min="0" max="' + esc(s.qty) + '">' +
                 '<div class="sub" id="finishHint_' + esc(s.skidId) + '" style="margin-top:4px"></div>'
               : '<div class="sub">Whole skid (no sheet count)</div>') +
             '</div>';
@@ -4671,7 +4714,7 @@
     var isScroll = slitKind === 'Scroll';
     var machineField = isScroll
       ? selectField('slitMachineSel', 'Scroll machine', ['1-SS', '2-SS', '3-SS'], null)
-      : '<div class="field"><label>Slitter #</label><input type="number" id="slitNum" min="1" placeholder="e.g. 2"></div>';
+      : '<div class="field"><label>Slitter #</label><input type="number" inputmode="numeric" id="slitNum" min="1" placeholder="e.g. 2"></div>';
     var feeds = isScroll ? 'Press' : 'Metal Lines';
     body.innerHTML =
       '<div class="card">' +

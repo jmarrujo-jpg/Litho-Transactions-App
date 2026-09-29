@@ -276,7 +276,7 @@ await concurrency(envBase, 'in-worker lock');
   const envDO = Object.assign({}, envBase, { WRITE_LOCK: ns });
   await concurrency(envDO, 'durable object lock');
   const h = await (await worker.fetch(new Request('https://w/', { method: 'GET' }), envDO, {})).json();
-  ok('health reports lock', h.writeLock === true && h.build === 'lock-48', h);
+  ok('health reports lock', h.writeLock === true && !!h.build, h);
 }
 
 // 13. deleteJob: a row that shifted is not deleted by position
@@ -315,6 +315,26 @@ await concurrency(envBase, 'in-worker lock');
   const s = await call('snapshotCurrentWip', ['op-15'], env);
   ok('snapshot ok despite ambiguous addSheet', s.ok && s.result.total === 6, s);
   ok('one dated tab', f.books.snap.order.length === 1, f.books.snap.order);
+}
+
+// 15. Per-request read cache: a job coating stays under the Workers Free 50-calls-per-request cap,
+//     and a read after this request's own write sees the new data (not the cached copy).
+{ const f = fresh();
+  const extra = [];
+  for (let i = 7; i <= 12; i++) extra.push(skid(String(200 + i), 'SKD-' + String(i).padStart(6, '0'), 'Current', 100, 500));
+  f.book(SID).tabs['Steel Tickets'].rows.push(...extra);
+  const j = await call('createJob', ['cache test', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], '', 'op-15-a']);
+  for (let i = 7; i <= 12; i++) await call('jobAddTicket', [j.result.jobId, 'SKD-' + String(i).padStart(6, '0'), 100, false, '', 'Ann', 'op-15-t' + i, '']);
+  const n0 = f.log.length;
+  const r = await call('addCoatingToJob', [j.result.jobId, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }, 'Ann', 'op-15-c']);
+  const used = f.log.length - n0;
+  ok('6-ticket job coating ok', r.ok, r);
+  ok('6-ticket job coating under 50 Google calls', used < 50, used);
+  const rateReads = f.log.slice(n0).filter((q) => q.kind === 'read' && q.decoded.includes('Litho Rate Table')).length;
+  ok('rate table read once per request', rateReads === 1, rateReads);
+  ok('each skid got both coats (reads saw own writes)', [7, 8, 9, 10, 11, 12].every((i) => Number(skidRow(f, 'SKD-' + String(i).padStart(6, '0'))['Litho']) === 6.5),
+    [7, 12].map((i) => skidRow(f, 'SKD-' + String(i).padStart(6, '0'))['Litho']));
+  ok('job detail returned lists 6 tickets', r.result && r.result.tickets && r.result.tickets.length === 6, r.result && r.result.tickets && r.result.tickets.length);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
