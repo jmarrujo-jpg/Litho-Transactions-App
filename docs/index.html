@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.39.0</span>
+      <span class="version" id="appVersion">v1.40.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -328,6 +328,10 @@
   var LITHO_API_SECRET = ''; // optional; must match the API_SECRET script property if you set one
   var API_TIMEOUT_MS = 60000; // a server call with no answer after this long is reported as failed
   var SLOW_FNS = { importStaging: 300000 }; // known-long jobs get more time (ms)
+  // Safety cap: the Cloudflare account's free daily request allowance is shared with other apps,
+  // so if a bug ever made this page call the server in a loop, stop it at REQ_CAP calls a minute
+  // instead of letting it burn the allowance for everyone. Normal use stays well under this.
+  var REQ_CAP = 60, REQ_WINDOW_MS = 60000, reqTimes = [];
   var PRINT_TICKETS_URL = 'http://desktop-1o5m8vo:5000/'; // local steel-ticket print service (opens in a new tab; only reachable on the local network)
   (function installHostingShim() {
     if (window.google && window.google.script && window.google.script.run) return; // real Apps Script bridge present
@@ -343,6 +347,16 @@
           return function () { // any other name is a server function call
             var args = Array.prototype.slice.call(arguments);
             if (!LITHO_API_URL) { if (failure) failure(new Error('LITHO_API_URL is not set')); return proxy; }
+            var nowMs = Date.now();
+            while (reqTimes.length && nowMs - reqTimes[0] > REQ_WINDOW_MS) reqTimes.shift();
+            if (reqTimes.length >= REQ_CAP) {
+              var capErr = new Error('This page is sending too many requests, so it paused for a minute. Wait a moment and try again.');
+              capErr.throttled = true;
+              if (window.console) console.warn('request cap hit; blocked ' + String(prop));
+              setTimeout(function () { if (failure) failure(capErr); }, 0);
+              return proxy;
+            }
+            reqTimes.push(nowMs);
             // Give up after API_TIMEOUT_MS so a stalled Wi-Fi connection can't leave a button on
             // "Saving…" forever. Errors are tagged so runMutation knows which ones are safe to retry:
             //   err.fromServer — the server answered with an error (a real problem; don't retry)
@@ -352,10 +366,14 @@
             var timedOut = false;
             var limitMs = SLOW_FNS[String(prop)] || API_TIMEOUT_MS;
             var timer = ctrl ? setTimeout(function () { timedOut = true; ctrl.abort(); }, limitMs) : null;
+            var bodyStr = JSON.stringify({ fn: String(prop), args: args, secret: LITHO_API_SECRET });
             fetch(LITHO_API_URL, {
               method: 'POST',
               // No custom headers => text/plain body => no CORS preflight (which Apps Script can't answer).
-              body: JSON.stringify({ fn: String(prop), args: args, secret: LITHO_API_SECRET }),
+              body: bodyStr,
+              // keepalive lets a save that's in flight finish if the iPad locks or the tab closes
+              // (browsers only allow it for small bodies).
+              keepalive: bodyStr.length < 60000,
               signal: ctrl ? ctrl.signal : undefined
             }).then(function (r) {
               return r.json().catch(function () {
@@ -738,9 +756,11 @@
       attempts++;
       var runner = google.script.run.withSuccessHandler(function (res) {
         if (key) delete stickyOps[key];
+        lastSaveAt = Date.now();
         onSuccess(res);
       }).withFailureHandler(function (err) {
         if (err && err.transport && !err.timeout && attempts < 3) { setTimeout(attempt, attempts * 1000); return; }
+        lastSaveAt = Date.now();   // part of it may have saved, so cached lists are no longer trusted
         var op = args.filter(isOpId)[0];
         if (key && op) stickyOps[key] = op;
         if (onFailure) onFailure(err);
@@ -845,18 +865,6 @@
     return sel.value.trim();
   }
 
-  function loadOperatorNames() {
-    google.script.run.withSuccessHandler(function (names) {
-      var list = document.getElementById('operatorNamesList');
-      list.innerHTML = '';
-      (names || []).forEach(function (n) {
-        var opt = document.createElement('option');
-        opt.value = n;
-        list.appendChild(opt);
-      });
-    }).getOperatorNames();
-  }
-
   // Monotonic guard against stale async responses clobbering the current view. Each render
   // that overwrites #view claims a token; a late server response only writes if its token is
   // still current. Without this, e.g. an in-flight getAllTickets from "Back to Tickets" can
@@ -864,8 +872,9 @@
   var viewToken = 0;
   function nextViewToken() { return ++viewToken; }
 
+  // (Operator names aren't fetched: the Worker has no name list and always answered [], so that
+  // call was a wasted request on every page load. Names typed this session fill the list instead.)
   function boot() {
-    loadOperatorNames();
     loadRateData();
     renderLanding();
   }
@@ -1150,7 +1159,7 @@
           function (res) {
             var applied = (res && res.updated != null) ? res.updated : changed.length;
             Object.keys(fields).forEach(function (h) { rowObj[h] = fields[h]; });   // keep local cache in sync
-            if (dbTable === 'steel') google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            if (dbTable === 'steel') fetchTickets();
             showInfo('Saved', applied + ' field' + (applied === 1 ? '' : 's') + ' updated.', function () { renderDatabaseHome(); });
           },
           function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('dbSave'); if (b2) { b2.disabled = false; b2.textContent = 'Save changes'; } });
@@ -1620,23 +1629,58 @@
     wireCountList();
   }
 
+  // Check-offs are saved in batches instead of one request per tap: taps are collected and sent
+  // together once there's a COUNT_FLUSH_MS pause (or COUNT_FLUSH_MAX are waiting), and right away
+  // before Finish, or when the iPad locks / the tab is hidden. A 300-pallet count used to be 300
+  // requests; now it's a few dozen. Setting Counted At is repeatable, so a retried batch is safe.
+  var COUNT_FLUSH_MS = 4000, COUNT_FLUSH_MAX = 25;
+  var countQueue = {}, countFlushTimer = null;   // skidId -> { want, was } (was = the saved state)
+  function countQueued() { return Object.keys(countQueue).length; }
+  function queueCountCheck(sk, checked) {
+    var q = countQueue[sk];
+    if (q && q.was === checked) delete countQueue[sk];   // tapped back to how it's saved: nothing to send
+    else countQueue[sk] = { want: checked, was: q ? q.was : !checked };   // the latest tap wins
+    clearTimeout(countFlushTimer);
+    if (!countQueued()) return;
+    if (countQueued() >= COUNT_FLUSH_MAX) flushCountQueue();
+    else countFlushTimer = setTimeout(function () { flushCountQueue(); }, COUNT_FLUSH_MS);
+  }
+  function flushCountQueue(done) {
+    clearTimeout(countFlushTimer); countFlushTimer = null;
+    var ids = Object.keys(countQueue);
+    var batches = [true, false].map(function (want) {
+      return { want: want, ids: ids.filter(function (sk) { return countQueue[sk].want === want; }) };
+    }).filter(function (b) { return b.ids.length; });
+    countQueue = {};
+    var left = batches.length;
+    if (!left) { if (done) done(); return; }
+    function one() { if (--left === 0 && done) done(); }
+    batches.forEach(function (b) {
+      runMutation('setSkidsCounted', [b.ids, b.want, lastOperator, newOpId()], one, function (err) {
+        toast('Count not saved (' + b.ids.length + ' pallet' + (b.ids.length === 1 ? '' : 's') + '): ' + err.message);
+        b.ids.forEach(function (sk) {   // undo them on screen so the list matches what's saved
+          var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
+          if (t) t.countedOn = b.want ? '' : todayStr();
+          var box = document.querySelector('.countChk[data-skid="' + sk.replace(/"/g, '') + '"]');
+          if (box) box.checked = !b.want;
+        });
+        if (document.getElementById('countProgress')) updateCountProgress();
+        one();
+      });
+    });
+  }
+  document.addEventListener('visibilitychange', function () { if (document.hidden && countQueued()) flushCountQueue(); });
+  window.addEventListener('pagehide', function () { if (countQueued()) flushCountQueue(); });
+
   function wireCountList() {
     Array.prototype.forEach.call(document.querySelectorAll('.countChk'), function (chk) {
       chk.onchange = function () {
         var sk = chk.getAttribute('data-skid');
         var checked = chk.checked;
-        var op = lastOperator;
         var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
         if (t) t.countedOn = checked ? todayStr() : ''; // optimistic
         updateCountProgress();
-        runMutation('setSkidCounted', [sk, checked, op, newOpId()],
-          function () {},
-          function (err) {
-            toast('Count not saved: ' + err.message);
-            chk.checked = !checked;
-            if (t) t.countedOn = !checked ? todayStr() : '';
-            updateCountProgress();
-          });
+        queueCountCheck(sk, checked);
       };
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-countedit]'), function (btn) {
@@ -1655,6 +1699,7 @@
           if (countIsFound(t) === want) return; // already in desired state
           t.countedOn = stamp;
           ids.push(t.skidId);
+          delete countQueue[t.skidId];   // this bulk save supersedes a waiting tap
         });
         renderCountList();
         if (ids.length) runMutation('setSkidsCounted', [ids, want, op, newOpId()], function () {},
@@ -1702,7 +1747,7 @@
   function finishCountStage() {
     var btn = document.getElementById('countFinishBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Checking latest count…'; }
-    refreshCount(finishCountStageNow);
+    flushCountQueue(function () { refreshCount(finishCountStageNow); });   // save waiting check-offs first
   }
   function finishCountStageNow() {
     if (!countSession) { countMode = 'walk'; toast('This count was already finished on another device'); return renderCount(); }
@@ -2163,6 +2208,23 @@
   var allCache = [];
   var queueCache = []; // Current + WIP subset, for the job pickers (WIP = re-coat / another pass)
 
+  // Fewer server calls: the ticket list (and the open-jobs bar) is reused for LIST_FRESH_MS
+  // instead of being reloaded every time you go back to a list. It's reloaded sooner if this
+  // device saves anything (lastSaveAt, set by runMutation), and a search that finds nothing
+  // re-checks the server (recheckOnMiss), so a ticket added elsewhere is still found.
+  var LIST_FRESH_MS = 3 * 60 * 1000;
+  var lastSaveAt = 0;
+  var ticketsLoadedAt = 0;   // when the request behind allCache was SENT
+  function savedSinceTicketsLoaded() { return lastSaveAt > ticketsLoadedAt; }
+  function ticketsFresh() { return allCache.length > 0 && !savedSinceTicketsLoaded() && Date.now() - ticketsLoadedAt < LIST_FRESH_MS; }
+  function fetchTickets(onOk, onFail) {
+    var sentAt = Date.now();
+    google.script.run.withSuccessHandler(function (all) {
+      setCaches(all); ticketsLoadedAt = sentAt;
+      if (onOk) onOk(all);
+    }).withFailureHandler(function (err) { if (onFail) onFail(err); }).getAllTickets();
+  }
+
   function searchBarHtml(id) {
     return '<div class="searchwrap">' +
       '<svg class="mag" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>' +
@@ -2231,10 +2293,10 @@
 
   // Loads the combined ticket list into allCache once, then runs cb. Used by the New Job /
   // production pickers which need every-status skids (queueCache is Current + WIP).
+  // Fetch only when there's no list yet, or this device saved something since the list loaded.
   function ensureAllCache(cb) {
-    if (allCache.length) { cb(); return; }
-    google.script.run.withSuccessHandler(function (all) { setCaches(all); cb(); })
-      .withFailureHandler(function () { cb(); }).getAllTickets();
+    if (allCache.length && !savedSinceTicketsLoaded()) { cb(); return; }
+    fetchTickets(cb, function () { cb(); });
   }
 
   // Reflect a status change locally so a just-acted-on skid leaves the pickers immediately,
@@ -2255,8 +2317,7 @@
     clearTimeout(missCheck.timer);
     missCheck.timer = setTimeout(function () {
       missCheck.busy = true; missCheck.term = term;
-      google.script.run.withSuccessHandler(function (all) { setCaches(all); missCheck.busy = false; rerun(); })
-        .withFailureHandler(function () { missCheck.busy = false; rerun(); }).getAllTickets();
+      fetchTickets(function () { missCheck.busy = false; rerun(); }, function () { missCheck.busy = false; rerun(); });
     }, now ? 0 : 700);
     return true;
   }
@@ -2286,22 +2347,26 @@
     searchInput.oninput = function () { renderAllRows(searchInput.value); };
     setActiveFilter(activeFilter);
     if (allCache.length) renderAllRows(searchInput.value || ''); // instant from cache
-    google.script.run.withSuccessHandler(function (all) {
-      setCaches(all);
+    if (ticketsFresh()) return;   // loaded a moment ago and nothing saved since: no need to ask again
+    fetchTickets(function () {
       if (tok !== viewToken) return; // superseded by a later navigation
       var si = document.getElementById('mainSearch');
       renderAllRows(si ? si.value : '');
-    }).withFailureHandler(function (err) {
+    }, function (err) {
       if (tok !== viewToken) return;
       var c = document.getElementById('allListContainer');
       if (c && !allCache.length) c.innerHTML = '<div class="card empty">Error loading tickets: ' + esc(err.message) + '</div>';
-    }).getAllTickets();
+    });
   }
 
   // Open (unapproved) jobs shown as tap-to-resume tiles above the ticket list, so an unfinished
   // job survives a crash / walk-away — tapping one drops back into the add-tickets screen.
+  var openJobsCache = null, openJobsAt = 0;
   function loadOpenJobsBar(tok) {
+    if (openJobsCache && lastSaveAt < openJobsAt && Date.now() - openJobsAt < LIST_FRESH_MS) { renderOpenJobsBar(openJobsCache); return; }
+    var sentAt = Date.now();
     google.script.run.withSuccessHandler(function (jobs) {
+      openJobsCache = jobs || []; openJobsAt = sentAt;
       if (tok !== viewToken) return;
       renderOpenJobsBar(jobs);
     }).withFailureHandler(function () {
@@ -3282,8 +3347,7 @@
       runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId()],
         function () {
           toast('Ticket added');
-          dropFromQueueCache(skidId); // no longer Current — keep it out of the picker
-          google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+          dropFromQueueCache(skidId); // no longer Current — keep it out of the picker; the list reloads on the next visit
           renderJob();
         },
         function (err) { showModal({ title: 'Could not add ticket', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
@@ -3507,10 +3571,7 @@
     // screen re-renders after each add, so the cursor returns here for the next ticket too.
     if (jobTicketSearch.focus) jobTicketSearch.focus();
     if (!queueCache.length) {
-      google.script.run.withSuccessHandler(function (all) {
-        setCaches(all);
-        renderJobQueuePicker('');
-      }).getAllTickets();
+      fetchTickets(function () { renderJobQueuePicker(''); });
     } else {
       renderJobQueuePicker('');
     }
@@ -3654,8 +3715,9 @@
             dropFromQueueCache(skidId); // no longer Current — remove from picker right away
             renderJobQueuePicker('');
             renderJobAddedList();
-            // Refresh caches in the background so qty/status reflect the change next pick
-            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            // No reload here (one per ticket added adds up): the picker already dropped this skid,
+            // the list reloads on the next visit since this device saved, and a search for a new
+            // split remainder that isn't in the list re-checks the server.
           },
           function (err) {
             toast('Error: ' + err.message);
@@ -4118,7 +4180,7 @@
             var made = (res && res.created != null) ? res.created : skids.length;
             var list = (res && res.tickets) ? res.tickets.map(function (t) { return t.ticket; }).join(', ') : '';
             if (finish) markCacheStatus(c.skidId, 'Used');
-            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();  // pull the new skids + coil state
+            fetchTickets();  // pull the new skids + coil state
             coilSel = null; coilRows = [{ weight: '', qty: '' }];
             showInfo('Coil cut', made + ' skid' + (made === 1 ? '' : 's') + ' created' + (list ? ' — tickets ' + list : '') + '. ' +
               (finish ? 'The coil is marked Used.' : 'The coil is still open — select it again to cut more.'),
@@ -4321,7 +4383,7 @@
         runMutation('runSkidPartial', [currentRun.runId, sk, ran, currentRun.operator, newOpId()],
           function () {
             toast('Partial recorded');
-            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            fetchTickets();
             renderRunPartials();
           },
           function (err) { showModal({ title: 'Could not save', message: err.message, confirmText: 'OK' }); btn.disabled = false; });
@@ -4370,7 +4432,7 @@
             var si = document.getElementById('runSkidSearch');
             renderRunSkidPicker(si ? si.value : ''); // keep the search context
             renderRunAddedList();
-            google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+            fetchTickets();
           },
           function (err) { toast('Error: ' + err.message); btn.disabled = false; });
       };
@@ -4887,7 +4949,7 @@
               } else if (updated && updated.duplicate) { toast('Already saved'); }
               slitPickMode = null; slitPendingStrips = 0;
               // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.
-              google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+              fetchTickets();
               renderSlitterSessionContent(document.getElementById('view'), updated);
             },
             function (err) { toast('Error: ' + err.message); });
@@ -4960,7 +5022,7 @@
             function (updated) {
               slitPickMode = null; slitPendingStrips = 0;
               // An emptied source flipped to Used — refresh the shared cache.
-              google.script.run.withSuccessHandler(function (all) { setCaches(all); }).getAllTickets();
+              fetchTickets();
               renderSlitterSessionContent(document.getElementById('view'), updated);
             },
             function (err) { toast('Error: ' + err.message); b.disabled = false; });

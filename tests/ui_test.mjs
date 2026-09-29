@@ -278,6 +278,75 @@ const base = {
   await page.close();
 }
 
+// ---- 10. Fewer requests: lists are reused for a few minutes; a save forces a reload
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-A', 'A1', 'Current')]),
+    getTicketCard: () => R(card({ 'Skid ID': 'SKD-A', 'Ticket': 'A1', 'Status': 'Current', 'Litho': '' })),
+    updateTicketDetails: () => R({ ok: true }),
+  }));
+  const n = (fn) => calls.filter((c) => c.fn === fn).length;
+  ok('no operator-names request on page load', n('getOperatorNames') === 0);
+  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  ok('Litho list loads once', n('getAllTickets') === 1 && n('getOpenJobs') === 1, [n('getAllTickets'), n('getOpenJobs')]);
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  ok('coming back within minutes reuses the list', n('getAllTickets') === 1 && n('getOpenJobs') === 1, [n('getAllTickets'), n('getOpenJobs')]);
+  ok('reused list still shows the tickets', (await page.textContent('#allListContainer')).includes('A1'));
+  await page.evaluate(() => new Promise((res) => runMutation('updateTicketDetails', ['SKD-A', {}, 'Ann', '', newOpId()], res, res)));
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  ok('after a save the list reloads', n('getAllTickets') === 2 && n('getOpenJobs') === 2, [n('getAllTickets'), n('getOpenJobs')]);
+  await page.evaluate(() => { ticketsLoadedAt -= 4 * 60 * 1000; openJobsAt -= 4 * 60 * 1000; });   // 4 minutes pass
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#tileLitho'); await page.waitForTimeout(250);
+  ok('after 3+ minutes the list reloads', n('getAllTickets') === 3 && n('getOpenJobs') === 3, [n('getAllTickets'), n('getOpenJobs')]);
+  await page.close();
+}
+
+// ---- 11. Count check-offs are saved in batches, and Finish saves waiting ones first
+{ const sess = { sessionId: 'CNT-1', stage: 'Current', startedOn: today, startedBy: 'Ann' };
+  const counted = {};
+  const skids = ['SKD-A', 'SKD-B', 'SKD-C', 'SKD-D', 'SKD-E', 'SKD-F'];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getActiveCount: () => R(sess),
+    getAllTickets: () => R(skids.map((id, i) => ticket(id, 'T' + i, 'Current', { countedOn: counted[id] ? today : '' }))),
+    setSkidsCounted: (a) => { a[0].forEach((id) => { counted[id] = a[1]; }); return R({ updated: a[0].length }); },
+  }));
+  await page.evaluate(() => { COUNT_FLUSH_MS = 600; openSteelCount(); });
+  await page.waitForSelector('.countChk');
+  for (const id of skids.slice(0, 4)) await page.click('.countChk[data-skid="' + id + '"]');
+  await page.click('.countChk[data-skid="SKD-D"]');                  // changed their mind on D
+  const saves = () => calls.filter((c) => c.fn === 'setSkidsCounted' || c.fn === 'setSkidCounted');
+  ok('taps are not sent one by one', saves().length === 0, saves().length);
+  await page.waitForTimeout(900);
+  ok('one request for the batch', saves().length === 1, saves().map((c) => c.args));
+  ok('batch holds A,B,C checked', JSON.stringify(saves()[0] && saves()[0].args[0].slice().sort()) === '["SKD-A","SKD-B","SKD-C"]' && saves()[0].args[1] === true, saves()[0] && saves()[0].args);
+  ok('D (tapped twice) not saved as counted', !counted['SKD-D']);
+  await page.evaluate(() => { COUNT_FLUSH_MS = 60000; });
+  await page.click('.countChk[data-skid="SKD-E"]');
+  await page.click('#countFinishBtn');
+  await page.waitForTimeout(500);
+  ok('Finish saves the waiting tap first', counted['SKD-E'] === true);
+  const txt = await page.textContent('#view');
+  ok('review does not list E as not found', !txt.includes('T4'), txt.slice(0, 300));
+  ok('review lists F as not found', txt.includes('T5'));
+  await page.close();
+}
+
+// ---- 12. Safety cap: a runaway loop is stopped at 60 requests a minute
+{ const { page, calls } = await boot(base);
+  const before = calls.length;
+  const res = await page.evaluate(() => new Promise((done) => {
+    let back = 0, blocked = 0;
+    for (let i = 0; i < 70; i++) google.script.run.withSuccessHandler(() => { if (++back === 70) done({ blocked }); })
+      .withFailureHandler((e) => { if (e.throttled) blocked++; if (++back === 70) done({ blocked }); }).getOpenJobs();
+  }));
+  const sent = calls.length - before;
+  ok('requests past the cap are not sent', sent <= 60, sent);
+  ok('blocked ones fail with a clear message', res.blocked >= 10, res);
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
