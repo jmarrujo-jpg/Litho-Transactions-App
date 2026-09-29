@@ -459,6 +459,46 @@ const base = {
   await page.close();
 }
 
+// ---- 16. Worker opening a job from Open Jobs: sees its coatings and only adds tickets
+{ const job = { jobId: 'JOB-000004', description: 'Blue run', createdBy: 'Alex', tickets: [],
+    coatings: [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getOpenJobs: () => R([{ jobId: job.jobId, description: job.description, ticketCount: 0, coatings: 'SIZE, VARNISH' }]),
+    getJobDetail: () => R(job),
+    getAllTickets: () => R([ticket('SKD-7', '777', 'Current')]),
+    jobAddTicket: (a) => R({ skidId: a[1], ticket: '777', litho: 6.5, jobId: a[0], sheetsRun: 100 }),
+  }));
+  await enterLitho(page, 'Worker');
+  await page.click('#openJobsBtn'); await page.waitForTimeout(250);
+  await page.click('[data-resume="JOB-000004"]'); await page.waitForTimeout(300);
+  const items = await page.$$eval('#jobCoatingsList li', (ls) => ls.map((l) => l.textContent));
+  ok('worker: job coatings listed', items.length === 2 && items[0].includes('SIZE') && items[1].includes('VARNISH') && items[0].includes('10-OUT'), items);
+  ok('worker: no "Add a coating" section', !(await page.$('#jobAddCoatBtn')) && !(await page.textContent('#view')).includes('Add a coating'));
+  ok('worker: can add a ticket', !!(await page.$('#jobTicketSearch')));
+  ok('worker: name pre-filled', (await page.$eval('#jobTicketOperator', (el) => el.value)) === 'Worker');
+  ok('worker: no mention of Review Jobs', !(await page.textContent('#view')).includes('Review Jobs'));
+  ok('worker: no ticket list until they scan/type', !(await page.$('#jobQueuePicker [data-pick]')) && (await page.textContent('#jobQueuePicker')).includes('Scan or type'));
+  await page.fill('#jobTicketSearch', '777'); await page.waitForTimeout(200);
+  await page.click('#jobQueuePicker [data-pick]');
+  await page.waitForSelector('#addTicketToJobBtn');
+  await page.click('#addTicketToJobBtn'); await page.waitForTimeout(300);
+  const ja = calls.filter((c) => c.fn === 'jobAddTicket');
+  ok('worker: ticket added to the job', ja.length === 1 && ja[0].args[0] === 'JOB-000004' && ja[0].args[5] === 'Worker', ja.map((c) => c.args));
+  await page.click('#finishJobBtn'); await page.waitForTimeout(200);
+  ok('worker: Done returns to the worker home', !!(await page.$('#openJobsBtn')));
+
+  // Manager opening the same job still gets the recipe editor
+  await page.click('#lithoSwitchBtn'); await page.waitForTimeout(100);
+  await page.selectOption('#lithoUserSelect', { label: 'Alex' });
+  await page.click('#lithoLoginBtn'); await page.waitForTimeout(300);
+  await page.evaluate(() => resumeJob('JOB-000004')); await page.waitForTimeout(300);
+  ok('manager: coatings listed too', (await page.$$('#jobCoatingsList li')).length === 2);
+  ok('manager: can still add a coating', !!(await page.$('#jobAddCoatBtn')));
+  ok('manager: picker still lists tickets', !!(await page.$('#jobQueuePicker [data-pick]')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

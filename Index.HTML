@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.42.0</span>
+      <span class="version" id="appVersion">v1.43.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3625,13 +3625,19 @@
     var view = document.getElementById('view');
     var html = '';
 
-    var recipeText = currentJob.coatings.map(function (c) {
-      return esc(c.item) + (c.sub ? ' (' + esc(c.sub) + ')' : '');
-    }).join(', ');
+    // Workers only add tickets here: they see the job's coatings but can't change the recipe
+    // (adding a coating re-coats every ticket already on the job — a manager's call).
+    var canEditRecipe = !lithoUser || lithoUser.manager;
+    var recipeItems = currentJob.coatings.map(function (c) {
+      return '<li><strong>' + esc(c.item) + '</strong>' +
+        '<span class="sub"> &middot; ' + esc(c.group || '') + (c.sub ? ' ' + esc(c.sub) : '') + '</span></li>';
+    }).join('');
     html += '<div class="card">' +
-      '<div class="sub">Job <strong>' + esc(currentJob.jobId) + '</strong>' +
-      (currentJob.description ? ' &middot; ' + esc(currentJob.description) : '') + '</div>' +
-      '<div class="sub" style="margin-top:4px">Coatings: ' + recipeText + '</div>' +
+      '<div class="ticket-id">' + esc(currentJob.description || '(untitled job)') + '</div>' +
+      '<div class="sub" style="margin-bottom:10px">Job ' + esc(currentJob.jobId) + '</div>' +
+      '<h4 style="margin:0 0 4px;font-size:13px;color:var(--muted)">Coatings on this job (' + currentJob.coatings.length + ')</h4>' +
+      '<ul id="jobCoatingsList" style="margin:0;padding-left:20px;line-height:1.7">' + (recipeItems || '<li class="sub">None</li>') + '</ul>' +
+      '<div class="sub" style="margin-top:8px">Every ticket you add gets all of these coatings.</div>' +
       '</div>';
 
     // What's already on the job comes first, then the recipe editor, then the ticket picker —
@@ -3643,7 +3649,7 @@
 
     // Add another coating to the job's recipe (applies to tickets already on it). Same control as
     // the Review Jobs view, so a resumed job can grow its recipe without going through Review.
-    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a coating to this job</h3>' +
+    if (canEditRecipe) html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a coating to this job</h3>' +
       '<div class="sub" style="margin-bottom:8px">Applies to every ticket already on the job.</div>' +
       '<div class="row">' +
         selectField('jobAddCoatGroup', 'Size / Group', rateGroups(), null) +
@@ -3666,8 +3672,11 @@
       '</div>';
 
     html += '<div class="card">' +
-      '<div class="sub" style="margin-bottom:10px">Tickets you add are logged as <strong>Pending</strong>. Review and approve the job in <strong>Review Jobs</strong> to send them all to WIP.</div>' +
-      '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — Back to Tickets</button>' +
+      (canEditRecipe
+        ? '<div class="sub" style="margin-bottom:10px">Tickets you add are logged as <strong>Pending</strong>. Review and approve the job in <strong>Review Jobs</strong> to send them all to WIP.</div>' +
+          '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done — Back to Tickets</button>'
+        : '<div class="sub" style="margin-bottom:10px">Tickets you add are logged as <strong>Pending</strong> until a manager approves the job.</div>' +
+          '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done</button>') +
       '</div>';
 
     view.innerHTML = html;
@@ -3689,8 +3698,8 @@
     var acGroup = document.getElementById('jobAddCoatGroup'), acSub = document.getElementById('jobAddCoatSub'),
         acItem = document.getElementById('jobAddCoatItem'), acChem = document.getElementById('jobAddCoatChem'),
         acCost = document.getElementById('jobAddCoatPreview');
-    wireCoatingCascade(acGroup, acSub, acItem, acChem, acCost, function (c) { return 'Adds ' + money(c) + ' per ticket.'; });
-    document.getElementById('jobAddCoatBtn').onclick = function () {
+    if (acGroup) wireCoatingCascade(acGroup, acSub, acItem, acChem, acCost, function (c) { return 'Adds ' + money(c) + ' per ticket.'; });
+    if (acGroup) document.getElementById('jobAddCoatBtn').onclick = function () {
       var operator = document.getElementById('jobAddCoatOperator').value.trim();
       if (!acGroup.value || !acItem.value) { toast('Pick a group and coating item'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
@@ -3713,6 +3722,8 @@
     var container = document.getElementById('jobQueuePicker');
     if (!container) return;
     var term = (searchTerm || '').trim().toLowerCase();
+    // Workers don't browse the ticket list — they scan or type the ticket they have in hand.
+    if (!term && lithoUser && !lithoUser.manager) { container.innerHTML = '<div class="sub">Scan or type a ticket number.</div>'; return; }
     var rows = term ? queueCache.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1; }) : queueCache.slice(0, 15);
 
     if (!rows.length) {
