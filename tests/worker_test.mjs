@@ -468,5 +468,22 @@ await concurrency(envBase, 'in-worker lock');
   ok('all-departments report still ok', all.ok && all.result.sections.length >= 5, all);
 }
 
+// 19. Taking a coat off a WIP ticket (Move To WIP drop-down), then another pass
+{ const f = fresh();
+  const recipe = [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }];
+  await call('moveToWip', ['Acme', '', recipe, ['SKD-000001'], 'op-19-a']);
+  const c0 = await call('getTicketCard', ['SKD-000001']);
+  const varnish = c0.result.coatings.filter((c) => c.item === 'VARNISH')[0];
+  const r = await call('removeTicketCoating', ['SKD-000001', varnish.passNumber, 'Foreman', 'op-19-r']);
+  ok('coat removed from a WIP ticket', r.ok && r.result.coatings.map((c) => c.item).join() === 'SIZE' && Number(r.result.litho) === 2.5, r.result);
+  ok('ticket stays in WIP', skidRow(f, 'SKD-000001')['Status'] === 'WIP');
+  const again = await call('removeTicketCoating', ['SKD-000001', varnish.passNumber, 'Foreman', 'op-19-r']);
+  ok('retrying the removal does not subtract twice', again.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 2.5, skidRow(f, 'SKD-000001')['Litho']);
+  const m = await call('moveToWip', ['Acme 2', '', [{ group: '603X408', sub: '10-OUT', item: 'WHITE' }], ['SKD-000001'], 'op-19-b']);
+  ok('another pass after the removal', m.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 8.5, skidRow(f, 'SKD-000001')['Litho']);
+  const c1 = await call('getTicketCard', ['SKD-000001']);
+  ok('card shows SIZE + WHITE, no VARNISH', c1.result.coatings.map((c) => c.item).join() === 'SIZE,WHITE', c1.result.coatings);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

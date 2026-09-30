@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.45.0</span>
+      <span class="version" id="appVersion">v1.46.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1444,6 +1444,42 @@
     renderMwList();
   }
 
+  // WIP tickets on the list can open a drop-down of the coatings already on them (loaded on
+  // demand, one request per ticket) and take a coating off. A removal saves straight away — it
+  // doesn't wait for Move to WIP — and voids that coat's cost the same way the ticket card does.
+  var mwOpen = {};    // skidId -> drop-down open
+  var mwCards = {};   // skidId -> { loading, error, card }
+
+  function mwLoadCard(skidId) {
+    mwCards[skidId] = { loading: true };
+    renderMwList();
+    google.script.run.withSuccessHandler(function (card) {
+      mwCards[skidId] = { card: card };
+      renderMwList();
+    }).withFailureHandler(function (err) {
+      mwCards[skidId] = { error: err.message };
+      renderMwList();
+    }).getTicketCard(skidId);
+  }
+
+  function mwCoatingsHtml(b) {
+    var c = mwCards[b.skidId] || {};
+    var inner;
+    if (c.loading) inner = '<div class="loading">Loading coatings&hellip;</div>';
+    else if (c.error) inner = '<div class="sub">Could not load: ' + esc(c.error) + ' <button class="btn secondary" style="padding:6px 10px;font-size:13px" data-mwretry="' + esc(b.skidId) + '">Try again</button></div>';
+    else if (c.card) {
+      var coats = c.card.coatings || [];
+      inner = coats.length ? coats.map(function (k) {
+        return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+          '<strong>' + esc(k.item) + '</strong> <span class="sub">' + esc([k.group, k.sub].filter(Boolean).join(' ')) +
+          (k.chemCode ? ' &middot; chem ' + esc(k.chemCode) : '') + ' &middot; ' + money(k.cost) + '</span></div>' +
+          '<button class="btn warn" style="padding:6px 10px;font-size:13px" data-mwvoid="' + esc(b.skidId) + '" data-pass="' + esc(k.passNumber) + '">Remove coating</button></div>';
+      }).join('') + '<div class="sub" style="margin-top:4px">Litho on this ticket now: ' + money(c.card.litho) + '</div>'
+        : '<div class="sub">No coatings on this ticket.</div>';
+    } else inner = '';
+    return '<div class="mw-coats" style="margin:0 0 8px;padding:6px 12px;background:var(--bg);border-radius:8px">' + inner + '</div>';
+  }
+
   function renderMwList() {
     var box = document.getElementById('mwListBox'), cnt = document.getElementById('mwCount'), btn = document.getElementById('mwMoveBtn');
     if (!box) return;
@@ -1451,11 +1487,16 @@
     if (btn) { btn.disabled = !mwBatch.length; btn.textContent = mwBatch.length ? 'Move ' + mwBatch.length + ' to WIP' : 'Move to WIP'; }
     if (!mwBatch.length) { box.innerHTML = '<div class="sub">Nothing added yet.</div>'; return; }
     box.innerHTML = mwBatch.map(function (b) {
+      var wip = b.status === 'WIP', open = wip && mwOpen[b.skidId];
       return '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
         '<span class="ticket-id" style="font-size:15px">' + esc(b.ticket || '(no ticket)') + '</span> ' +
         '<span class="sub">' + esc(b.skidId) + ' &middot; ' + esc(b.qty || 0) + ' sheets' +
-        (b.status === 'WIP' ? ' &middot; <span style="color:#b26a00;font-weight:600">another pass</span>' : '') + '</span></div>' +
-        '<button class="btn danger" style="padding:8px 12px" data-mwrem="' + esc(b.skidId) + '">Remove</button></div>';
+        (wip ? ' &middot; <span style="color:#b26a00;font-weight:600">another pass</span>' : '') + '</span>' +
+        (wip ? '<div><button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:6px" data-mwcoats="' + esc(b.skidId) + '">' +
+          (open ? '▾' : '▸') + ' Coatings on it now</button></div>' : '') +
+        '</div>' +
+        '<button class="btn danger" style="padding:8px 12px" data-mwrem="' + esc(b.skidId) + '">Remove</button></div>' +
+        (open ? mwCoatingsHtml(b) : '');
     }).join('');
     Array.prototype.forEach.call(box.querySelectorAll('[data-mwrem]'), function (b) {
       b.onclick = function () {
@@ -1465,6 +1506,37 @@
         var i = document.getElementById('mwAddInput'); if (i) renderMwPicker(i.value);
       };
     });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mwcoats]'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-mwcoats');
+        mwOpen[id] = !mwOpen[id];
+        if (mwOpen[id] && !(mwCards[id] && (mwCards[id].card || mwCards[id].loading))) mwLoadCard(id); else renderMwList();
+      };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mwretry]'), function (b) {
+      b.onclick = function () { mwLoadCard(b.getAttribute('data-mwretry')); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mwvoid]'), function (b) {
+      b.onclick = function () { mwRemoveCoating(b.getAttribute('data-mwvoid'), b.getAttribute('data-pass')); };
+    });
+  }
+
+  function mwRemoveCoating(skidId, pass) {
+    var c = mwCards[skidId] && mwCards[skidId].card;
+    var coat = c && (c.coatings || []).filter(function (k) { return String(k.passNumber) === String(pass); })[0];
+    if (!coat) return;
+    showConfirm('Remove ' + coat.item + ' from ' + (c.ticket || skidId) + '?',
+      'This takes the coating off the ticket now and subtracts its ' + money(coat.cost) + ' from the ticket\'s litho cost. It saves straight away, even if you don\'t move this list.',
+      function () {
+        runMutation('removeTicketCoating', [skidId, pass, 'Foreman', newOpId()],
+          function (card) {
+            if (card && !card.duplicate) mwCards[skidId] = { card: card };
+            else mwCards[skidId] = null;
+            toast(coat.item + ' removed from ' + (c.ticket || skidId));
+            if (!mwCards[skidId]) mwLoadCard(skidId); else renderMwList();
+          },
+          function (err) { showModal({ title: 'Could not remove the coating', message: err.message, confirmText: 'OK' }); });
+      }, 'Remove coating', 'danger');
   }
 
   function mwMoveAll(groupSel, subSel, itemSel) {
@@ -1492,7 +1564,7 @@
             var moved = (res && res.moved) || [];
             var skipped = (res && res.skipped) || [];
             moved.forEach(function (m) { markCacheStatus(m.skidId, 'WIP'); });
-            mwBatch = [];
+            mwBatch = []; mwOpen = {}; mwCards = {};
             mwCoatings = []; mwJobName = '';
             showInfo('Moved to WIP',
               moved.length + ' ticket' + (moved.length === 1 ? '' : 's') + ' moved to WIP' + (res && res.jobId ? ' (job ' + res.jobId + ')' : '') + '.' +

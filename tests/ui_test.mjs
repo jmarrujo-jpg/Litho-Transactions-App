@@ -611,6 +611,37 @@ const base = {
   await page.close();
 }
 
+// ---- 19. Move To WIP: a WIP ticket opens to the coatings already on it, and one can be removed
+{ const coats = [{ passNumber: 1, group: '603X408', sub: '10-OUT', item: 'SIZE', chemCode: 'C1', cost: 2.5 },
+    { passNumber: 2, group: '603X408', sub: '10-OUT', item: 'VARNISH', chemCode: 'C2', cost: 4 }];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-1', '501', 'Current'), ticket('SKD-3', '503', 'WIP')]),
+    getTicketCard: (a) => R({ skidId: a[0], ticket: '503', status: 'WIP', litho: 6.5, coatings: coats.slice() }),
+    removeTicketCoating: (a) => R({ skidId: a[0], ticket: '503', status: 'WIP', litho: 2.5, coatings: coats.filter((c) => String(c.passNumber) !== String(a[1])) }),
+  }));
+  await page.click('#tileLitho'); await page.click('#tileMoveWip'); await page.waitForTimeout(300);
+  for (const t of ['501', '503']) { await page.fill('#mwAddInput', t); await page.press('#mwAddInput', 'Enter'); await page.waitForTimeout(100); }
+  ok('only the WIP ticket gets a coatings drop-down', (await page.$$('[data-mwcoats]')).length === 1);
+  ok('coatings not loaded until opened', calls.filter((c) => c.fn === 'getTicketCard').length === 0);
+  await page.click('[data-mwcoats="SKD-3"]'); await page.waitForTimeout(200);
+  let txt = await page.textContent('#mwListBox');
+  ok('drop-down lists what is on the ticket now', txt.includes('SIZE') && txt.includes('VARNISH') && txt.includes('chem C2') && txt.includes('$6.50'), txt);
+  await page.click('[data-mwcoats="SKD-3"]'); await page.waitForTimeout(100);
+  ok('drop-down closes', !(await page.textContent('#mwListBox')).includes('VARNISH'));
+  await page.click('[data-mwcoats="SKD-3"]'); await page.waitForTimeout(100);
+  ok('reopening does not reload', calls.filter((c) => c.fn === 'getTicketCard').length === 1);
+  await page.click('[data-mwvoid="SKD-3"][data-pass="2"]'); await page.waitForSelector('#modalOk');
+  ok('asks before removing, says it saves now', ((await page.textContent('#modalRoot')) || '').includes('Remove VARNISH from 503') && (await page.textContent('#modalRoot')).includes('saves straight away'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const rm = calls.filter((c) => c.fn === 'removeTicketCoating');
+  ok('removal sent for that coat', rm.length === 1 && rm[0].args[0] === 'SKD-3' && String(rm[0].args[1]) === '2' && rm[0].args[2] === 'Foreman', rm.map((c) => c.args));
+  txt = await page.textContent('#mwListBox');
+  ok('list updates: coat gone, new cost', !txt.includes('VARNISH') && txt.includes('SIZE') && txt.includes('$2.50'), txt);
+  ok('ticket stays on the move list', (await page.$$('#mwListBox [data-mwrem]')).length === 2);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
