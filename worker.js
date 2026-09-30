@@ -71,7 +71,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getMasterSheet', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'master-55', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'history-56', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -257,6 +257,8 @@ async function handle(fn, args, env) {
       return createJob(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket, testedBW)
       return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+    case 'getSkidHistory': // (skidId) one ticket's full history: timeline, where it came from, what was made from it
+      return getSkidHistory(sheets, args[0]);
     case 'getMasterSheet': // () every Current / WIP / Used / Pending ticket with its live coatings
       return getMasterSheet(sheets);
     case 'masterEdit': // (changes[{skidId, status?, removePasses?[]}], operator, opId) Database Master sheet: save all at once
@@ -1590,6 +1592,68 @@ async function appendTxRows(sheets, rows, ops) {
   const firstOp = rows[0]['Op ID'];
   await sheets.appendMany(TRANSACTIONS, values, () => columnHas(sheets, TRANSACTIONS, headers, 'Op ID', firstOp));
   rows.forEach((r) => ops.add(r['Op ID']));
+}
+
+// ---- One ticket's history (Database + Reports "History" panel) ----
+// Every Transactions row for the skid (coatings, removals, jobs, runs, used, splits, edits), plus
+// what only lives on other tabs: its count and missing stamps (Steel Tickets), the slitter / scroll
+// loads cut from it (Slitter Pallets), the skid it was split / cut from, and the pieces made from
+// it. Newest first. Read-only.
+async function getSkidHistory(sheets, skidId) {
+  skidId = String(skidId || '').trim();
+  const master = await readTab(sheets, MASTER);
+  const o = master.rows.filter((r) => String(r['Skid ID']).trim() === skidId)[0];
+  if (!o) throw new Error('Skid not found: ' + skidId);
+  const ctx = await traceContext(sheets, master.rows);
+  const hist = skidHist(ctx, o);
+  const live = {};
+  activeCoatings(hist).forEach((c) => { live[String(c.passNumber)] = true; });
+  const events = hist.map((h) => {
+    const coat = String(h.group || '').trim() !== '' && num(h.passTotal) > 0;
+    const item = String(h.item || '');
+    return {
+      when: String(h.timestamp || ''), date: toYMD(h.timestamp), kind: coat ? 'coat' : (/VOID/.test(item) ? 'void' : 'event'),
+      what: coat ? 'Coated: ' + item : item, item, chemCode: h.chemCode || '', group: h.group || '', sub: h.sub || '',
+      cost: coat ? num(h.passTotal) : (num(h.passTotal) || 0), running: h.runningTotal !== undefined ? h.runningTotal : '',
+      by: h.operator || '', notes: h.notes || '', jobId: h.jobId || '', jobName: h.jobName || '', pass: h.passNumber,
+      voided: coat && !live[String(h.passNumber)],
+    };
+  });
+  const stamp = (col, byCol, what) => {
+    if (!o[col]) return;
+    events.push({ when: String(o[col]), date: toYMD(o[col]), kind: 'event', what, by: o[byCol] || '', notes: '', cost: 0 });
+  };
+  stamp('Counted At', 'Counted By', 'COUNTED (steel count)');
+  stamp('Missing At', 'Missing By', 'MARKED MISSING (steel count)');
+  // Used before the app logged it (imported rows): show the used date from the row itself.
+  if (o['Status'] === STATUS.USED && usedAt(o) && !events.some((e) => /^USED IN PRODUCTION|FULLY CUT|COIL CUT/.test(e.what))) {
+    events.push({ when: String(usedAt(o)), date: toYMD(usedAt(o)), kind: 'event', what: 'USED', by: o['Used By'] || '', notes: o['Used Via'] ? 'via ' + o['Used Via'] : '', cost: 0 });
+  }
+  // Slitter / scroll loads cut from this skid.
+  const loads = [];
+  try {
+    const sess = {};
+    (await readObjects(sheets, SLITTER_SESSIONS, true)).rows.forEach((x) => { if (x['Session ID']) sess[String(x['Session ID']).trim()] = x; });
+    (await readObjects(sheets, SLITTER_PALLETS, true)).rows.forEach((p) => {
+      if (!p['Pallet ID']) return;
+      const part = parseComposition(p['Composition']).filter((c) => String(c.skidId || '').trim() === skidId)[0];
+      if (!part) return;
+      const se = sess[String(p['Session ID'] || '').trim()] || {};
+      const used = part.strips != null ? part.strips : (part.qty || 0);
+      loads.push({ loadNo: p['Load #'] || '', skidId: p['Skid ID'] || '', date: toYMD(p['Created On']), used, output: num(p['Output Count']), machine: se['Slitter'] || '', kind: se['Kind'] || 'Slitter' });
+      events.push({ when: String(toYMD(p['Created On'])), date: toYMD(p['Created On']), kind: 'event', what: 'CUT INTO LOAD ' + (p['Load #'] || ''),
+        by: se['Operator'] || '', notes: used + ' used on ' + (se['Slitter'] || 'the slitter') + '; pallet ' + (p['Skid ID'] || ''), cost: 0 });
+    });
+  } catch (e) { /* no slitter tabs */ }
+  events.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : (num(b.pass) - num(a.pass))));
+  const brief = (r) => ({ skidId: r['Skid ID'] || '', ticket: r['Ticket'] || '', status: r['Status'] || '', qty: r['QTY/LOAD'] != null ? r['QTY/LOAD'] : '', weight: r['Weight'] != null ? r['Weight'] : '' });
+  const parentRow = o['Split Of'] ? ctx.skids[String(o['Split Of']).trim()] : null;
+  const children = master.rows.filter((r) => String(r['Split Of'] || '').trim() === skidId).map(brief);
+  return {
+    skid: Object.assign(traceOf(o, ctx), { skidId, ticket: o['Ticket'] || '', litho: num(o['Litho']), row: o['Row'] != null ? o['Row'] : '' }),
+    events, parent: parentRow ? brief(parentRow) : (o['Split Of'] ? { skidId: o['Split Of'], ticket: '' } : null), children, loads,
+    family: familyOf(master.rows, o['Ticket']),
+  };
 }
 
 // ---- Database Master sheet ----

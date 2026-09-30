@@ -560,5 +560,36 @@ await concurrency(envBase, 'in-worker lock');
   ok('no real change: refused, nothing written', !none.ok && /nothing to change/.test(none.error), none);
 }
 
+// 22. Ticket history: every logged event plus counts, loads cut from it, parent and pieces
+{ const f = fresh();
+  await call('moveToWip', ['Acme', '', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }], ['SKD-000001'], 'op-22-a']);
+  const ms = await call('getMasterSheet', []);
+  const vp = ms.result.rows.filter((x) => x.skidId === 'SKD-000001')[0].coatings[1].passNumber;
+  await call('masterEdit', [[{ skidId: 'SKD-000001', removePasses: [vp], from: 'WIP' }], '', 'op-22-e']);
+  await call('setSkidsCounted', [['SKD-000001'], true, 'Cora', 'op-22-c']);
+  const sess = await call('createSlitterSession', ['Slitter', 'S1', 'Ann', '', 'op-22-s']);
+  await call('slitterLoadSkid', [sess.result.sessionId, 'SKD-000001', 'Ann', 'op-22-l']);
+  await call('slitterFinishPallet', [sess.result.sessionId, 40, '', 'Ann', 'op-22-f']);
+  const j = await call('createJob', ['Part job', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], '', 'op-22-j']);
+  await call('jobAddTicket', [j.result.jobId, 'SKD-000004', 100, true, '', 'Ann', 'op-22-p', '', '']);
+  const h = await call('getSkidHistory', ['SKD-000001']);
+  ok('history loads', h.ok, h);
+  const ev = h.ok ? h.result.events : [];
+  const find = (w) => ev.filter((e) => e.what === w)[0];
+  ok('live coat listed with chem code', find('Coated: SIZE') && find('Coated: SIZE').chemCode === 'CH1' && !find('Coated: SIZE').voided, find('Coated: SIZE'));
+  ok('removed coat shown as voided, plus the removal', find('Coated: VARNISH') && find('Coated: VARNISH').voided && ev.some((e) => e.what === 'COATING REMOVED (VOID)' && e.kind === 'void'), ev.map((e) => e.what));
+  ok('count shown (from the row)', ev.some((e) => e.what === 'COUNTED (steel count)' && e.by === 'Cora'), ev.map((e) => e.what));
+  ok('slitter load cut from it', ev.some((e) => /^CUT INTO LOAD/.test(e.what)) && h.result.loads.length === 1 && h.result.loads[0].used === 40, h.result.loads);
+  ok('newest first', ev.length > 3 && ev[0].when >= ev[ev.length - 1].when, ev.map((e) => e.when));
+  ok('summary carries the trace', h.result.skid.customer === 'Acme' && h.result.skid.ticket === '100' && h.result.skid.coatings.length === 1, h.result.skid);
+  const rem = f.rows(SID, 'Steel Tickets').filter((o) => o['Split Of'] === 'SKD-000004')[0];
+  const hp = await call('getSkidHistory', ['SKD-000004']);
+  ok('partial: pieces made from it listed', hp.ok && hp.result.children.some((c) => c.skidId === rem['Skid ID']), hp.result && hp.result.children);
+  const hr = await call('getSkidHistory', [rem['Skid ID']]);
+  ok('leftover: knows its parent', hr.ok && hr.result.parent && hr.result.parent.skidId === 'SKD-000004' && hr.result.events.some((e) => e.what === 'SPLIT REMAINDER CREATED'), hr.result && [hr.result.parent, hr.result.events.map((e) => e.what)]);
+  const miss = await call('getSkidHistory', ['SKD-999999']);
+  ok('unknown skid: clear error', !miss.ok && /not found/.test(miss.error));
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -707,6 +707,63 @@ const base = {
   await page.close();
 }
 
+// ---- 21. Ticket history panel: from Reports and the Database; links between pieces; CSV
+{ const hist = (id) => ({
+    skid: { skidId: id, ticket: id === 'SKD-1' ? '501' : '501-LR1', status: 'Used', litho: 2.5, row: '', customer: 'Acme', jobId: 'JOB-1', mill: 'M-1',
+      supplier: 'US Steel', coatings: [{ item: 'SIZE', chemCode: 'C1', group: '603X408', sub: '10-OUT', date: '2026-09-29', by: 'Foreman' }], usedOn: '2026-09-30', comments: NASTY },
+    events: [
+      { when: '2026-09-30', date: '2026-09-30', kind: 'event', what: 'USED IN PRODUCTION (DIRECT)', by: '', notes: 'Marked Used', cost: 0 },
+      { when: '2026-09-29 10:00:00', kind: 'void', what: 'COATING REMOVED (VOID)', by: 'Foreman', notes: 'VOID#2: removed VARNISH (4.00)', cost: -4, running: 2.5 },
+      { when: '2026-09-29 08:00:00', kind: 'coat', what: 'Coated: VARNISH', chemCode: 'C2', cost: 4, running: 6.5, by: 'Foreman', jobName: 'Acme', voided: true },
+      { when: '2026-09-29 08:00:00', kind: 'coat', what: 'Coated: SIZE', chemCode: 'C1', cost: 2.5, running: 2.5, by: 'Foreman', jobName: 'Acme', voided: false }],
+    parent: null, children: id === 'SKD-1' ? [{ skidId: 'SKD-9', ticket: '501-LR1', status: 'Current', qty: 200 }] : [], loads: [],
+    family: { base: '501', members: [] } });
+  const litho = { skidId: 'SKD-1', ticket: '501', date: '2026-09-29', by: 'Foreman', litho: 2.5, customer: 'Acme', mill: 'M-1', coatings: [] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getDepartmentReport: () => R({ start: '2026-09-29', end: '2026-09-29', dept: 'litho', sections: [{ key: 'litho', label: 'Litho', rows: [litho] }] }),
+    getSkidHistory: (a) => R(hist(a[0])),
+    getMasterSheet: () => R({ rows: [{ skidId: 'SKD-1', ticket: '501', status: 'Used', litho: 2.5, coatings: [] }] }),
+    getRawTable: () => R({ headers: ['Ticket', 'Skid ID', 'Status'], rows: [{ __row: 2, 'Ticket': '501', 'Skid ID': 'SKD-1', 'Status': 'Used' }] }),
+  }));
+  await page.evaluate(() => openReports()); await page.waitForTimeout(100);
+  await page.click('#runReportBtn'); await page.waitForTimeout(300);
+  await page.click('#reportSections a[data-hist="SKD-1"]'); await page.waitForTimeout(300);
+  ok('tapping the ticket in a report opens its history', !!(await page.$('#histRoot')) && calls.filter((c) => c.fn === 'getSkidHistory').length === 1);
+  ok('...without toggling the row open', !(await page.$('.trace-detail')));
+  let txt = await page.textContent('#histRoot');
+  ok('history: summary, timeline events, newest first', txt.includes('Ticket 501') && txt.includes('USED IN PRODUCTION') && txt.indexOf('USED IN PRODUCTION') < txt.indexOf('Coated: SIZE'), txt.slice(0, 200));
+  ok('removed coat shown struck through', txt.includes('(removed later)') && txt.includes('COATING REMOVED'));
+  ok('sheet data shown as text', await page.evaluate(() => window.__xss === undefined) && txt.includes('<img src=x'));
+  await page.click('#histRoot [data-hist="SKD-9"]'); await page.waitForTimeout(300);
+  ok('opens a piece made from it, with Back', (await page.textContent('#histRoot')).includes('501-LR1') && !!(await page.$('#histBack')));
+  await page.click('#histBack'); await page.waitForTimeout(300);
+  ok('Back returns to the first ticket', (await page.textContent('#histRoot h3')).includes('Ticket 501 '));
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#histCsv')]);
+  const fs = await import('fs');
+  const csv = fs.readFileSync(await dl.path(), 'utf8').trim().split(/\r\n/);
+  ok('history CSV: header + 4 events', csv.length === 5 && csv[0].startsWith('When,What') && csv.some((l) => l.includes('Coated: VARNISH') && l.endsWith('yes')), csv);
+  await page.click('#histClose'); await page.waitForTimeout(100);
+  ok('Close returns to the report as it was', !(await page.$('#histRoot')) && !!(await page.$('#reportSections')));
+  // Report row trace -> Full history button
+  await page.click('[data-rrow="0-0"]'); await page.waitForTimeout(100);
+  await page.click('.trace-detail [data-hist="SKD-1"]'); await page.waitForTimeout(300);
+  ok('trace detail has a Full history button', !!(await page.$('#histRoot')));
+  await page.click('#histClose'); await page.waitForTimeout(100);
+  // Database: Master sheet and raw Steel Tickets editor
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('#msList [data-hist="SKD-1"]'); await page.waitForTimeout(300);
+  ok('Master sheet row opens history', !!(await page.$('#histRoot')));
+  await page.click('#histClose'); await page.waitForTimeout(100);
+  await page.click('[data-dbt="steel"]'); await page.waitForTimeout(300);
+  await page.click('#dbTableBox tbody tr'); await page.waitForTimeout(200);
+  await page.click('[data-hist="SKD-1"]'); await page.waitForTimeout(300);
+  ok('Steel Tickets row editor opens history', !!(await page.$('#histRoot')));
+  await page.click('#histClose'); await page.waitForTimeout(100);
+  ok('still in the row editor after closing', await page.evaluate(() => state.view === 'databaseEdit'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

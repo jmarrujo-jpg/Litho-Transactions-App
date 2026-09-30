@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.47.1</span>
+      <span class="version" id="appVersion">v1.48.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1179,7 +1179,8 @@
         '<div>' + statusCtl + '</div>' +
       '</div>' +
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-mscoats="' + esc(t.skidId) + '">' + (open ? '▾' : '▸') +
-        ' Coatings (' + t.coatings.length + ')' + (nMarks ? ' — ' + nMarks + ' to remove' : '') + '</button>' +
+        ' Coatings (' + t.coatings.length + ')' + (nMarks ? ' — ' + nMarks + ' to remove' : '') + '</button> ' +
+      '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-hist="' + esc(t.skidId) + '">🕘 History</button>' +
       coats + '</div>';
   }
 
@@ -1332,7 +1333,8 @@
       '<div class="card">' +
         '<div class="row" style="justify-content:space-between;align-items:center">' +
           '<h3 style="margin:0">Edit ' + esc(title) + '</h3>' +
-          '<span class="sub">sheet row ' + esc(rowObj.__row) + '</span>' +
+          '<span class="sub">sheet row ' + esc(rowObj.__row) +
+            (dbTable === 'steel' && rowObj['Skid ID'] ? ' <button class="btn secondary" style="padding:6px 12px;font-size:13px;margin-left:8px" data-hist="' + esc(rowObj['Skid ID']) + '">🕘 History</button>' : '') + '</span>' +
         '</div>' +
         '<div class="sub" style="margin:6px 0 12px">Change any field and save — edits write straight to the sheet.</div>' +
         fieldsHtml +
@@ -2020,7 +2022,8 @@
     var cnt = document.getElementById('reportTraceCount');
     if (cnt) cnt.textContent = reportFilter.trim() ? ('Showing ' + shown + ' of ' + total + ' rows that match "' + reportFilter.trim() + '".') : (total + ' rows. Tap a row for its full trace.');
     Array.prototype.forEach.call(el.querySelectorAll('[data-rrow]'), function (tr) {
-      tr.onclick = function () {
+      tr.onclick = function (e) {
+        if (e && e.target && e.target.closest && e.target.closest('[data-hist]')) return;   // the ticket link opens its history
         var id = tr.getAttribute('data-rrow');
         reportOpen[id] = !reportOpen[id];
         renderReportSections();
@@ -2028,6 +2031,10 @@
     });
   }
 
+  function histTicketLink(x) {
+    if (!x.skidId) return '<b>' + esc(x.ticket || '(none)') + '</b>';
+    return '<a href="#" data-hist="' + esc(x.skidId) + '" style="font-weight:700;color:var(--accent);text-decoration:underline">' + esc(x.ticket || x.skidId) + '</a>';
+  }
   function coatsShort(list) {
     return (list || []).map(function (c) { return c.item + (c.chemCode ? ' (' + c.chemCode + ')' : ''); }).join(', ');
   }
@@ -2035,7 +2042,7 @@
   function kv(label, value) { return '<div><span class="sub">' + esc(label) + ':</span> ' + value + '</div>'; }
 
   // Full trace for one skid: source steel, what was done, job / customer, where it went.
-  function traceDetailHtml(x) {
+  function traceDetailHtml(x, noHistoryBtn) {
     var steel = [x.supplier && ('Supplier ' + esc(x.supplier)), x.mill && ('Mill ' + esc(x.mill)), x.endUse && esc(x.endUse),
       (x.bw !== '' && x.bw != null) && ('BW ' + esc(x.bw) + (x.testedBw !== '' && x.testedBw != null ? ' (tested ' + esc(x.testedBw) + ')' : '')),
       (x.type || x.temper) && esc([x.type, x.temper].filter(Boolean).join(' / ')),
@@ -2056,6 +2063,7 @@
         (x.coatedOn ? ' &middot; coated ' + esc(x.coatedOn) + (x.coatedBy ? ' by ' + esc(x.coatedBy) : '') : '')) +
       kv('Where it went', went || '—') +
       (notes ? kv('Notes', notes) : '') +
+      (x.skidId && !noHistoryBtn ? '<button class="btn secondary" style="padding:6px 12px;font-size:13px;margin-top:6px" data-hist="' + esc(x.skidId) + '">🕘 Full history</button>' : '') +
       '</div>';
   }
   function sourcesDetailHtml(x) {
@@ -2079,17 +2087,17 @@
     var head, cells, detail = traceDetailHtml;
     if (sec.key === 'litho') {
       head = ['Date', 'Ticket', 'Job / Customer', 'Mill', 'Coatings', 'By', 'Litho'];
-      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), money(x.litho)]; };
+      cells = function (x) { return [esc(x.date), histTicketLink(x), dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), money(x.litho)]; };
     } else if (sec.key === 'lines' || sec.key === 'press') {
       head = ['Date', 'Ticket', 'Machine', 'Mill', 'Coatings', 'By', 'Sheets'];
-      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.machine), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), esc(x.sheets)]; };
+      cells = function (x) { return [esc(x.date), histTicketLink(x), dash(x.machine), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), esc(x.sheets)]; };
     } else if (sec.key === 'slitter' || sec.key === 'scrolls') {
       head = ['Date', 'Load', 'Machine', 'By', 'Output', 'Cost', 'Litho', 'Cut from'];
       cells = function (x) { return [esc(x.date), '<b>LOAD ' + esc(x.loadNo) + '</b>', dash(x.machine), dash(x.by), esc(x.output) + ' ' + esc(x.unit), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—', '<span class="sub">' + esc(x.from) + '</span>']; };
       detail = sourcesDetailHtml;
     } else if (sec.key === 'direct') {
       head = ['Date', 'Ticket', 'Job / Customer', 'Mill', 'Coatings', 'Cost', 'Litho'];
-      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—']; };
+      cells = function (x) { return [esc(x.date), histTicketLink(x), dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—']; };
     } else if (sec.key === 'count') {
       head = ['Date', 'Session', 'By', 'Current', 'Promoted', 'WIP', 'Missing'];
       cells = function (x) { return [esc(x.date), '<span class="sub">' + esc(x.sessionId) + '</span>', esc(x.by), esc(x.currentFound), esc(x.promoted), esc(x.wipFound), esc(x.missing)]; };
@@ -2136,6 +2144,116 @@
       var blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (e) { toast('Could not make the file: ' + e.message); }
+  }
+
+  // ---------------- Ticket history panel (Database + Reports) ----------------
+  // Opens over whatever screen you're on (so Close returns you exactly where you were). Tapping a
+  // parent / piece / family member opens that skid's history; ← steps back through them.
+  var histStack = [], histData = null;
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest && e.target.closest('[data-hist]');
+    if (!b) return;
+    e.preventDefault();
+    openSkidHistory(b.getAttribute('data-hist'));
+  });
+  function openSkidHistory(skidId, fromBack) {
+    if (!skidId) return;
+    if (!fromBack) histStack.push(skidId);
+    var root = document.getElementById('histRoot');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'histRoot';
+      root.style.cssText = 'position:fixed;inset:0;z-index:900;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 16px 40px';
+      document.body.appendChild(root);
+    }
+    document.body.style.overflow = 'hidden';
+    root.innerHTML = histHeaderHtml('Loading…') + '<div class="card"><div class="loading">Loading history&hellip;</div></div>';
+    wireHistHeader();
+    google.script.run.withSuccessHandler(function (h) {
+      if (histStack[histStack.length - 1] !== skidId) return;   // they moved on
+      histData = h;
+      renderSkidHistory(h);
+    }).withFailureHandler(function (err) {
+      if (histStack[histStack.length - 1] !== skidId) return;
+      root.innerHTML = histHeaderHtml(skidId) + '<div class="card empty">Could not load the history: ' + esc(err.message) + '</div>';
+      wireHistHeader();
+    }).getSkidHistory(skidId);
+  }
+  function closeSkidHistory() {
+    histStack = []; histData = null;
+    var root = document.getElementById('histRoot');
+    if (root) root.remove();
+    document.body.style.overflow = '';
+  }
+  function histHeaderHtml(title) {
+    return '<div class="row" style="align-items:center;gap:8px;margin-bottom:10px">' +
+      (histStack.length > 1 ? '<button class="btn secondary" id="histBack">&larr; Back</button>' : '') +
+      '<h3 style="margin:0;flex:1">' + esc(title) + '</h3>' +
+      '<button class="btn secondary" id="histCsv"' + (histData ? '' : ' disabled') + '>Download CSV</button>' +
+      '<button class="btn" id="histClose">Close</button></div>';
+  }
+  function wireHistHeader() {
+    var c = document.getElementById('histClose'); if (c) c.onclick = closeSkidHistory;
+    var b = document.getElementById('histBack');
+    if (b) b.onclick = function () { histStack.pop(); histData = null; openSkidHistory(histStack[histStack.length - 1], true); };
+    var d = document.getElementById('histCsv'); if (d) d.onclick = downloadHistoryCsv;
+  }
+  function histSkidLink(r, extra) {
+    return '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin:0 6px 6px 0" data-hist="' + esc(r.skidId) + '">' +
+      esc(r.ticket || r.skidId) + ' <span class="sub">' + esc([r.skidId !== r.ticket ? r.skidId : '', r.status, extra].filter(Boolean).join(' · ')) + '</span></button>';
+  }
+  function renderSkidHistory(h) {
+    var root = document.getElementById('histRoot');
+    if (!root) return;
+    var k = h.skid || {};
+    var html = histHeaderHtml('Ticket ' + (k.ticket || k.skidId) + ' — history');
+    html += '<div class="card">' +
+      '<div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">' +
+        '<span class="ticket-id" style="font-size:20px">' + esc(k.ticket || '(no ticket)') + '</span>' +
+        '<span class="sub">' + esc(k.skidId) + '</span>' +
+        '<span class="badge ' + (k.status === 'WIP' ? 'wip' : '') + '">' + esc(k.status || '') + '</span>' +
+        '<span class="sub">litho ' + money(k.litho) + (k.row !== '' && k.row != null ? ' &middot; row ' + esc(k.row) : '') + '</span>' +
+      '</div>' + traceDetailHtml(k, true) + '</div>';
+    var links = '';
+    if (h.parent) links += '<div style="margin-bottom:6px"><span class="sub">Split / cut from:</span><br>' + histSkidLink(h.parent) + '</div>';
+    if ((h.children || []).length) links += '<div style="margin-bottom:6px"><span class="sub">Pieces made from it:</span><br>' + h.children.map(function (c) { return histSkidLink(c, (c.qty !== '' ? c.qty + ' sheets' : '')); }).join('') + '</div>';
+    if ((h.loads || []).length) links += '<div style="margin-bottom:6px"><span class="sub">' + esc(h.loads[0].kind === 'Scroll' ? 'Scroll' : 'Slitter') + ' loads cut from it:</span><br>' + h.loads.map(function (l) {
+      return l.skidId ? histSkidLink({ skidId: l.skidId, ticket: 'LOAD ' + l.loadNo }, l.used + ' used · ' + l.date) : '<span>LOAD ' + esc(l.loadNo) + '</span> ';
+    }).join('') + '</div>';
+    var fam = ((h.family || {}).members || []).filter(function (m) { return m.skidId !== k.skidId; });
+    if (fam.length) links += '<div><span class="sub">Same original ticket (' + esc(h.family.base) + '):</span><br>' + fam.map(function (m) { return histSkidLink(m); }).join('') + '</div>';
+    if (links) html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Where it came from and what was made from it</h3>' + links + '</div>';
+    var ev = h.events || [];
+    html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Timeline <span class="sub" style="font-weight:400">&middot; newest first &middot; ' + ev.length + '</span></h3>' +
+      (ev.length ? '<div style="overflow-x:auto"><table><thead><tr><th>When</th><th>What</th><th>Details</th><th>By</th></tr></thead><tbody>' + ev.map(function (e) {
+        var det = [e.chemCode && 'chem ' + esc(e.chemCode), (e.group || e.sub) && esc([e.group, e.sub].filter(Boolean).join(' ')),
+          e.cost ? (e.cost < 0 ? '−' + money(-e.cost) : money(e.cost)) : '', (e.running !== '' && e.running != null && e.kind !== 'event') ? 'total ' + money(e.running) : '',
+          (e.jobName || e.jobId) && esc([e.jobName, e.jobId && e.jobId !== e.jobName ? e.jobId : ''].filter(Boolean).join(' ')),
+          e.notes && esc(e.notes)].filter(Boolean).join(' &middot; ');
+        var style = e.voided ? ' style="text-decoration:line-through;opacity:.6"' : '';
+        return '<tr><td style="white-space:nowrap">' + esc(e.when || e.date || '') + '</td>' +
+          '<td' + style + '><strong' + (e.kind === 'void' ? ' style="color:#b3261e"' : '') + '>' + esc(e.what) + '</strong>' + (e.voided ? ' <span class="sub">(removed later)</span>' : '') + '</td>' +
+          '<td class="sub">' + (det || '—') + '</td><td>' + esc(e.by || '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>' : '<div class="sub">Nothing logged for this ticket yet.</div>') + '</div>';
+    root.innerHTML = html;
+    root.scrollTop = 0;
+    wireHistHeader();
+  }
+  function downloadHistoryCsv() {
+    if (!histData) return;
+    var k = histData.skid || {};
+    var q = function (v) { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var lines = [['When', 'What', 'Chem Code', 'Size / Group', '#OUT', 'Cost', 'Running Total', 'By', 'Job ID', 'Job / Customer', 'Notes', 'Removed later'].join(',')];
+    (histData.events || []).forEach(function (e) {
+      lines.push([e.when || e.date, e.what, e.chemCode, e.group, e.sub, e.cost || '', e.kind === 'event' ? '' : e.running, e.by, e.jobId, e.jobName, e.notes, e.voided ? 'yes' : ''].map(q).join(','));
+    });
+    try {
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv' }));
+      a.download = 'history-' + String(k.ticket || k.skidId).replace(/[^A-Za-z0-9_-]+/g, '_') + '.csv';
       document.body.appendChild(a); a.click();
       setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     } catch (e) { toast('Could not make the file: ' + e.message); }
