@@ -569,6 +569,48 @@ const base = {
   await page.close();
 }
 
+// ---- 18. Reports: rows open to a full product trace; trace box filters; CSV download
+{ const coat = (item, chem) => ({ item, chemCode: chem, group: '603X408', sub: '10-OUT', date: '2026-09-29', by: 'Ann' });
+  const litho = { skidId: 'SKD-1', ticket: '100231', date: '2026-09-29', by: 'Ann', litho: 6.5, customer: 'Acme Cans', jobId: 'JOB-000009',
+    mill: 'M-111', supplier: 'US Steel', endUse: '603X408', bw: '75', testedBw: '75.2', type: 'T', temper: 'T4', width: '32', length: '30', qty: 1000, weight: 5000,
+    status: 'WIP', coatings: [coat('SIZE', 'CH1'), coat('VARNISH', 'CH2')], coatedOn: '2026-09-29', coatedBy: 'Ann', usedOn: '', comments: NASTY };
+  const other = Object.assign({}, litho, { skidId: 'SKD-2', ticket: '100232', customer: 'Beta Foods', mill: 'M-222', coatings: [coat('WHITE', 'CH9')] });
+  const pallet = { date: '2026-09-30', loadNo: '12', machine: 'S1', by: 'Ann', output: 40, unit: 'Body Blanks', from: '100231 [mill M-111] (40)', skidId: 'SKD-9',
+    cost: 0, litho: 0, sources: [Object.assign({}, litho, { used: 40 })] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getDepartmentReport: () => R({ start: '2000-01-01', end: '2026-09-30', dept: 'all', sections: [
+      { key: 'litho', label: 'Litho — skids coated', rows: [litho, other] },
+      { key: 'slitter', label: 'Slitter — pallets made', rows: [pallet] }] }),
+  }));
+  await page.evaluate(() => openReports()); await page.waitForTimeout(100);
+  await page.click('#reportAll');
+  ok('All time sets a wide range', (await page.$eval('#reportFrom', (e) => e.value)) === '2000-01-01');
+  await page.click('#runReportBtn'); await page.waitForTimeout(300);
+  let txt = await page.textContent('#reportSections');
+  ok('row shows customer, mill and coatings with chem codes', txt.includes('Acme Cans') && txt.includes('M-111') && txt.includes('SIZE (CH1), VARNISH (CH2)'));
+  ok('detail hidden until tapped', !(await page.$('.trace-detail')));
+  await page.click('[data-rrow="0-0"]'); await page.waitForTimeout(100);
+  const det = await page.textContent('.trace-detail');
+  ok('trace detail: supplier, mill, tested BW, each coating, job', det.includes('US Steel') && det.includes('Mill M-111') && det.includes('tested 75.2') && det.includes('chem CH2') && det.includes('JOB-000009'), det);
+  ok('sheet data shown as text, not run', await page.evaluate(() => window.__xss === undefined) && det.includes('<img src=x'));
+  await page.click('[data-rrow="1-0"]'); await page.waitForTimeout(100);
+  ok('cut pallet opens to its source skids with their trace', (await page.$$('.trace-detail')).length === 2 && (await page.textContent('#reportSections')).includes('Cut from 1 source'));
+  await page.fill('#reportTrace', 'ch9'); await page.waitForTimeout(100);
+  txt = await page.textContent('#reportSections');
+  ok('trace box finds a chem code', txt.includes('100232') && !txt.includes('Acme Cans') && (await page.textContent('#reportTraceCount')).includes('1 of 3'), await page.textContent('#reportTraceCount'));
+  await page.fill('#reportTrace', 'M-111'); await page.waitForTimeout(100);
+  ok('trace box finds a mill, including pallets cut from it', (await page.textContent('#reportTraceCount')).includes('2 of 3'));
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#reportCsvBtn')]);
+  const fs = await import('fs');
+  const csv = fs.readFileSync(await dl.path(), 'utf8');
+  const lines = csv.trim().split(/\r\n/);
+  ok('CSV: header + the 2 matching rows', lines.length === 3 && lines[0].startsWith('Section,Date,Ticket') && dl.suggestedFilename().endsWith('.csv'), lines.length);
+  ok('CSV: chem codes and customer in the row', lines[1].includes('CH1; CH2') && lines[1].includes('Acme Cans'), lines[1]);
+  ok('CSV: pallet row carries its source mill and chem codes', lines[2].includes('M-111') && lines[2].includes('CH1'), lines[2]);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

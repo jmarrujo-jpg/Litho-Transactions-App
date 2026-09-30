@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'movewip-52', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-53', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -681,9 +681,14 @@ function familyOf(rows, ticket) {
 
 function activeCoatings(history) {
   const voided = {};
-  (history || []).forEach((h) => { const m = /^VOID#(\d+):/.exec(String(h.notes || '')); if (m) voided[m[1]] = true; });
-  return (history || []).filter((h) => String(h.group || '').trim() !== '' && num(h.passTotal) > 0 && !voided[String(h.passNumber)])
-    .map((h) => ({ passNumber: h.passNumber, group: h.group, sub: h.sub, item: h.item, chemCode: h.chemCode, cost: num(h.passTotal) }));
+  let removedAt = 0;   // taking a ticket off a job voids every coat logged before that
+  (history || []).forEach((h) => {
+    const m = /^VOID#(\d+):/.exec(String(h.notes || '')); if (m) voided[m[1]] = true;
+    if (String(h.item || '') === 'REMOVED FROM JOB (VOID)' && num(h.passNumber) > removedAt) removedAt = num(h.passNumber);
+  });
+  return (history || []).filter((h) => String(h.group || '').trim() !== '' && num(h.passTotal) > 0 && !voided[String(h.passNumber)] && num(h.passNumber) > removedAt)
+    .map((h) => ({ passNumber: h.passNumber, group: h.group, sub: h.sub, item: h.item, chemCode: h.chemCode, cost: num(h.passTotal),
+      date: toYMD(h.timestamp), by: h.operator || '', jobName: h.jobName || '', jobId: h.jobId || '' }));
 }
 async function getTransactionHistory(sheets, skidId, ticket) {
   const { rows } = await readObjects(sheets, TRANSACTIONS);
@@ -2869,6 +2874,52 @@ function classifyMachine(machine) {
   return m ? (m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()) : '';
 }
 
+// ---- Product trace detail ----
+// Every report row carries where its steel came from (mill, supplier, specs), what was done to it
+// (each coating with its chem code, date and who), which job / customer it was for, and where it
+// went (used date, run, what it was cut into). Built from one read of Transactions and Jobs.
+function txHistoryRow(r) {
+  return { timestamp: r['Timestamp'], ticket: r['Ticket'], passNumber: num(r['Pass Number']), operator: r['Operator'],
+    group: r['Group'], sub: r['Sub-Variant'], item: r['Item'], chemCode: r['Chem Code'], passTotal: r['Pass Total Cost'],
+    notes: r['Notes'], jobName: r['Job Name'], jobId: r['Job ID'] || '', skidId: r['Skid ID'] };
+}
+async function traceContext(sheets, masterRows) {
+  const bySkid = {}, byTicket = {};
+  let tx = [];
+  try { tx = (await readObjects(sheets, TRANSACTIONS)).rows; } catch (e) { /* no log */ }
+  tx.forEach((r) => {
+    const sid = String(r['Skid ID'] || '').trim();
+    const key = sid || String(r['Ticket'] || '').trim();
+    const into = sid ? bySkid : byTicket;
+    if (!key) return;
+    (into[key] = into[key] || []).push(txHistoryRow(r));
+  });
+  const jobs = {};
+  try { (await readObjects(sheets, JOBS, true)).rows.forEach((j) => { if (j['Job ID']) jobs[String(j['Job ID']).trim()] = j; }); } catch (e) { /* none */ }
+  const skids = {};
+  masterRows.forEach((o) => { if (o['Skid ID']) skids[String(o['Skid ID']).trim()] = o; });
+  return { bySkid, byTicket, jobs, skids };
+}
+function traceOf(o, ctx) {
+  const sid = String(o['Skid ID'] || '').trim();
+  const hist = (ctx.bySkid[sid] || []).concat(ctx.byTicket[String(o['Ticket'] || '').trim()] || [])
+    .sort((a, b) => a.passNumber - b.passNumber);
+  const coats = activeCoatings(hist);
+  const jobId = String(o['Job ID'] || '').trim() || (coats.length ? coats[coats.length - 1].jobId : '');
+  const job = ctx.jobs[jobId] || {};
+  const customer = job['Description'] || (coats.length ? coats[coats.length - 1].jobName : '') || '';
+  return {
+    mill: o['Mill'] || '', supplier: o['Supplier'] || '', endUse: o['End Use'] || '', bw: o['BW'] != null ? o['BW'] : '',
+    testedBw: o['Tested BW'] != null ? o['Tested BW'] : '', type: o['TC'] || '', temper: o['TM'] || '',
+    width: o['Width'] != null ? o['Width'] : '', length: o['Length'] != null ? o['Length'] : '',
+    qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '', weight: o['Weight'] != null ? o['Weight'] : '', cs: String(o['C/S'] || '').trim(),
+    status: o['Status'] || '', jobId, customer, coatings: coats.map((c) => ({ item: c.item, chemCode: c.chemCode || '', group: c.group || '', sub: c.sub || '', date: c.date, by: c.by })),
+    coatedOn: toYMD(o['First Coated At']), coatedBy: o['First Coated By'] || '', approvedBy: o['Approved By'] || '',
+    usedOn: toYMD(usedAt(o)), usedVia: o['Used Via'] || '', runId: o['Run ID'] || '', splitOf: o['Split Of'] || '',
+    comments: o['Comments'] || '', lithoNotes: o['Litho Notes'] || '',
+  };
+}
+
 // Completed-work activity by department for a date range. dept: 'all' | 'litho' | 'lines' |
 // 'press' | 'slitter' | 'scrolls' | 'count'. Reads the authoritative source tabs so it reflects
 // finished output (pallets made, skids coated, runs finished, counts done), not every keystroke.
@@ -2883,6 +2934,8 @@ async function getDepartmentReport(sheets, start, end, dept) {
 
   let master = { rows: [] };
   try { master = await readObjects(sheets, MASTER, true); } catch (e) { /* keep empty */ }
+  const ctx = dept === 'count' ? null : await traceContext(sheets, master.rows);
+  const tr = (o) => Object.assign(traceOf(o, ctx), { ticket: o['Ticket'], skidId: o['Skid ID'] });
 
   if (want('litho')) {
     const rows = [];
@@ -2890,7 +2943,7 @@ async function getDepartmentReport(sheets, start, end, dept) {
       const st = o['Status'] || '';
       if (st !== STATUS.WIP && st !== STATUS.IN_PRODUCTION && st !== STATUS.USED) return;
       if (!inRange(o['First Coated At'], start, end)) return;
-      rows.push({ date: toYMD(o['First Coated At']), ticket: o['Ticket'], skidId: o['Skid ID'], by: o['First Coated By'] || '', litho: num(o['Litho']) });
+      rows.push(Object.assign(tr(o), { date: toYMD(o['First Coated At']), by: o['First Coated By'] || '', litho: num(o['Litho']) }));
     });
     rows.sort(byDate);
     sections.push({ key: 'litho', label: 'Litho — skids coated', rows });
@@ -2902,7 +2955,7 @@ async function getDepartmentReport(sheets, start, end, dept) {
       if ((o['Status'] || '') !== STATUS.USED) return;
       if (String(o['Used Via'] || '') !== 'Direct') return;   // only the quick-mark flow, not runs/slitter
       if (!inRange(usedAt(o), start, end)) return;
-      rows.push({ date: toYMD(usedAt(o)), ticket: o['Ticket'], skidId: o['Skid ID'], mill: o['Mill'] || '', litho: num(o['Litho']), cost: num(o['Cost']) });   // date only
+      rows.push(Object.assign(tr(o), { date: toYMD(usedAt(o)), litho: num(o['Litho']), cost: num(o['Cost']) }));   // date only
     });
     rows.sort(byDate);
     sections.push({ key: 'direct', label: 'Used in Production (direct)', rows });
@@ -2919,7 +2972,7 @@ async function getDepartmentReport(sheets, start, end, dept) {
       if (!runId) return;                                   // no run = not a Line/Press completion
       const machine = runMap[runId] || '';
       const type = classifyMachine(machine);
-      const row = { date: usedAt(o), ticket: o['Ticket'], skidId: o['Skid ID'], machine, by: o['Used By'] || '', sheets: num(o['QTY/LOAD']) };   // full date + time
+      const row = Object.assign(tr(o), { date: usedAt(o), machine, by: o['Used By'] || '', sheets: num(o['QTY/LOAD']), litho: num(o['Litho']) });   // full date + time
       if (type === 'Line') lineRows.push(row); else if (type === 'Press') pressRows.push(row);
     });
     if (want('lines')) { lineRows.sort(byDate); sections.push({ key: 'lines', label: 'Metal Lines — skids run', rows: lineRows }); }
@@ -2939,7 +2992,14 @@ async function getDepartmentReport(sheets, start, end, dept) {
       const comp = parseComposition(p['Composition']);
       const from = comp.map((c) => (c.ticket || ('Mill ' + c.mill)) + (c.mill ? ' [mill ' + c.mill + ']' : '') + ' (' + (c.strips != null ? c.strips : (c.qty || 0)) + ')').join(' + ');
       const cutRow = master.rows.filter((o) => String(o['Skid ID']).trim() === String(p['Skid ID'] || '').trim())[0] || {};
-      const row = { date: toYMD(p['Created On']), loadNo: p['Load #'] || '', machine: sess['Slitter'] || '', by: sess['Operator'] || '', output: num(p['Output Count']), unit: kind === 'Scroll' ? 'Strips' : 'Body Blanks', from, skidId: p['Skid ID'] || '', cost: num(cutRow['Cost']), litho: num(cutRow['Litho']) };
+      // Each source skid the pallet was cut from, with its own trace (mill, supplier, coatings, customer).
+      const sources = comp.map((c) => {
+        const src = ctx.skids[String(c.skidId || '').trim()];
+        const t = src ? tr(src) : { ticket: c.ticket || '', skidId: c.skidId || '', mill: c.mill || '', coatings: [] };
+        return Object.assign(t, { ticket: t.ticket || c.ticket || '', mill: t.mill || c.mill || '', used: c.strips != null ? c.strips : (c.qty || 0) });
+      });
+      const row = { date: toYMD(p['Created On']), loadNo: p['Load #'] || '', machine: sess['Slitter'] || '', by: sess['Operator'] || '', output: num(p['Output Count']), unit: kind === 'Scroll' ? 'Strips' : 'Body Blanks', from, skidId: p['Skid ID'] || '', cost: num(cutRow['Cost']), litho: num(cutRow['Litho']),
+        sources, status: cutRow['Status'] || '', usedOn: toYMD(usedAt(cutRow)), notes: p['Notes'] || '' };
       if (kind === 'Scroll') scrollRows.push(row); else slitRows.push(row);
     });
     if (want('slitter')) { slitRows.sort(byDate); sections.push({ key: 'slitter', label: 'Slitter — pallets made', rows: slitRows }); }

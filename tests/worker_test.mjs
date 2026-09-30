@@ -427,5 +427,46 @@ await concurrency(envBase, 'in-worker lock');
   ok('ambiguous log append: ok, one row', r2.ok && txFor(f, 'SKD-000004').length === 1 && Number(skidRow(f, 'SKD-000004')['Litho']) === 4, [r2, txFor(f, 'SKD-000004').length]);
 }
 
+// 18. Reports carry the product trace: mill, specs, every coating with its chem code, the job /
+//     customer, and — for a cut pallet — the same for each source skid it was cut from.
+{ const f = fresh();
+  const rows = f.book(SID).tabs['Steel Tickets'].rows;
+  rows[1][MASTER_H.indexOf('Mill')] = 'M-111'; rows[1][MASTER_H.indexOf('BW')] = '75';
+  rows[2][MASTER_H.indexOf('Mill')] = 'M-222';
+  const j = await call('createJob', ['Acme Cans', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], '', 'op-18-j']);
+  await call('jobAddTicket', [j.result.jobId, 'SKD-000001', '', false, '', 'Ann', 'op-18-a', '', '75.2']);
+  await call('approveJob', [j.result.jobId, 'Alex', 'op-18-ap']);
+  // SKD-000002: on a job, taken off it (coats voided), then moved to WIP with VARNISH only.
+  const j2 = await call('createJob', ['Mistake', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'WHITE' }], '', 'op-18-j2']);
+  await call('jobAddTicket', [j2.result.jobId, 'SKD-000002', '', false, '', 'Ann', 'op-18-b', '', '']);
+  await call('removeTicketFromJob', [j2.result.jobId, 'SKD-000002', 'Ann', 'op-18-rm']);
+  await call('moveToWip', ['Beta Foods', '', [{ group: '603X408', sub: '10-OUT', item: 'VARNISH' }], ['SKD-000002'], 'op-18-mw']);
+  const d = new Date(); const ymdNow = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const r = await call('getDepartmentReport', ['2000-01-01', '2099-12-31', 'litho']);
+  ok('litho report ok', r.ok, r);
+  const lit = r.result.sections[0].rows;
+  const a = lit.filter((x) => x.skidId === 'SKD-000001')[0];
+  ok('trace: job / customer and job id', a && a.customer === 'Acme Cans' && a.jobId === j.result.jobId, a);
+  ok('trace: mill, BW and tested BW', a && a.mill === 'M-111' && String(a.bw) === '75' && String(a.testedBw) === '75.2', a);
+  ok('trace: coating with chem code, date and who', a && a.coatings.length === 1 && a.coatings[0].item === 'SIZE' && a.coatings[0].chemCode === 'CH1' && a.coatings[0].by === 'Ann' && /^\d{4}-\d\d-\d\d$/.test(a.coatings[0].date), a && a.coatings);
+  ok('trace: sheets and status', a && Number(a.qty) === 1000 && a.status === 'WIP', a);
+  const b = lit.filter((x) => x.skidId === 'SKD-000002')[0];
+  ok('coats voided by leaving a job are not in the trace', b && b.coatings.map((c) => c.item).join() === 'VARNISH' && b.customer === 'Beta Foods', b && b.coatings);
+  const card = await call('getTicketCard', ['SKD-000002']);
+  ok('ticket card agrees (only the live coat)', card.ok && card.result.coatings.map((c) => c.item).join() === 'VARNISH', card.result && card.result.coatings);
+
+  // Cut pallet: its sources carry their own trace.
+  const sess = await call('createSlitterSession', ['Slitter', 'S1', 'Ann', '', 'op-18-s']);
+  const ld = await call('slitterLoadSkid', [sess.result.sessionId, 'SKD-000001', 'Ann', 'op-18-l']);
+  const fin = await call('slitterFinishPallet', [sess.result.sessionId, 40, 'lot 7', 'Ann', 'op-18-f']);
+  ok('slitter pallet made', sess.ok && ld.ok && fin.ok, [sess, ld, fin]);
+  const rs = await call('getDepartmentReport', ['2000-01-01', '2099-12-31', 'slitter']);
+  const pal = rs.ok && rs.result.sections[0].rows[0];
+  ok('pallet lists its source skid', pal && pal.sources && pal.sources.length === 1 && pal.sources[0].skidId === 'SKD-000001', pal);
+  ok('source carries mill, coatings and customer', pal && pal.sources[0].mill === 'M-111' && pal.sources[0].coatings[0].chemCode === 'CH1' && pal.sources[0].customer === 'Acme Cans', pal && pal.sources);
+  const all = await call('getDepartmentReport', [ymdNow, ymdNow, 'all']);
+  ok('all-departments report still ok', all.ok && all.result.sections.length >= 5, all);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.44.1</span>
+      <span class="version" id="appVersion">v1.45.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1646,7 +1646,7 @@
     var today = todayStr();
     view.innerHTML =
       '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
-        '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range.</div>' +
+        '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range. Tap a row for its full trace: the mill and supplier, every coating with its chem code, the job / customer, and where the steel went. For a product trace, pick All time and type the ticket, load #, mill, customer or chem code in the trace box.</div>' +
         selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'count', text: 'Count' }], reportDept) +
         '<div class="row">' +
           '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
@@ -1655,6 +1655,7 @@
         '<div class="row" style="gap:8px;margin-bottom:10px">' +
           '<button class="btn secondary" id="reportToday" style="flex:1">Today</button>' +
           '<button class="btn secondary" id="reportWeek" style="flex:1">This week (Mon–Fri)</button>' +
+          '<button class="btn secondary" id="reportAll" style="flex:1">All time</button>' +
         '</div>' +
         '<button class="btn" id="runReportBtn" style="width:100%">Generate report</button>' +
       '</div>' +
@@ -1670,6 +1671,7 @@
       var fri = new Date(mon); fri.setDate(mon.getDate() + 4);
       from.value = ymd(mon); to.value = ymd(fri);
     };
+    document.getElementById('reportAll').onclick = function () { from.value = '2000-01-01'; to.value = todayStr(); };
     document.getElementById('runReportBtn').onclick = function () {
       var dept = document.getElementById('reportDeptSel').value || 'all';
       var f = from.value, t = to.value || from.value;
@@ -1685,45 +1687,170 @@
     };
   }
 
+  // The last report, kept so the trace box can filter it and the CSV can be built without asking again.
+  var reportData = null, reportFilter = '', reportOpen = {};
   function renderReportResults(r) {
+    reportData = r; reportOpen = {};
     var el = document.getElementById('reportResults');
     if (!el) return;
-    var range = (r.start === r.end) ? r.start : (r.start + ' to ' + r.end);
-    var sections = r.sections || [];
-    var html = '';
-    sections.forEach(function (sec) { html += reportSectionHtml(sec, range); });
-    if (!html) html = '<div class="card empty">Nothing in this range.</div>';
-    el.innerHTML = html;
+    var total = (r.sections || []).reduce(function (n, sec) { return n + (sec.rows || []).length; }, 0);
+    el.innerHTML = total ? (
+      '<div class="card"><div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Trace: find in this report</label>' +
+          '<input id="reportTrace" placeholder="ticket, skid, load #, mill, supplier, customer, chem code…" autocomplete="off" value="' + esc(reportFilter) + '"></div>' +
+        '<button class="btn secondary" id="reportCsvBtn">Download CSV</button>' +
+      '</div><div class="sub" id="reportTraceCount" style="margin-top:6px"></div></div>' +
+      '<div id="reportSections"></div>') : '<div id="reportSections"></div>';
+    var box = document.getElementById('reportTrace');
+    if (box) box.oninput = function () { reportFilter = box.value; renderReportSections(); };
+    var csv = document.getElementById('reportCsvBtn');
+    if (csv) csv.onclick = downloadReportCsv;
+    renderReportSections();
   }
 
-  // Render one department section. Columns are tailored per department; cut pallets show the parent
-  // tickets + mills they were cut from, so lineage back to the mill is visible in the report.
-  function reportSectionHtml(sec, range) {
+  function reportRowText(x) { return JSON.stringify(x).toLowerCase(); }
+  function reportMatches(x) {
+    var f = String(reportFilter || '').trim().toLowerCase();
+    return !f || reportRowText(x).indexOf(f) !== -1;
+  }
+  function renderReportSections() {
+    var el = document.getElementById('reportSections');
+    if (!el || !reportData) return;
+    var r = reportData;
+    var range = (r.start === r.end) ? r.start : (r.start + ' to ' + r.end);
+    var shown = 0, total = 0, html = '';
+    (r.sections || []).forEach(function (sec, si) {
+      var rows = sec.rows || [];
+      total += rows.length;
+      var keep = [];
+      rows.forEach(function (x, i) { if (reportMatches(x)) keep.push({ x: x, id: si + '-' + i }); });
+      shown += keep.length;
+      html += reportSectionHtml(sec, range, keep);
+    });
+    if (!html) html = '<div class="card empty">Nothing in this range.</div>';
+    el.innerHTML = html;
+    var cnt = document.getElementById('reportTraceCount');
+    if (cnt) cnt.textContent = reportFilter.trim() ? ('Showing ' + shown + ' of ' + total + ' rows that match "' + reportFilter.trim() + '".') : (total + ' rows. Tap a row for its full trace.');
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rrow]'), function (tr) {
+      tr.onclick = function () {
+        var id = tr.getAttribute('data-rrow');
+        reportOpen[id] = !reportOpen[id];
+        renderReportSections();
+      };
+    });
+  }
+
+  function coatsShort(list) {
+    return (list || []).map(function (c) { return c.item + (c.chemCode ? ' (' + c.chemCode + ')' : ''); }).join(', ');
+  }
+  function dash(v) { return (v === '' || v == null) ? '—' : esc(v); }
+  function kv(label, value) { return '<div><span class="sub">' + esc(label) + ':</span> ' + value + '</div>'; }
+
+  // Full trace for one skid: source steel, what was done, job / customer, where it went.
+  function traceDetailHtml(x) {
+    var steel = [x.supplier && ('Supplier ' + esc(x.supplier)), x.mill && ('Mill ' + esc(x.mill)), x.endUse && esc(x.endUse),
+      (x.bw !== '' && x.bw != null) && ('BW ' + esc(x.bw) + (x.testedBw !== '' && x.testedBw != null ? ' (tested ' + esc(x.testedBw) + ')' : '')),
+      (x.type || x.temper) && esc([x.type, x.temper].filter(Boolean).join(' / ')),
+      (x.width || x.length) && esc((x.width || '?') + ' × ' + (x.length || '?')),
+      (x.qty !== '' && x.qty != null) && (esc(x.qty) + ' sheets'), (x.weight !== '' && x.weight != null) && (esc(x.weight) + ' lbs'),
+      x.cs === 'C' && 'Coil'].filter(Boolean).join(' &middot; ');
+    var coats = (x.coatings || []).length ? '<ol style="margin:4px 0 0;padding-left:20px">' + x.coatings.map(function (c) {
+      return '<li><strong>' + esc(c.item) + '</strong>' + (c.chemCode ? ' &middot; chem ' + esc(c.chemCode) : '') +
+        ' <span class="sub">' + esc([c.group, c.sub].filter(Boolean).join(' ')) + (c.date ? ' &middot; ' + esc(c.date) : '') + (c.by ? ' &middot; ' + esc(c.by) : '') + '</span></li>';
+    }).join('') + '</ol>' : '<span class="sub">none</span>';
+    var went = [x.status && ('Now ' + esc(x.status)), x.usedOn && ('used ' + esc(x.usedOn) + (x.usedVia ? ' (' + esc(x.usedVia) + ')' : '')),
+      x.runId && ('run ' + esc(x.runId)), x.splitOf && ('split from ' + esc(x.splitOf))].filter(Boolean).join(' &middot; ');
+    var notes = [x.comments, x.lithoNotes].filter(Boolean).map(esc).join(' | ');
+    return '<div style="line-height:1.6">' +
+      kv('Steel', steel || '—') +
+      kv('Coatings', coats) +
+      kv('Job / Customer', (x.customer ? '<strong>' + esc(x.customer) + '</strong>' : '—') + (x.jobId ? ' <span class="sub">' + esc(x.jobId) + '</span>' : '') +
+        (x.coatedOn ? ' &middot; coated ' + esc(x.coatedOn) + (x.coatedBy ? ' by ' + esc(x.coatedBy) : '') : '')) +
+      kv('Where it went', went || '—') +
+      (notes ? kv('Notes', notes) : '') +
+      '</div>';
+  }
+  function sourcesDetailHtml(x) {
+    var src = x.sources || [];
+    if (!src.length) return '<div class="sub">Cut from: ' + esc(x.from || '—') + '</div>';
+    return '<div class="sub" style="margin-bottom:4px">Cut from ' + src.length + ' source' + (src.length === 1 ? '' : 's') + (x.notes ? ' &middot; ' + esc(x.notes) : '') + ':</div>' +
+      src.map(function (t) {
+        return '<div style="border-left:3px solid var(--line);padding-left:10px;margin:6px 0">' +
+          '<div><strong>' + esc(t.ticket || '(no ticket)') + '</strong> <span class="sub">' + esc(t.skidId || '') + ' &middot; used ' + esc(t.used) + '</span></div>' +
+          traceDetailHtml(t) + '</div>';
+      }).join('');
+  }
+
+  // Render one department section. Each row opens to its full trace (see traceDetailHtml).
+  function reportSectionHtml(sec, range, keep) {
     var rows = sec.rows || [];
     var html = '<div class="card"><h3 style="margin-top:0;font-size:15px">' + esc(sec.label) +
-      ' <span class="sub" style="font-weight:400">&middot; ' + esc(range) + ' &middot; ' + rows.length + '</span></h3>';
+      ' <span class="sub" style="font-weight:400">&middot; ' + esc(range) + ' &middot; ' + (keep.length === rows.length ? rows.length : keep.length + ' of ' + rows.length) + '</span></h3>';
     if (!rows.length) { return html + '<div class="sub">Nothing in this range.</div></div>'; }
-    var head, body;
+    if (!keep.length) { return html + '<div class="sub">No rows match the trace.</div></div>'; }
+    var head, cells, detail = traceDetailHtml;
     if (sec.key === 'litho') {
-      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>By</th><th>Litho</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.by) + '</td><td>' + money(x.litho) + '</td></tr>'; }).join('');
+      head = ['Date', 'Ticket', 'Job / Customer', 'Mill', 'Coatings', 'By', 'Litho'];
+      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), money(x.litho)]; };
     } else if (sec.key === 'lines' || sec.key === 'press') {
-      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Machine</th><th>By</th><th>Sheets</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.sheets) + '</td></tr>'; }).join('');
+      head = ['Date', 'Ticket', 'Machine', 'Mill', 'Coatings', 'By', 'Sheets'];
+      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.machine), dash(x.mill), dash(coatsShort(x.coatings)), dash(x.by), esc(x.sheets)]; };
     } else if (sec.key === 'slitter' || sec.key === 'scrolls') {
-      head = '<tr><th>Date</th><th>Load</th><th>Machine</th><th>By</th><th>Output</th><th>Cost</th><th>Litho</th><th>Cut from</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td><b>LOAD ' + esc(x.loadNo) + '</b></td><td>' + esc(x.machine) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.output) + ' ' + esc(x.unit) + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td><td class="sub">' + esc(x.from) + '</td></tr>'; }).join('');
+      head = ['Date', 'Load', 'Machine', 'By', 'Output', 'Cost', 'Litho', 'Cut from'];
+      cells = function (x) { return [esc(x.date), '<b>LOAD ' + esc(x.loadNo) + '</b>', dash(x.machine), dash(x.by), esc(x.output) + ' ' + esc(x.unit), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—', '<span class="sub">' + esc(x.from) + '</span>']; };
+      detail = sourcesDetailHtml;
     } else if (sec.key === 'direct') {
-      head = '<tr><th>Date</th><th>Ticket</th><th>Skid</th><th>Mill</th><th>Cost</th><th>Litho</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(x.ticket || '(none)') + '</td><td class="sub">' + esc(x.skidId) + '</td><td>' + esc(x.mill || '—') + '</td><td>' + (x.cost ? money(x.cost) : '—') + '</td><td>' + (x.litho ? money(x.litho) : '—') + '</td></tr>'; }).join('');
+      head = ['Date', 'Ticket', 'Job / Customer', 'Mill', 'Coatings', 'Cost', 'Litho'];
+      cells = function (x) { return [esc(x.date), '<b>' + esc(x.ticket || '(none)') + '</b>', dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—']; };
     } else if (sec.key === 'count') {
-      head = '<tr><th>Date</th><th>Session</th><th>By</th><th>Current</th><th>Promoted</th><th>WIP</th><th>Missing</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td class="sub">' + esc(x.sessionId) + '</td><td>' + esc(x.by) + '</td><td>' + esc(x.currentFound) + '</td><td>' + esc(x.promoted) + '</td><td>' + esc(x.wipFound) + '</td><td>' + esc(x.missing) + '</td></tr>'; }).join('');
+      head = ['Date', 'Session', 'By', 'Current', 'Promoted', 'WIP', 'Missing'];
+      cells = function (x) { return [esc(x.date), '<span class="sub">' + esc(x.sessionId) + '</span>', esc(x.by), esc(x.currentFound), esc(x.promoted), esc(x.wipFound), esc(x.missing)]; };
+      detail = null;
     } else {
-      head = '<tr><th>Date</th><th>Detail</th></tr>';
-      body = rows.map(function (x) { return '<tr><td>' + esc(x.date) + '</td><td>' + esc(JSON.stringify(x)) + '</td></tr>'; }).join('');
+      head = ['Date', 'Detail'];
+      cells = function (x) { return [esc(x.date), esc(JSON.stringify(x))]; };
+      detail = null;
     }
-    return html + '<div style="overflow-x:auto"><table style="margin-top:8px"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div></div>';
+    var body = keep.map(function (k) {
+      var open = detail && reportOpen[k.id];
+      return '<tr' + (detail ? ' data-rrow="' + k.id + '" style="cursor:pointer"' : '') + '>' +
+          cells(k.x).map(function (c, ci) { return '<td' + (ci === 0 ? ' style="white-space:nowrap"' : '') + '>' + (ci === 0 && detail ? (open ? '▾ ' : '▸ ') : '') + c + '</td>'; }).join('') + '</tr>' +
+        (open ? '<tr class="trace-detail"><td colspan="' + head.length + '" style="background:var(--bg)">' + detail(k.x) + '</td></tr>' : '');
+    }).join('');
+    return html + '<div style="overflow-x:auto"><table style="margin-top:8px"><thead><tr>' + head.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + body + '</tbody></table></div></div>';
+  }
+
+  // Every row the trace box is showing, with all its trace fields, as a CSV file.
+  function downloadReportCsv() {
+    if (!reportData) return;
+    var cols = ['Section', 'Date', 'Ticket', 'Skid ID', 'Job / Customer', 'Job ID', 'Mill', 'Supplier', 'End Use', 'BW', 'Tested BW', 'Type', 'Temper',
+      'Width', 'Length', 'Sheets', 'Weight', 'Coatings', 'Chem Codes', 'Coated On', 'Coated By', 'Litho', 'Cost', 'Status', 'Used On', 'Machine', 'By',
+      'Load #', 'Output', 'Cut From'];
+    var q = function (v) { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var lines = [cols.join(',')];
+    (reportData.sections || []).forEach(function (sec) {
+      if (sec.key === 'count') return;
+      (sec.rows || []).filter(reportMatches).forEach(function (x) {
+        var srcs = x.sources || [];
+        var coats = (x.coatings || []).concat.apply(x.coatings || [], srcs.map(function (t) { return t.coatings || []; }));
+        var pick = function (k) { return x[k] != null && x[k] !== '' ? x[k] : srcs.map(function (t) { return t[k] || ''; }).filter(Boolean).join(' + '); };
+        lines.push([sec.label, x.date, x.ticket || '', x.skidId || '', pick('customer'), pick('jobId'), pick('mill'), pick('supplier'), pick('endUse'),
+          pick('bw'), pick('testedBw'), pick('type'), pick('temper'), x.width, x.length, x.sheets != null ? x.sheets : x.qty, x.weight,
+          coats.map(function (c) { return c.item + (c.date ? ' ' + c.date : '') + (c.by ? ' ' + c.by : ''); }).join('; '),
+          coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),
+          x.coatedOn, x.coatedBy, x.litho, x.cost, x.status, x.usedOn, x.machine, x.by, x.loadNo, x.output != null ? x.output + ' ' + (x.unit || '') : '', x.from
+        ].map(q).join(','));
+      });
+    });
+    var name = 'report-' + reportData.start + (reportData.end !== reportData.start ? '_to_' + reportData.end : '') + '.csv';
+    try {
+      var blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (e) { toast('Could not make the file: ' + e.message); }
   }
 
   // ---------------- Steel Count (guided two-stage physical count) ----------------
