@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.43.0</span>
+      <span class="version" id="appVersion">v1.44.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -901,7 +901,6 @@
       return;
     }
     switch (state.view) {
-      case 'all': renderLanding(); return;                 // litho list -> landing
       case 'search': renderLanding(); return;              // global search -> landing
       case 'reports': renderLanding(); return;
       case 'count':
@@ -910,7 +909,9 @@
         if (countMode === 'missing' || countMode === 'history') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
         renderLanding(); return;
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': case 'openJobs': openLitho(); return;
-      case 'lithoLogin': renderLanding(); return;
+      case 'all': openLithoDept(); return;                 // litho home -> Litho Department chooser
+      case 'lithoLogin': case 'moveWip': openLithoDept(); return;
+      case 'lithoDept': renderLanding(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
       case 'prodHome': case 'slitterHome': case 'usedHome': openProduction(); return; // a section home -> chooser
       case 'prodAdd': case 'prodReview': openMetalsSection(metalsTab); return;
@@ -937,7 +938,7 @@
       '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🧮&nbsp; Litho Steel Count</button>' +
       '<button class="btn secondary" id="tileDatabase" style="width:100%;padding:22px;font-size:18px">🗄️&nbsp; Database</button>';
     document.getElementById('tileSearch').onclick = openSearch;
-    document.getElementById('tileLitho').onclick = openLithoLogin;
+    document.getElementById('tileLitho').onclick = openLithoDept;
     document.getElementById('tileProduction').onclick = openProduction;
     document.getElementById('tileReports').onclick = openReports;
     document.getElementById('tileCount').onclick = openSteelCount;
@@ -1256,6 +1257,258 @@
     showTabbar(false); showBack(true); setDept('Open Jobs');
     document.getElementById('view').innerHTML = '<div id="openJobsBar"><div class="loading">Loading open jobs&hellip;</div></div>';
     loadOpenJobsBar(tok, true);
+  }
+
+  // ---------------- Litho Department chooser: Litho Line | Move To WIP ----------------
+  function openLithoDept() {
+    state.view = 'lithoDept'; state.skid = null; state.jobId = null;
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Litho');
+    document.getElementById('view').innerHTML =
+      '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
+      '<button class="btn" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>';
+    document.getElementById('tileLithoLine').onclick = openLithoLogin;
+    document.getElementById('tileMoveWip').onclick = openMoveWip;
+  }
+
+  // ---------------- Move To WIP (foreman batch) ----------------
+  // Like Used in Production, but for coated steel: the foreman names the job/customer, picks what
+  // was done, scans the tickets (no sheet counts, no spoilage — each ticket moves whole), then one
+  // tap moves them all to WIP. The Worker does it in a single request however many tickets there
+  // are, and records the batch as an already-approved job (no review step).
+  var mwBatch = [];      // [{ skidId, ticket, status, endUse, qty }]
+  var mwCoatings = [];   // what was done: [{ group, sub, item }]
+  var mwJobName = '', mwOperator = '';
+
+  function openMoveWip() {
+    state.view = 'moveWip'; state.skid = null;
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Move To WIP');
+    renderMoveWip();
+  }
+
+  function coatCost(c) {
+    var it = rateItems(c.group, c.sub).filter(function (x) { return x.item === c.item; })[0] ||
+      (rateData.addons || []).filter(function (x) { return x.item === c.item; })[0];
+    return it ? Number(it.totalCost) || 0 : 0;
+  }
+
+  function renderMoveWip() {
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Move To WIP</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Name the job, pick what was done, then scan the tickets. No sheet counts or spoilage: each ticket moves whole. When they&rsquo;re all on the list, tap Move to WIP to send them all at once.</div>' +
+        '<div class="row">' +
+          '<div class="field"><label>Job / Customer name</label><input id="mwJobName" placeholder="e.g. Acme Cans 603 white" autocomplete="off" value="' + esc(mwJobName) + '"></div>' +
+          operatorFieldHtml('mwOperator', 'Foreman name', mwOperator || lastOperator) +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">What was done to the tickets</h3>' +
+        '<div id="mwCoatingList" class="sub" style="margin-bottom:12px"></div>' +
+        '<div class="field"><label>Can Fitting Size (sets the Size / Group)</label>' +
+          '<select id="mwCanSize"><option value="">-- pick a can size --</option></select></div>' +
+        '<div class="row">' +
+          '<div class="field"><label>Size / Group</label><select id="mwGroup"><option value="">--</option></select></div>' +
+          '<div class="field"><label>#OUT</label><select id="mwSub"><option value="">--</option></select></div>' +
+          '<div class="field"><label>Coating Item</label><select id="mwItem"><option value="">--</option></select></div>' +
+          '<div class="field"><label>Chem Code</label><select id="mwChem"><option value="">--</option></select></div>' +
+        '</div>' +
+        '<div class="sub" id="mwCostPreview" style="margin-bottom:10px"></div>' +
+        '<button class="btn secondary" id="mwAddCoatBtn">+ Add Coating</button>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">Add tickets</h3>' +
+        '<div class="row" style="align-items:flex-end">' +
+          '<div class="field" style="flex:1;margin:0"><label>Ticket / Skid #</label><input id="mwAddInput" placeholder="scan or type…" autocomplete="off"></div>' +
+          '<button class="btn" id="mwAddBtn" style="margin-left:8px">+ Add</button>' +
+        '</div>' +
+        '<div id="mwPicker" style="margin-top:8px"></div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0;font-size:15px">Tickets to move <span class="sub" id="mwCount"></span></h3>' +
+        '<div id="mwListBox"></div>' +
+        '<button class="btn success" id="mwMoveBtn" style="width:100%;margin-top:12px;padding:14px;font-size:16px">Move to WIP</button>' +
+      '</div>';
+
+    var nameEl = document.getElementById('mwJobName'), opEl = document.getElementById('mwOperator');
+    nameEl.oninput = function () { mwJobName = nameEl.value; };
+    opEl.oninput = function () { mwOperator = opEl.value; };
+
+    var canSize = document.getElementById('mwCanSize'), groupSel = document.getElementById('mwGroup'),
+      subSel = document.getElementById('mwSub'), itemSel = document.getElementById('mwItem'),
+      chemSel = document.getElementById('mwChem'), costPreview = document.getElementById('mwCostPreview');
+    ensureRateData(function () {
+      rateGroups().forEach(function (g) { var o = document.createElement('option'); o.value = g; o.textContent = g; groupSel.appendChild(o); });
+      canSizeOptions().forEach(function (cs) { var o = document.createElement('option'); o.value = cs; o.textContent = cs; canSize.appendChild(o); });
+      wireCoatingCascade(groupSel, subSel, itemSel, chemSel, costPreview, function (c) { return 'This coating adds ' + money(c) + ' per ticket.'; });
+      renderMwCoatings();
+    });
+    canSize.onchange = function () {
+      var g = groupForCanSize(canSize.value);
+      if (g && g !== groupSel.value) { groupSel.value = g; groupSel.onchange(); }
+    };
+    document.getElementById('mwAddCoatBtn').onclick = function () {
+      if (!groupSel.value || !itemSel.value) { toast('Pick a size/group and coating item'); return; }
+      mwCoatings.push({ group: groupSel.value, sub: subSel.value, item: itemSel.value });
+      renderMwCoatings();
+      groupSel.onchange();   // fresh pick for the next coating, same size kept
+    };
+
+    var input = document.getElementById('mwAddInput');
+    input.oninput = function () { renderMwPicker(input.value); };
+    input.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); mwQuickAdd(input.value); } };
+    document.getElementById('mwAddBtn').onclick = function () { mwQuickAdd(input.value); };
+    document.getElementById('mwMoveBtn').onclick = function () { mwMoveAll(groupSel, subSel, itemSel); };
+    renderMwCoatings();
+    renderMwList();
+    (mwJobName ? input : nameEl).focus();
+    ensureAllCache(function () { renderMwList(); renderMwPicker(input.value); });
+  }
+
+  function renderMwCoatings() {
+    var box = document.getElementById('mwCoatingList');
+    if (!box) return;
+    if (!mwCoatings.length) { box.innerHTML = 'Nothing added yet. Pick a coating below and tap + Add Coating.'; return; }
+    var total = 0;
+    box.innerHTML = mwCoatings.map(function (c, i) {
+      total += coatCost(c);
+      return '<div class="queue-item" style="padding:6px 0">' +
+        '<div style="min-width:0"><span class="ticket-id" style="font-size:14px">' + esc(c.item) + '</span> ' +
+        '<span class="sub">' + esc(c.group) + (c.sub ? ' / ' + esc(c.sub) : '') + '</span></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-mwrc="' + i + '">Remove</button></div>';
+    }).join('') + '<div class="sub" style="margin-top:6px">Each ticket gets all of these: ' + money(total) + ' per ticket.</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mwrc]'), function (b) {
+      b.onclick = function () { mwCoatings.splice(Number(b.getAttribute('data-mwrc')), 1); renderMwCoatings(); };
+    });
+  }
+
+  // Current steel (first coat) or WIP steel (another pass on top). Pending tickets belong to a
+  // job under review and aren't offered.
+  function mwEligible() {
+    var onList = {};
+    mwBatch.forEach(function (b) { onList[b.skidId] = true; });
+    return queueCache.filter(function (t) { return !onList[t.skidId]; });
+  }
+
+  function mwQuickAdd(term) {
+    term = (term || '').trim();
+    if (!term) return;
+    var lc = term.toLowerCase();
+    var onList = mwBatch.filter(function (b) { return String(b.ticket).toLowerCase() === lc || String(b.skidId).toLowerCase() === lc; })[0];
+    if (onList) { toast(term + ' is already on the list'); var i0 = document.getElementById('mwAddInput'); if (i0) i0.value = ''; renderMwPicker(''); return; }
+    var matches = mwEligible().filter(function (t) { return String(t.ticket).toLowerCase() === lc || String(t.skidId).toLowerCase() === lc; });
+    if (matches.length === 1) { mwAdd(matches[0].skidId); return; }
+    if (!matches.length) {
+      if (recheckOnMiss(term, function () { mwQuickAdd(term); }, true)) { toast('Checking for "' + term + '"…'); return; }
+      var other = allCache.filter(function (t) { return String(t.ticket).toLowerCase() === lc || String(t.skidId).toLowerCase() === lc; })[0];
+      toast(other ? term + ' is ' + other.status + ' — only Current or WIP tickets can move' : 'No ticket matches "' + term + '"');
+      return;
+    }
+    renderMwPicker(term);   // several match: pick from the list
+  }
+
+  function renderMwPicker(term) {
+    var c = document.getElementById('mwPicker');
+    if (!c) return;
+    term = (term || '').trim().toLowerCase();
+    if (!term) { c.innerHTML = ''; return; }
+    var rows = mwEligible().filter(function (t) {
+      return String(t.ticket).toLowerCase().indexOf(term) !== -1 || String(t.skidId).toLowerCase().indexOf(term) !== -1;
+    }).slice(0, 10);
+    if (!rows.length) {
+      var checking = recheckOnMiss(term, function () { var i = document.getElementById('mwAddInput'); if (i) renderMwPicker(i.value); });
+      c.innerHTML = '<div class="sub">No Current or WIP tickets match.' + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
+    c.innerHTML = rows.map(function (t) {
+      return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+        '<span class="sub">' + esc(t.skidId) + (t.endUse ? ' &middot; ' + esc(t.endUse) : '') + ' &middot; ' + esc(t.qty || 0) + ' sheets' +
+        (t.status === 'WIP' ? ' &middot; <span style="color:#b26a00;font-weight:600">already WIP → another pass</span>' : '') + '</span></div>' +
+        '<button class="btn success" style="padding:8px 14px" data-mwadd="' + esc(t.skidId) + '">+ Add</button></div>';
+    }).join('');
+    Array.prototype.forEach.call(c.querySelectorAll('[data-mwadd]'), function (b) {
+      b.onclick = function () { mwAdd(b.getAttribute('data-mwadd')); };
+    });
+  }
+
+  function mwAdd(skidId) {
+    var t = allCache.filter(function (x) { return x.skidId === skidId; })[0];
+    if (!t) { toast('Ticket not found'); return; }
+    if (!mwBatch.some(function (b) { return b.skidId === skidId; })) {
+      mwBatch.push({ skidId: t.skidId, ticket: t.ticket, status: t.status, endUse: t.endUse, qty: t.qty });
+    }
+    var input = document.getElementById('mwAddInput');
+    if (input) { input.value = ''; input.focus(); }
+    renderMwPicker('');
+    renderMwList();
+  }
+
+  function renderMwList() {
+    var box = document.getElementById('mwListBox'), cnt = document.getElementById('mwCount'), btn = document.getElementById('mwMoveBtn');
+    if (!box) return;
+    if (cnt) cnt.textContent = mwBatch.length ? '(' + mwBatch.length + ')' : '';
+    if (btn) { btn.disabled = !mwBatch.length; btn.textContent = mwBatch.length ? 'Move ' + mwBatch.length + ' to WIP' : 'Move to WIP'; }
+    if (!mwBatch.length) { box.innerHTML = '<div class="sub">Nothing added yet.</div>'; return; }
+    box.innerHTML = mwBatch.map(function (b) {
+      return '<div class="queue-item" style="padding:8px 0"><div style="min-width:0">' +
+        '<span class="ticket-id" style="font-size:15px">' + esc(b.ticket || '(no ticket)') + '</span> ' +
+        '<span class="sub">' + esc(b.skidId) + ' &middot; ' + esc(b.qty || 0) + ' sheets' +
+        (b.status === 'WIP' ? ' &middot; <span style="color:#b26a00;font-weight:600">another pass</span>' : '') + '</span></div>' +
+        '<button class="btn danger" style="padding:8px 12px" data-mwrem="' + esc(b.skidId) + '">Remove</button></div>';
+    }).join('');
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mwrem]'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-mwrem');
+        mwBatch = mwBatch.filter(function (x) { return x.skidId !== id; });
+        renderMwList();
+        var i = document.getElementById('mwAddInput'); if (i) renderMwPicker(i.value);
+      };
+    });
+  }
+
+  function mwMoveAll(groupSel, subSel, itemSel) {
+    var name = (document.getElementById('mwJobName').value || '').trim();
+    var op = (document.getElementById('mwOperator').value || '').trim();
+    // A coating still sitting in the picker counts, so it isn't lost (a copy: nothing is kept
+    // until the move goes through).
+    var coatings = mwCoatings.slice();
+    if (groupSel.value && itemSel.value && !coatings.some(function (c) { return c.group === groupSel.value && c.sub === subSel.value && c.item === itemSel.value; })) {
+      coatings.push({ group: groupSel.value, sub: subSel.value, item: itemSel.value });
+    }
+    if (!name) { toast('Enter the job / customer name'); document.getElementById('mwJobName').focus(); return; }
+    if (!op) { toast('Enter the foreman name'); return; }
+    if (!coatings.length) { toast('Pick what was done (add a coating)'); return; }
+    if (!mwBatch.length) { toast('Add at least one ticket'); return; }
+    var ids = mwBatch.map(function (b) { return b.skidId; });
+    var n = ids.length, per = coatings.reduce(function (s, c) { return s + coatCost(c); }, 0);
+    var wipN = mwBatch.filter(function (b) { return b.status === 'WIP'; }).length;
+    showConfirm('Move ' + n + ' ticket' + (n === 1 ? '' : 's') + ' to WIP?',
+      'Job: ' + name + '. Each ticket gets ' + coatings.map(function (c) { return c.item; }).join(' + ') + ' (' + money(per) + ' per ticket) and goes straight to WIP with no review step.' +
+        (wipN ? ' ' + wipN + ' already in WIP get these coatings on top.' : ''),
+      function () {
+        var btn = document.getElementById('mwMoveBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+        lastOperator = op;
+        runMutation('moveToWip', [name, op, coatings, ids, newOpId()],
+          function (res) {
+            var moved = (res && res.moved) || [];
+            var skipped = (res && res.skipped) || [];
+            moved.forEach(function (m) { markCacheStatus(m.skidId, 'WIP'); });
+            mwBatch = [];
+            mwCoatings = []; mwJobName = '';
+            showInfo('Moved to WIP',
+              moved.length + ' ticket' + (moved.length === 1 ? '' : 's') + ' moved to WIP' + (res && res.jobId ? ' (job ' + res.jobId + ')' : '') + '.' +
+              (skipped.length ? ' ' + skipped.length + ' not moved: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''),
+              function () { renderMoveWip(); });
+          },
+          function (err) {
+            showModal({ title: 'Could not move the tickets', confirmText: 'OK',
+              message: err.message + ' — Tap Move to WIP again without changing anything: it finishes whatever didn\'t save, and never coats a ticket twice.' });
+            renderMwList();
+          });
+      }, 'Move to WIP');
   }
 
   // ---------------- Global "Search for a Ticket" (across every department) ----------------

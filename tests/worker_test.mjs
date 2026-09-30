@@ -365,5 +365,66 @@ await concurrency(envBase, 'in-worker lock');
   ok('ticket list reports Tested BW', String(all.result.filter((t) => t.skidId === 'SKD-000001')[0].testedBw) === '75.2');
 }
 
+// 17. Move To WIP: the foreman's batch — every ticket gets the recipe and goes straight to WIP,
+//     in a fixed handful of Google calls, retry-safe, with ineligible tickets skipped.
+{ const f = fresh();
+  const extra = [];
+  for (let i = 7; i <= 46; i++) extra.push(skid(String(300 + i), 'SKD-' + String(i).padStart(6, '0'), 'Current', 100, 500));
+  extra.push(skid('USED-1', 'SKD-000047', 'Used', 100, 500));
+  f.book(SID).tabs['Steel Tickets'].rows.push(...extra);
+  const recipe = [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }];
+  const noName = await call('moveToWip', ['', 'Ann', recipe, ['SKD-000001'], 'op-17-x']);
+  ok('job/customer name required', !noName.ok && /name/i.test(noName.error), noName);
+  const noCoat = await call('moveToWip', ['Acme', 'Ann', [], ['SKD-000001'], 'op-17-y']);
+  ok('a coating is required', !noCoat.ok, noCoat);
+  const noneOk = await call('moveToWip', ['Acme', 'Ann', recipe, ['SKD-000047', 'SKD-999999'], 'op-17-z']);
+  ok('batch with nothing movable refused', !noneOk.ok && /USED-1/.test(noneOk.error), noneOk);
+  ok('refused batch made no job', f.rows(SID, 'Litho Jobs').length === 0, f.rows(SID, 'Litho Jobs'));
+  // A Pending skid (on another job) is skipped, not taken.
+  const j = await call('createJob', ['other job', 'Ann', [recipe[0]], '', 'op-17-j']);
+  await call('jobAddTicket', [j.result.jobId, 'SKD-000002', '', false, '', 'Ann', 'op-17-p', '', '']);
+
+  const ids = ['SKD-000001', 'SKD-000002', 'SKD-000003', 'SKD-000047'];
+  for (let i = 7; i <= 46; i++) ids.push('SKD-' + String(i).padStart(6, '0'));
+  // The log append fails outright the first time: nothing is lost, the retry finishes the job.
+  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  const first = await call('moveToWip', ['Acme Cans', 'Joel', recipe, ids, 'op-17-m']);
+  ok('failed log append reported', !first.ok, first);
+  const n0 = f.log.length;
+  const r = await call('moveToWip', ['Acme Cans', 'Joel', recipe, ids, 'op-17-m']);
+  ok('move ok', r.ok, r);
+  const used = f.log.length - n0;
+  ok('42-ticket batch well under 50 Google calls', used < 20, used);
+  ok('42 moved', r.result.moved.length === 42, r.result.moved.length);
+  ok('Pending and Used tickets skipped with reasons', r.result.skipped.length === 2
+    && r.result.skipped.some((x) => x.skidId === 'SKD-000002' && /Pending/.test(x.reason))
+    && r.result.skipped.some((x) => x.skidId === 'SKD-000047' && x.reason === 'Used'), r.result.skipped);
+  const jid = r.result.jobId;
+  const s1 = skidRow(f, 'SKD-000001');
+  ok('Current ticket -> WIP with the recipe cost', s1['Status'] === 'WIP' && Number(s1['Litho']) === 6.5 && s1['Job ID'] === jid && s1['First Coated By'] === 'Joel', s1);
+  const s3 = skidRow(f, 'SKD-000003');
+  ok('WIP ticket gets the coats on top', s3['Status'] === 'WIP' && Number(s3['Litho']) === 16.5 && !s3['First Coated By'], s3);
+  ok('Pending ticket left on its job', skidRow(f, 'SKD-000002')['Job ID'] === j.result.jobId && skidRow(f, 'SKD-000002')['Status'] === 'Pending');
+  ok('sheet count untouched', Number(s1['QTY/LOAD']) === 1000, s1['QTY/LOAD']);
+  const tx1 = txFor(f, 'SKD-000001');
+  ok('two coating rows, passes 1 and 2, running total', tx1.length === 2 && tx1.map((t) => Number(t['Pass Number'])).join() === '1,2'
+    && Number(tx1[1]['Running Total After Pass']) === 6.5 && tx1[0]['Job Name'] === 'Acme Cans' && tx1[0]['Job ID'] === jid, tx1);
+  ok('80+2 coating rows written once', f.rows(SID, 'Transactions').filter((t) => t['Job ID'] === jid).length === 84, f.rows(SID, 'Transactions').filter((t) => t['Job ID'] === jid).length);
+  const job = f.rows(SID, 'Litho Jobs').filter((x) => x['Job ID'] === jid);
+  ok('one Approved job row', job.length === 1 && job[0]['Status'] === 'Approved' && job[0]['Description'] === 'Acme Cans' && job[0]['Approved By'] === 'Joel', job);
+  ok('job ticket count', Number(job[0]['Ticket Count']) === 42, job[0] && job[0]['Ticket Count']);
+  const again = await call('moveToWip', ['Acme Cans', 'Joel', recipe, ids, 'op-17-m']);
+  ok('retry of a finished batch changes nothing', again.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 6.5 && txFor(f, 'SKD-000001').length === 2
+    && f.rows(SID, 'Litho Jobs').filter((x) => x['Description'] === 'Acme Cans').length === 1, [again, skidRow(f, 'SKD-000001')['Litho']]);
+  const d = await call('getJobDetail', [jid]);
+  ok('job detail lists the moved tickets', d.ok && d.result.tickets.length === 42 && d.result.coatings.length === 2, d.result && d.result.tickets.length);
+  const open = await call('getOpenJobs', []);
+  ok('moved batch is not an open job', open.ok && !open.result.some((x) => x.jobId === jid));
+  // An unclear failure after the log rows landed: the check sees them, nothing is doubled.
+  f.faults.push({ match: isTxAppend, mode: 'after', status: 503, times: 1 });
+  const r2 = await call('moveToWip', ['Beta', 'Joel', [recipe[1]], ['SKD-000004'], 'op-17-n']);
+  ok('ambiguous log append: ok, one row', r2.ok && txFor(f, 'SKD-000004').length === 1 && Number(skidRow(f, 'SKD-000004')['Litho']) === 4, [r2, txFor(f, 'SKD-000004').length]);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'testedbw-50', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'movewip-51', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -257,6 +257,8 @@ async function handle(fn, args, env) {
       return createJob(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket, testedBW)
       return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+    case 'moveToWip': // (description, operator, coatings[], skidIds[], opId) foreman batch: coat + straight to WIP
+      return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
@@ -495,6 +497,13 @@ async function makeSheets(env) {
       const tabs = [tabOfRange(rangeA1)];
       return writing(tabs, () => callChecked(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
         json({ values: [row] }), freshCheck(tabs, landed)));
+    },
+    // Several rows in ONE call (a batch of coating log rows). An append lands all its rows or
+    // none, so landed() only needs to check for one of them.
+    async appendMany(rangeA1, rows, landed) {
+      const tabs = [tabOfRange(rangeA1)];
+      return writing(tabs, () => callChecked(base + '/values/' + encodeURIComponent(rangeA1) + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
+        json({ values: rows }), freshCheck(tabs, landed)));
     },
     async update(rangeA1, values) {
       return writing([tabOfRange(rangeA1)], () => call(base + '/values/' + encodeURIComponent(rangeA1) + '?valueInputOption=RAW',
@@ -1530,6 +1539,128 @@ async function approveJob(sheets, jobId, operator, opId) {
   }
   await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Status': 'Approved', 'Approved At': nowStamp(), 'Approved By': operator || '' });
   return getJobDetail(sheets, jobId);
+}
+
+// ---- moveToWip: the foreman's batch move (Litho Department -> Move To WIP) ----
+// The foreman names the job/customer, picks what was done (one or more coatings) and scans the
+// tickets. Every ticket gets the whole recipe at full sheet count (no spoilage, no partials) and
+// goes straight to WIP — no Pending/review step. The batch is recorded as a Litho Jobs row that is
+// already Approved, so it shows in Review Jobs history with its tickets and cost.
+// Built for big batches on the Workers Free plan's 50-Google-calls-per-request cap: the whole
+// batch is a fixed handful of calls (one read of each tab, one job row, ONE Steel Tickets write,
+// ONE append of all the coating log rows), however many tickets there are.
+// Retry-safe: the job row is found again by its Op ID, each skid's change stamps
+// "<opId>#<skidId>" in Last Op ID (same write), and each coating row carries
+// "<opId>#<skidId>#c<i>" — so a retry skips what landed and writes only what's missing.
+// Tickets that can't move (Pending on a job, Used, not found...) are skipped and reported.
+const MOVE_WIP_MAX = 150;
+async function moveToWip(sheets, description, operator, coatings, skidIds, opId) {
+  description = String(description || '').trim();
+  operator = String(operator || '').trim();
+  if (!description) throw new Error('Enter the job / customer name.');
+  if (!operator) throw new Error('Enter the foreman name.');
+  const ids = [];
+  (skidIds || []).forEach((s) => { const v = String(s || '').trim(); if (v && ids.indexOf(v) === -1) ids.push(v); });
+  if (!ids.length) throw new Error('Add at least one ticket.');
+  if (ids.length > MOVE_WIP_MAX) throw new Error('Move at most ' + MOVE_WIP_MAX + ' tickets at a time.');
+  await validateCoatings(sheets, coatings);
+  const recipe = coatings.map((c) => ({ group: c.group, sub: c.sub || '', item: c.item }));
+  const matches = [];
+  for (const c of recipe) matches.push(await findRate(sheets, c.group, c.sub, c.item));
+  const recipeCost = Math.round(matches.reduce((n, m) => n + m.totalCost, 0) * 100) / 100;
+  const op = opId || autoOpId();
+  await normalizeMasterRows(sheets);
+
+  const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
+  const ops = await opIdSet(sheets);
+  const tx = await readObjects(sheets, TRANSACTIONS);
+  const maxPass = {};   // skid -> highest pass so far (legacy rows without a Skid ID match by ticket)
+  const bump = (k, p) => { if (k && !(maxPass[k] >= p)) maxPass[k] = p; };
+  tx.rows.forEach((r) => {
+    const sid = String(r['Skid ID'] || '').trim();
+    bump(sid ? 'S:' + sid : 'T:' + String(r['Ticket'] || '').trim(), num(r['Pass Number']));
+  });
+  const passAfter = (o) => Math.max(maxPass['S:' + String(o['Skid ID']).trim()] || 0, maxPass['T:' + String(o['Ticket'] || '').trim()] || 0);
+
+  // Work out every ticket first, so nothing is written for a batch where no ticket can move.
+  const plan = [], skipped = [];
+  ids.forEach((skidId) => {
+    const o = master.rows.filter((r) => String(r['Skid ID']).trim() === skidId)[0];
+    if (!o) { skipped.push({ skidId, reason: 'not found' }); return; }
+    const step = subOp(op, skidId);
+    const st = o['Status'] || STATUS.CURRENT;
+    if (stampedBy(o, step)) { plan.push({ o, step, resumed: true }); return; }   // an earlier attempt changed it
+    if (st === STATUS.PENDING) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'Pending on job ' + (o['Job ID'] || '') }); return; }
+    if (st !== STATUS.CURRENT && st !== STATUS.WIP) { skipped.push({ skidId, ticket: o['Ticket'], reason: st }); return; }
+    plan.push({ o, step, resumed: false, wasWip: st === STATUS.WIP });
+  });
+  if (!plan.length) {
+    throw new Error('None of these tickets can be moved: ' + skipped.map((x) => (x.ticket || x.skidId) + ' (' + x.reason + ')').join(', '));
+  }
+
+  // The job row (Approved from the start). A retry finds it again by its Op ID.
+  const jobs = await readTab(sheets, JOBS);
+  let job = jobs.headers.indexOf('Op ID') !== -1 ? jobs.rows.filter((r) => String(r['Op ID'] || '').trim() === op)[0] : null;
+  let jobId;
+  if (job) jobId = job['Job ID'];
+  else {
+    jobId = fmtId('JOB-', maxIdNumber(jobs.rows, 'Job ID', 'JOB-') + 1);
+    let hdr = jobs.headers;
+    for (const col of ['Op ID', 'Approved At', 'Approved By']) hdr = (await ensureColumn(sheets, JOBS, hdr, col)).headers;
+    const ts = nowStamp();
+    await appendRowObj(sheets, JOBS, hdr, {
+      'Job ID': jobId, 'Created At': ts, 'Created By': operator, 'Description': description,
+      'Coatings': coatingSummary(recipe), 'Coatings JSON': JSON.stringify(recipe), 'Ticket Count': plan.length, 'Status': 'Approved',
+      'Notes': 'Moved to WIP by ' + operator + ' (no review step)', 'Approved At': ts, 'Approved By': operator, 'Op ID': op,
+    });
+  }
+
+  // ONE write for every skid's change (status, cost, job, Last Op ID).
+  const ts = nowStamp();
+  const data = [], rows = [], moved = [];
+  plan.forEach((p) => {
+    const o = p.o, skidId = String(o['Skid ID']).trim();
+    const before = p.resumed ? Math.round((num(o['Litho']) - recipeCost) * 100) / 100 : num(o['Litho']);
+    const after = p.resumed ? num(o['Litho']) : Math.round((before + recipeCost) * 100) / 100;
+    if (!p.resumed) {
+      const fields = { 'Status': STATUS.WIP, 'Job ID': jobId, 'Litho': after, 'Row': '',
+        'Approved At': ts, 'Approved By': operator, 'Last Updated At': ts, 'Last Updated By': operator, 'Last Op ID': p.step };
+      if (!p.wasWip) { fields['First Coated At'] = ts; fields['First Coated By'] = operator; }
+      Object.keys(fields).forEach((name) => {
+        if (master.map[name]) data.push({ range: "'" + MASTER + "'!" + colLetter(master.map[name]) + o.__row, values: [[fields[name]]] });
+      });
+    }
+    // Pass numbers: a resumed skid may already have some of this batch's rows logged.
+    let pass = passAfter(o), running = before;
+    matches.forEach((m, i) => {
+      running = Math.round((running + m.totalCost) * 100) / 100;
+      const rowOp = subOp(op, skidId + '#c' + i);
+      if (ops.has(rowOp)) return;
+      pass++;
+      rows.push({ 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': pass, 'Operator': operator,
+        'Group': recipe[i].group, 'Sub-Variant': recipe[i].sub, 'Item': recipe[i].item, 'Chem Code': m.chemCode || '',
+        'Application Cost': m.appCost, 'Line Cost': m.lineCost, 'Pass Total Cost': m.totalCost, 'Running Total After Pass': running,
+        'Notes': 'Moved to WIP', 'Job Name': description, 'Job ID': jobId, 'Skid ID': skidId, 'Op ID': rowOp });
+    });
+    moved.push({ skidId, ticket: o['Ticket'], litho: after, wasWip: !!p.wasWip });
+  });
+  if (data.length) await sheets.batchUpdate(data);
+
+  // ONE append for all the coating log rows.
+  if (rows.length) {
+    let headers = await tabHeaders(sheets, TRANSACTIONS);
+    for (const col of ['Op ID', 'Job ID']) if (headers.indexOf(col) === -1) headers = (await ensureColumn(sheets, TRANSACTIONS, headers, col)).headers;
+    const values = rows.map((r) => headers.map((h) => (r.hasOwnProperty(h) ? r[h] : '')));
+    const firstOp = rows[0]['Op ID'];
+    await sheets.appendMany(TRANSACTIONS, values, () => columnHas(sheets, TRANSACTIONS, headers, 'Op ID', firstOp));
+    rows.forEach((r) => ops.add(r['Op ID']));
+  }
+
+  if (job) {   // a retry: keep the count right (harmless if unchanged)
+    const n = (await readTab(sheets, MASTER)).rows.filter((r) => String(r['Job ID']).trim() === String(jobId).trim()).length;
+    await stampCells(sheets, JOBS, job.__row, jobs.map, { 'Ticket Count': n });
+  }
+  return { ok: true, jobId, description, coatings: recipe, moved, skipped, perTicket: recipeCost };
 }
 
 // Delete a job created by mistake. Only unapproved jobs with NO tickets can be deleted — an
