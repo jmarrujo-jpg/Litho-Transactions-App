@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.44.0</span>
+      <span class="version" id="appVersion">v1.44.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1265,8 +1265,11 @@
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Litho');
     document.getElementById('view').innerHTML =
-      '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
-      '<button class="btn" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>';
+      // Litho Line is temporarily disabled (greyed out, not clickable) like the unused Metals
+      // departments — all its code stays; remove the `disabled` attribute to turn it back on.
+      '<button class="btn" id="tileLithoLine" disabled style="' + BIG_BTN + '">Litho Line</button>' +
+      '<div class="sub" style="margin:-6px 0 14px;text-align:center">Litho Line is coming soon.</div>' +
+      '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>';
     document.getElementById('tileLithoLine').onclick = openLithoLogin;
     document.getElementById('tileMoveWip').onclick = openMoveWip;
   }
@@ -1278,7 +1281,7 @@
   // are, and records the batch as an already-approved job (no review step).
   var mwBatch = [];      // [{ skidId, ticket, status, endUse, qty }]
   var mwCoatings = [];   // what was done: [{ group, sub, item }]
-  var mwJobName = '', mwOperator = '';
+  var mwJobName = '';   // no name field: only one or two foremen use this screen
 
   function openMoveWip() {
     state.view = 'moveWip'; state.skid = null;
@@ -1299,10 +1302,7 @@
       '<div class="card">' +
         '<h3 style="margin-top:0">Move To WIP</h3>' +
         '<div class="sub" style="margin-bottom:12px">Name the job, pick what was done, then scan the tickets. No sheet counts or spoilage: each ticket moves whole. When they&rsquo;re all on the list, tap Move to WIP to send them all at once.</div>' +
-        '<div class="row">' +
-          '<div class="field"><label>Job / Customer name</label><input id="mwJobName" placeholder="e.g. Acme Cans 603 white" autocomplete="off" value="' + esc(mwJobName) + '"></div>' +
-          operatorFieldHtml('mwOperator', 'Foreman name', mwOperator || lastOperator) +
-        '</div>' +
+        '<div class="field"><label>Job / Customer name</label><input id="mwJobName" placeholder="e.g. Acme Cans 603 white" autocomplete="off" value="' + esc(mwJobName) + '"></div>' +
       '</div>' +
       '<div class="card">' +
         '<h3 style="margin-top:0;font-size:15px">What was done to the tickets</h3>' +
@@ -1332,9 +1332,8 @@
         '<button class="btn success" id="mwMoveBtn" style="width:100%;margin-top:12px;padding:14px;font-size:16px">Move to WIP</button>' +
       '</div>';
 
-    var nameEl = document.getElementById('mwJobName'), opEl = document.getElementById('mwOperator');
+    var nameEl = document.getElementById('mwJobName');
     nameEl.oninput = function () { mwJobName = nameEl.value; };
-    opEl.oninput = function () { mwOperator = opEl.value; };
 
     var canSize = document.getElementById('mwCanSize'), groupSel = document.getElementById('mwGroup'),
       subSel = document.getElementById('mwSub'), itemSel = document.getElementById('mwItem'),
@@ -1470,7 +1469,6 @@
 
   function mwMoveAll(groupSel, subSel, itemSel) {
     var name = (document.getElementById('mwJobName').value || '').trim();
-    var op = (document.getElementById('mwOperator').value || '').trim();
     // A coating still sitting in the picker counts, so it isn't lost (a copy: nothing is kept
     // until the move goes through).
     var coatings = mwCoatings.slice();
@@ -1478,7 +1476,6 @@
       coatings.push({ group: groupSel.value, sub: subSel.value, item: itemSel.value });
     }
     if (!name) { toast('Enter the job / customer name'); document.getElementById('mwJobName').focus(); return; }
-    if (!op) { toast('Enter the foreman name'); return; }
     if (!coatings.length) { toast('Pick what was done (add a coating)'); return; }
     if (!mwBatch.length) { toast('Add at least one ticket'); return; }
     var ids = mwBatch.map(function (b) { return b.skidId; });
@@ -1490,8 +1487,7 @@
       function () {
         var btn = document.getElementById('mwMoveBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
-        lastOperator = op;
-        runMutation('moveToWip', [name, op, coatings, ids, newOpId()],
+        runMutation('moveToWip', [name, '', coatings, ids, newOpId()],
           function (res) {
             var moved = (res && res.moved) || [];
             var skipped = (res && res.skipped) || [];

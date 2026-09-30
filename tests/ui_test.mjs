@@ -40,6 +40,7 @@ const R = (result) => ({ ok: true, result });
 // Litho Department asks for a name first.
 async function enterLitho(page, name) {
   if (!(await page.$('#tileLithoLine'))) await page.click('#tileLitho');   // Back from Litho lands on the chooser
+  await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; });   // greyed out for now (see 17)
   await page.click('#tileLithoLine');
   await page.waitForSelector('#lithoUserSelect');
   await page.selectOption('#lithoUserSelect', { label: name });
@@ -411,6 +412,7 @@ const base = {
     getOpenJobs: () => R([{ jobId: 'JOB-000004', description: 'Blue run', ticketCount: 2, coatings: 'SIZE' }]),
   }));
   await page.click('#tileLitho');
+  await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; });
   await page.click('#tileLithoLine');
   await page.waitForSelector('#lithoUserSelect');
   const names = await page.$$eval('#lithoUserSelect option', (os) => os.map((o) => o.textContent));
@@ -457,7 +459,7 @@ const base = {
   await page.click('#backBtn'); await page.waitForTimeout(150);
   ok('Back from the chooser goes to the landing screen', !!(await page.$('#tileLitho')));
   await page.reload(); await page.waitForTimeout(300);
-  await page.click('#tileLitho'); await page.click('#tileLithoLine'); await page.waitForTimeout(150);
+  await page.click('#tileLitho'); await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; }); await page.click('#tileLithoLine'); await page.waitForTimeout(150);
   ok('after a refresh nobody is pre-selected', (await page.$eval('#lithoUserSelect', (el) => el.value)) === '');
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
@@ -515,6 +517,9 @@ const base = {
   await page.click('#tileLitho'); await page.waitForTimeout(100);
   ok('Litho Department offers Litho Line and Move To WIP', !!(await page.$('#tileLithoLine')) && !!(await page.$('#tileMoveWip')));
   ok('the chooser loads nothing', calls.filter((c) => c.fn === 'getAllTickets').length === 0);
+  ok('Litho Line greyed out and not clickable', await page.$eval('#tileLithoLine', (b) => b.disabled) && (await page.textContent('#view')).includes('coming soon'));
+  await page.click('#tileLithoLine', { force: true }); await page.waitForTimeout(100);
+  ok('tapping Litho Line does nothing', !(await page.$('#lithoUserSelect')) && !!(await page.$('#tileMoveWip')));
   await page.click('#tileMoveWip'); await page.waitForTimeout(300);
   ok('Move To WIP screen', !!(await page.$('#mwJobName')) && !!(await page.$('#mwAddInput')) && !!(await page.$('#mwGroup')));
   ok('no sheet count or spoilage fields', !(await page.$('#mwListBox input')) && !/spoilage/i.test(await page.$eval('#view', (v) => Array.from(v.querySelectorAll('label')).map((l) => l.textContent).join('|'))));
@@ -523,7 +528,7 @@ const base = {
   ok('Move is disabled with nothing on the list', calls.filter((c) => c.fn === 'moveToWip').length === 0);
 
   await page.fill('#mwJobName', 'Acme Cans');
-  await page.fill('#mwOperator', 'Dave');
+  ok('no name field', !(await page.$('#mwOperator')));
   await page.selectOption('#mwGroup', '603X408'); await page.waitForTimeout(50);
   await page.selectOption('#mwSub', '10-OUT'); await page.waitForTimeout(50);
   await page.selectOption('#mwItem', 'SIZE');
@@ -552,7 +557,7 @@ const base = {
   await page.click('#modalOk'); await page.waitForTimeout(400);
   const mv = calls.filter((c) => c.fn === 'moveToWip');
   ok('one request per tap, all tickets in it', mv.length === 2 && JSON.stringify(mv[1].args[3]) === JSON.stringify(['SKD-1', 'SKD-2', 'SKD-3']), mv.map((c) => c.args[3]));
-  ok('sends job name, foreman, both coatings', mv[1].args[0] === 'Acme Cans' && mv[1].args[1] === 'Dave' && mv[1].args[2].map((c) => c.item).join() === 'SIZE,VARNISH', mv[1].args);
+  ok('sends job name and both coatings, no name', mv[1].args[0] === 'Acme Cans' && mv[1].args[1] === '' && mv[1].args[2].map((c) => c.item).join() === 'SIZE,VARNISH', mv[1].args);
   ok('retry after a failure reuses the same opId', mv[0].args[4] === mv[1].args[4], [mv[0].args[4], mv[1].args[4]]);
   ok('success message', ((await page.textContent('#modalRoot')) || '').includes('3 tickets moved to WIP'));
   ok('moved tickets now WIP in the local list', await page.evaluate(() => allCache.filter((t) => ['SKD-1', 'SKD-2'].indexOf(t.skidId) !== -1).every((t) => t.status === 'WIP')));

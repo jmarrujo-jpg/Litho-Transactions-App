@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'movewip-51', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'movewip-52', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1556,9 +1556,8 @@ async function approveJob(sheets, jobId, operator, opId) {
 const MOVE_WIP_MAX = 150;
 async function moveToWip(sheets, description, operator, coatings, skidIds, opId) {
   description = String(description || '').trim();
-  operator = String(operator || '').trim();
+  operator = String(operator || '').trim() || 'Foreman';   // the screen has no name field (one or two foremen use it)
   if (!description) throw new Error('Enter the job / customer name.');
-  if (!operator) throw new Error('Enter the foreman name.');
   const ids = [];
   (skidIds || []).forEach((s) => { const v = String(s || '').trim(); if (v && ids.indexOf(v) === -1) ids.push(v); });
   if (!ids.length) throw new Error('Add at least one ticket.');
@@ -1611,7 +1610,7 @@ async function moveToWip(sheets, description, operator, coatings, skidIds, opId)
     await appendRowObj(sheets, JOBS, hdr, {
       'Job ID': jobId, 'Created At': ts, 'Created By': operator, 'Description': description,
       'Coatings': coatingSummary(recipe), 'Coatings JSON': JSON.stringify(recipe), 'Ticket Count': plan.length, 'Status': 'Approved',
-      'Notes': 'Moved to WIP by ' + operator + ' (no review step)', 'Approved At': ts, 'Approved By': operator, 'Op ID': op,
+      'Notes': 'Moved to WIP (no review step)', 'Approved At': ts, 'Approved By': operator, 'Op ID': op,
     });
   }
 

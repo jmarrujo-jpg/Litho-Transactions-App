@@ -422,7 +422,8 @@ await concurrency(envBase, 'in-worker lock');
   ok('moved batch is not an open job', open.ok && !open.result.some((x) => x.jobId === jid));
   // An unclear failure after the log rows landed: the check sees them, nothing is doubled.
   f.faults.push({ match: isTxAppend, mode: 'after', status: 503, times: 1 });
-  const r2 = await call('moveToWip', ['Beta', 'Joel', [recipe[1]], ['SKD-000004'], 'op-17-n']);
+  const r2 = await call('moveToWip', ['Beta', '', [recipe[1]], ['SKD-000004'], 'op-17-n']);
+  ok('no name given: recorded as Foreman', r2.ok && skidRow(f, 'SKD-000004')['First Coated By'] === 'Foreman', skidRow(f, 'SKD-000004'));
   ok('ambiguous log append: ok, one row', r2.ok && txFor(f, 'SKD-000004').length === 1 && Number(skidRow(f, 'SKD-000004')['Litho']) === 4, [r2, txFor(f, 'SKD-000004').length]);
 }
 
