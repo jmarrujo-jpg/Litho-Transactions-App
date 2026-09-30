@@ -611,13 +611,13 @@ const base = {
   await page.close();
 }
 
-// ---- 19. Move To WIP: a WIP ticket opens to the coatings already on it, and one can be removed
+// ---- 19. Move To WIP: a WIP ticket opens to its coatings; marked removals go with the move
 { const coats = [{ passNumber: 1, group: '603X408', sub: '10-OUT', item: 'SIZE', chemCode: 'C1', cost: 2.5 },
     { passNumber: 2, group: '603X408', sub: '10-OUT', item: 'VARNISH', chemCode: 'C2', cost: 4 }];
   const { page, calls } = await boot(Object.assign({}, base, {
     getAllTickets: () => R([ticket('SKD-1', '501', 'Current'), ticket('SKD-3', '503', 'WIP')]),
     getTicketCard: (a) => R({ skidId: a[0], ticket: '503', status: 'WIP', litho: 6.5, coatings: coats.slice() }),
-    removeTicketCoating: (a) => R({ skidId: a[0], ticket: '503', status: 'WIP', litho: 2.5, coatings: coats.filter((c) => String(c.passNumber) !== String(a[1])) }),
+    moveToWip: (a) => R({ ok: true, jobId: 'JOB-000010', moved: a[3].map((id) => ({ skidId: id, removed: id === 'SKD-3' ? ['VARNISH'] : [] })), skipped: [] }),
   }));
   await page.click('#tileLitho'); await page.click('#tileMoveWip'); await page.waitForTimeout(300);
   for (const t of ['501', '503']) { await page.fill('#mwAddInput', t); await page.press('#mwAddInput', 'Enter'); await page.waitForTimeout(100); }
@@ -630,14 +630,79 @@ const base = {
   ok('drop-down closes', !(await page.textContent('#mwListBox')).includes('VARNISH'));
   await page.click('[data-mwcoats="SKD-3"]'); await page.waitForTimeout(100);
   ok('reopening does not reload', calls.filter((c) => c.fn === 'getTicketCard').length === 1);
-  await page.click('[data-mwvoid="SKD-3"][data-pass="2"]'); await page.waitForSelector('#modalOk');
-  ok('asks before removing, says it saves now', ((await page.textContent('#modalRoot')) || '').includes('Remove VARNISH from 503') && (await page.textContent('#modalRoot')).includes('saves straight away'));
-  await page.click('#modalOk'); await page.waitForTimeout(300);
-  const rm = calls.filter((c) => c.fn === 'removeTicketCoating');
-  ok('removal sent for that coat', rm.length === 1 && rm[0].args[0] === 'SKD-3' && String(rm[0].args[1]) === '2' && rm[0].args[2] === 'Foreman', rm.map((c) => c.args));
+  await page.click('[data-mwvoid="SKD-3"][data-pass="2"]'); await page.waitForTimeout(100);
   txt = await page.textContent('#mwListBox');
-  ok('list updates: coat gone, new cost', !txt.includes('VARNISH') && txt.includes('SIZE') && txt.includes('$2.50'), txt);
-  ok('ticket stays on the move list', (await page.$$('#mwListBox [data-mwrem]')).length === 2);
+  ok('marking a coating saves nothing yet', calls.filter((c) => c.fn === 'removeTicketCoating' || c.fn === 'moveToWip').length === 0);
+  ok('marked coat shows it comes off at Move, with the new cost', txt.includes('comes off at Move') && txt.includes('after removals: $2.50') && txt.includes('1 to remove'), txt);
+  await page.click('[data-mwvoid="SKD-3"][data-pass="2"]'); await page.waitForTimeout(100);
+  ok('Undo clears the mark', !(await page.textContent('#mwListBox')).includes('comes off at Move'));
+  await page.click('[data-mwvoid="SKD-3"][data-pass="1"]'); await page.waitForTimeout(100);
+  // Taking the ticket off the list drops its marks; adding it back starts clean.
+  await page.click('[data-mwrem="SKD-3"]'); await page.waitForTimeout(100);
+  await page.fill('#mwAddInput', '503'); await page.press('#mwAddInput', 'Enter'); await page.waitForTimeout(100);
+  await page.click('[data-mwcoats="SKD-3"]'); await page.waitForTimeout(150);
+  ok('removing the ticket from the list drops its marks', !(await page.textContent('#mwListBox')).includes('comes off at Move'));
+  await page.click('[data-mwvoid="SKD-3"][data-pass="2"]'); await page.waitForTimeout(100);
+  await page.fill('#mwJobName', 'Acme');
+  await page.selectOption('#mwGroup', '603X408'); await page.waitForTimeout(50);
+  await page.selectOption('#mwSub', '10-OUT'); await page.waitForTimeout(50);
+  await page.selectOption('#mwItem', 'SIZE');
+  await page.click('#mwMoveBtn'); await page.waitForSelector('#modalOk');
+  ok('confirm lists the removal', ((await page.textContent('#modalRoot')) || '').includes('Also takes off 1 coating: VARNISH from 503'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const mv = calls.filter((c) => c.fn === 'moveToWip');
+  ok('removals go with the move, in one request', mv.length === 1 && JSON.stringify(mv[0].args[5]) === JSON.stringify({ 'SKD-3': [2] }), mv.map((c) => c.args[5]));
+  ok('no separate removal request', calls.filter((c) => c.fn === 'removeTicketCoating').length === 0);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 20. Database Master sheet: mark status changes and coating removals, save all at once
+{ const sheet = [
+    { skidId: 'SKD-1', ticket: '501', status: 'WIP', litho: 6.5, mill: 'M-1', customer: 'Acme', jobId: 'JOB-1', coatings: [
+      { passNumber: 1, item: 'SIZE', group: '603X408', sub: '10-OUT', chemCode: 'C1', cost: 2.5, date: '2026-09-29' },
+      { passNumber: 2, item: 'VARNISH', group: '603X408', sub: '10-OUT', chemCode: 'C2', cost: 4, date: '2026-09-29' }] },
+    { skidId: 'SKD-2', ticket: '502', status: 'Current', litho: 0, mill: 'M-2', customer: '', coatings: [] },
+    { skidId: 'SKD-3', ticket: '503', status: 'Used', litho: 0, mill: 'M-3', customer: '', usedOn: '2026-09-01', coatings: [] },
+    { skidId: 'SKD-4', ticket: '504', status: 'Pending', litho: 2.5, jobId: 'JOB-7', coatings: [] }];
+  let saves = 0;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: JSON.parse(JSON.stringify(sheet)) }),
+    masterEdit: (a) => (saves++ === 0 ? { ok: false, error: 'Sheets API 500' } : R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, status: c.status || c.from })), skipped: [] })),
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  ok('Database opens on the Master sheet', !!(await page.$('#msList')) && calls.filter((c) => c.fn === 'getMasterSheet').length === 1 && calls.filter((c) => c.fn === 'getRawTable').length === 0);
+  ok('lists the tickets', (await page.textContent('#msList')).includes('501') && (await page.textContent('#msList')).includes('504'));
+  ok('Pending is read-only', !(await page.$('[data-msst="SKD-4"]')) && (await page.textContent('#msList')).includes('Review Jobs'));
+  ok('no save bar before changes', await page.$eval('#msBar', (b) => b.style.display === 'none'));
+  await page.selectOption('[data-msst="SKD-2"]', 'Used'); await page.waitForTimeout(100);
+  await page.selectOption('[data-msst="SKD-3"]', 'WIP'); await page.waitForTimeout(100);
+  await page.click('[data-mscoats="SKD-1"]'); await page.waitForTimeout(100);
+  await page.click('[data-msvoid="SKD-1"][data-pass="2"]'); await page.waitForTimeout(100);
+  ok('nothing saved while marking', calls.filter((c) => c.fn === 'masterEdit').length === 0);
+  ok('save bar counts 3 changed tickets', (await page.textContent('#msBarText')).includes('3 tickets changed'));
+  ok('marked row shows new cost and change', (await page.textContent('#msList')).includes('$6.50 → $2.50') && (await page.textContent('#msList')).includes('Current → Used'));
+  await page.selectOption('[data-msst="SKD-3"]', 'Used'); await page.waitForTimeout(100);
+  ok('setting a status back un-marks it', (await page.textContent('#msBarText')).includes('2 tickets changed'));
+  await page.fill('#msSearch', 'M-2'); await page.waitForTimeout(100);
+  ok('search narrows the list', (await page.textContent('#msList')).includes('502') && !(await page.textContent('#msList')).includes('504'));
+  await page.fill('#msSearch', ''); await page.waitForTimeout(100);
+  await page.click('#msSaveBtn'); await page.waitForSelector('#modalOk');
+  ok('confirm lists every change', ((await page.textContent('#modalRoot')) || '').includes('501: remove VARNISH') && (await page.textContent('#modalRoot')).includes('502: Current → Used'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('failure keeps the marks', ((await page.textContent('#modalRoot')) || '').includes('Your marks are kept') && (await page.textContent('#msBarText')).includes('2 tickets'));
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  await page.click('#msSaveBtn'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const me = calls.filter((c) => c.fn === 'masterEdit');
+  ok('one request with every change', me.length === 2 && me[1].args[0].length === 2
+    && me[1].args[0].some((c) => c.skidId === 'SKD-1' && JSON.stringify(c.removePasses) === '[2]' && !c.status)
+    && me[1].args[0].some((c) => c.skidId === 'SKD-2' && c.status === 'Used' && c.from === 'Current'), me.map((c) => c.args[0]));
+  ok('retry reuses the opId', me[0].args[2] === me[1].args[2]);
+  ok('saved: marks cleared and sheet reloaded', ((await page.textContent('#modalRoot')) || '').includes('2 tickets updated') && calls.filter((c) => c.fn === 'getMasterSheet').length === 2);
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  ok('save bar hidden after saving', await page.$eval('#msBar', (b) => b.style.display === 'none'));
+  await page.click('[data-dbt="steel"]'); await page.waitForTimeout(200);
+  ok('Steel Tickets raw table still there', calls.filter((c) => c.fn === 'getRawTable').length === 1);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

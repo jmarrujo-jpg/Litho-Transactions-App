@@ -71,7 +71,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-53', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'master-54', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -257,8 +257,12 @@ async function handle(fn, args, env) {
       return createJob(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'jobAddTicket': // (jobId, skidId, sheetsRun, isPartialSkid, lithoNote, operator, opId, coatedTicket, testedBW)
       return jobAddTicket(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-    case 'moveToWip': // (description, operator, coatings[], skidIds[], opId) foreman batch: coat + straight to WIP
-      return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'getMasterSheet': // () every Current / WIP / Used / Pending ticket with its live coatings
+      return getMasterSheet(sheets);
+    case 'masterEdit': // (changes[{skidId, status?, removePasses?[]}], operator, opId) Database Master sheet: save all at once
+      return masterEdit(sheets, args[0], args[1], args[2]);
+    case 'moveToWip': // (description, operator, coatings[], skidIds[], opId, removals{skidId:[pass]}) foreman batch: coat + straight to WIP
+      return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
@@ -1546,6 +1550,139 @@ async function approveJob(sheets, jobId, operator, opId) {
   return getJobDetail(sheets, jobId);
 }
 
+// ---- Batch coating removal (Move To WIP and the Database Master sheet) ----
+// A skid's log history from a traceContext (Skid ID rows, plus legacy rows matched by ticket).
+function skidHist(ctx, o) {
+  const sid = String(o['Skid ID'] || '').trim();
+  return (ctx.bySkid[sid] || []).concat(ctx.byTicket[String(o['Ticket'] || '').trim()] || []).sort((a, b) => a.passNumber - b.passNumber);
+}
+function maxPassOf(hist) { return hist.reduce((n, h) => Math.max(n, num(h.passNumber)), 0); }
+// Which of the requested passes are live coatings on this skid, and what taking them off costs.
+// Each void row carries "<op>#<skid>#v<pass>"; `logged` marks one an earlier attempt already wrote.
+function voidPlan(o, hist, passes, op, ops) {
+  const sid = String(o['Skid ID']).trim();
+  const want = {};
+  (passes || []).forEach((p) => { want[String(p)] = true; });
+  const removed = [];
+  if (Object.keys(want).length) {
+    activeCoatings(hist).forEach((c) => {
+      if (!want[String(c.passNumber)]) return;
+      const rowOp = subOp(op, sid + '#v' + c.passNumber);
+      removed.push({ passNumber: c.passNumber, item: c.item, cost: num(c.cost), rowOp, logged: ops.has(rowOp) });
+    });
+  }
+  return { removed, cost: Math.round(removed.filter((c) => !c.logged).reduce((n, c) => n + c.cost, 0) * 100) / 100 };
+}
+// Same log row removeTicketCoating writes, so activeCoatings / the card / reports treat it alike.
+function voidRowObj(o, c, pass, running, operator, jobId, ts, rowOp) {
+  return { 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': pass, 'Operator': operator || '',
+    'Group': '', 'Sub-Variant': '', 'Item': 'COATING REMOVED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
+    'Pass Total Cost': -c.cost, 'Running Total After Pass': running,
+    'Notes': 'VOID#' + c.passNumber + ': removed ' + c.item + ' (' + c.cost.toFixed(2) + ')', 'Job Name': jobId || '', 'Job ID': jobId || '',
+    'Skid ID': String(o['Skid ID']).trim(), 'Op ID': rowOp };
+}
+// One append for a batch of Transactions rows (adds Op ID / Job ID columns if missing).
+async function appendTxRows(sheets, rows, ops) {
+  if (!rows.length) return;
+  let headers = await tabHeaders(sheets, TRANSACTIONS);
+  for (const col of ['Op ID', 'Job ID']) if (headers.indexOf(col) === -1) headers = (await ensureColumn(sheets, TRANSACTIONS, headers, col)).headers;
+  const values = rows.map((r) => headers.map((h) => (r.hasOwnProperty(h) ? r[h] : '')));
+  const firstOp = rows[0]['Op ID'];
+  await sheets.appendMany(TRANSACTIONS, values, () => columnHas(sheets, TRANSACTIONS, headers, 'Op ID', firstOp));
+  rows.forEach((r) => ops.add(r['Op ID']));
+}
+
+// ---- Database Master sheet ----
+// Every ticket that's Current, WIP, Used or Pending, with its live coatings, for the Database
+// "Master sheet" screen. One read of Steel Tickets, Transactions and Litho Jobs.
+const MASTER_STATUSES = [STATUS.CURRENT, STATUS.WIP, STATUS.USED];
+async function getMasterSheet(sheets) {
+  const master = await readTab(sheets, MASTER);
+  const ctx = await traceContext(sheets, master.rows);
+  const out = [];
+  master.rows.forEach((o) => {
+    const st = o['Status'] || '';
+    if (!(o['Ticket'] || o['Skid ID'])) return;
+    if (MASTER_STATUSES.indexOf(st) === -1 && st !== STATUS.PENDING) return;
+    const t = traceOf(o, ctx);
+    out.push({ skidId: o['Skid ID'] || '', ticket: o['Ticket'] || '', status: st, litho: num(o['Litho']), mill: t.mill, customer: t.customer,
+      jobId: t.jobId, qty: t.qty, usedOn: t.usedOn,
+      coatings: activeCoatings(skidHist(ctx, o)).map((c) => ({ passNumber: c.passNumber, item: c.item, group: c.group || '', sub: c.sub || '', chemCode: c.chemCode || '', cost: c.cost, date: c.date })) });
+  });
+  return { rows: out };
+}
+
+// Save the Master sheet's marked changes in one go: move tickets between Current / WIP / Used and
+// take coatings off. ONE Steel Tickets write and ONE log append for the whole batch. Pending tickets
+// (on a job under review) can't be changed here. Leaving Used clears the used date; going to Used
+// stamps today. Every change is logged (STATUS CHANGED / COATING REMOVED). Retry-safe: each skid's
+// write stamps "<opId>#<skidId>" and each log row carries its own sub-op id.
+async function masterEdit(sheets, changes, operator, opId) {
+  operator = String(operator || '').trim() || 'Database';
+  const list = (changes || []).filter((c) => c && String(c.skidId || '').trim());
+  if (!list.length) throw new Error('No changes to save.');
+  if (list.length > 300) throw new Error('Save at most 300 tickets at a time.');
+  const op = opId || autoOpId();
+  let master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
+  let hdr = master.headers;
+  for (const col of ['Used At', 'Used Via']) hdr = (await ensureColumn(sheets, MASTER, hdr, col)).headers;
+  if (hdr !== master.headers) master = await readTab(sheets, MASTER);
+  const ops = await opIdSet(sheets);
+  const ctx = await traceContext(sheets, master.rows);
+  const ts = nowStamp(), today = todayYMD();
+  const data = [], rows = [], done = [], skipped = [];
+  const put = (o, fields) => Object.keys(fields).forEach((name) => {
+    if (master.map[name]) data.push({ range: "'" + MASTER + "'!" + colLetter(master.map[name]) + o.__row, values: [[fields[name]]] });
+  });
+  for (const ch of list) {
+    const skidId = String(ch.skidId).trim();
+    const o = master.rows.filter((r) => String(r['Skid ID']).trim() === skidId)[0];
+    if (!o) { skipped.push({ skidId, reason: 'not found' }); continue; }
+    const step = subOp(op, skidId);
+    const resumed = stampedBy(o, step);
+    const cur = o['Status'] || STATUS.CURRENT;
+    const to = ch.status ? String(ch.status) : '';
+    if (to && MASTER_STATUSES.indexOf(to) === -1) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'can only move to Current, WIP or Used' }); continue; }
+    if (!resumed && MASTER_STATUSES.indexOf(cur) === -1) { skipped.push({ skidId, ticket: o['Ticket'], reason: cur === STATUS.PENDING ? 'Pending on job ' + (o['Job ID'] || '') + ' — change it in Review Jobs' : cur }); continue; }
+    const hist = skidHist(ctx, o);
+    const v = voidPlan(o, hist, ch.removePasses, op, ops);
+    const moving = to && to !== cur && !resumed;
+    const from = resumed ? String(ch.from || '') : cur;
+    if (!resumed && !moving && !v.removed.length) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'nothing to change' }); continue; }
+    const before = resumed ? Math.round((num(o['Litho']) + v.cost) * 100) / 100 : num(o['Litho']);
+    const after = Math.round((before - v.cost) * 100) / 100;
+    if (!resumed) {
+      const fields = { 'Last Updated At': ts, 'Last Updated By': operator, 'Last Op ID': step };
+      if (v.removed.length) fields['Litho'] = after;
+      if (moving) {
+        fields['Status'] = to;
+        if (to === STATUS.USED) { fields['Used At'] = today; fields['Used Via'] = 'Database'; }
+        if (cur === STATUS.USED) { fields['Used At'] = ''; fields['Used Via'] = ''; }
+      }
+      put(o, fields);
+    }
+    let pass = maxPassOf(hist), running = before;
+    v.removed.forEach((c) => {
+      if (c.logged) return;
+      running = Math.round((running - c.cost) * 100) / 100;
+      pass++;
+      rows.push(voidRowObj(o, c, pass, running, operator, o['Job ID'] || '', ts, c.rowOp));
+    });
+    const sOp = subOp(op, skidId + '#s');
+    if (to && (moving || resumed) && !ops.has(sOp) && from !== to) {
+      rows.push({ 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': 0, 'Operator': operator, 'Group': '', 'Sub-Variant': '',
+        'Item': 'STATUS CHANGED (DATABASE)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0, 'Pass Total Cost': 0,
+        'Running Total After Pass': after, 'Notes': (from || '?') + ' → ' + to + ' (Database master sheet)', 'Job Name': '', 'Job ID': o['Job ID'] || '',
+        'Skid ID': skidId, 'Op ID': sOp });
+    }
+    done.push({ skidId, ticket: o['Ticket'], from: moving ? cur : (resumed ? from : ''), status: moving ? to : (resumed && to ? to : cur), litho: after, removed: v.removed.map((c) => c.item) });
+  }
+  if (!done.length) throw new Error('Nothing saved: ' + skipped.map((x) => (x.ticket || x.skidId) + ' (' + x.reason + ')').join(', '));
+  if (data.length) await sheets.batchUpdate(data);
+  await appendTxRows(sheets, rows, ops);
+  return { ok: true, saved: done, skipped };
+}
+
 // ---- moveToWip: the foreman's batch move (Litho Department -> Move To WIP) ----
 // The foreman names the job/customer, picks what was done (one or more coatings) and scans the
 // tickets. Every ticket gets the whole recipe at full sheet count (no spoilage, no partials) and
@@ -1559,7 +1696,7 @@ async function approveJob(sheets, jobId, operator, opId) {
 // "<opId>#<skidId>#c<i>" — so a retry skips what landed and writes only what's missing.
 // Tickets that can't move (Pending on a job, Used, not found...) are skipped and reported.
 const MOVE_WIP_MAX = 150;
-async function moveToWip(sheets, description, operator, coatings, skidIds, opId) {
+async function moveToWip(sheets, description, operator, coatings, skidIds, opId, removals) {
   description = String(description || '').trim();
   operator = String(operator || '').trim() || 'Foreman';   // the screen has no name field (one or two foremen use it)
   if (!description) throw new Error('Enter the job / customer name.');
@@ -1577,14 +1714,7 @@ async function moveToWip(sheets, description, operator, coatings, skidIds, opId)
 
   const master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   const ops = await opIdSet(sheets);
-  const tx = await readObjects(sheets, TRANSACTIONS);
-  const maxPass = {};   // skid -> highest pass so far (legacy rows without a Skid ID match by ticket)
-  const bump = (k, p) => { if (k && !(maxPass[k] >= p)) maxPass[k] = p; };
-  tx.rows.forEach((r) => {
-    const sid = String(r['Skid ID'] || '').trim();
-    bump(sid ? 'S:' + sid : 'T:' + String(r['Ticket'] || '').trim(), num(r['Pass Number']));
-  });
-  const passAfter = (o) => Math.max(maxPass['S:' + String(o['Skid ID']).trim()] || 0, maxPass['T:' + String(o['Ticket'] || '').trim()] || 0);
+  const ctx = await traceContext(sheets, master.rows);
 
   // Work out every ticket first, so nothing is written for a batch where no ticket can move.
   const plan = [], skipped = [];
@@ -1624,8 +1754,13 @@ async function moveToWip(sheets, description, operator, coatings, skidIds, opId)
   const data = [], rows = [], moved = [];
   plan.forEach((p) => {
     const o = p.o, skidId = String(o['Skid ID']).trim();
-    const before = p.resumed ? Math.round((num(o['Litho']) - recipeCost) * 100) / 100 : num(o['Litho']);
-    const after = p.resumed ? num(o['Litho']) : Math.round((before + recipeCost) * 100) / 100;
+    const hist = skidHist(ctx, o);
+    // Coatings the foreman marked to take off this ticket: voided in this same batch, before the
+    // new coats. (A retry finds them still active until the one log append lands.)
+    const v = voidPlan(o, hist, (removals || {})[skidId], op, ops);
+    const before = p.resumed ? Math.round((num(o['Litho']) - recipeCost + v.cost) * 100) / 100 : num(o['Litho']);
+    const afterVoid = Math.round((before - v.cost) * 100) / 100;
+    const after = p.resumed ? num(o['Litho']) : Math.round((afterVoid + recipeCost) * 100) / 100;
     if (!p.resumed) {
       const fields = { 'Status': STATUS.WIP, 'Job ID': jobId, 'Litho': after, 'Row': '',
         'Approved At': ts, 'Approved By': operator, 'Last Updated At': ts, 'Last Updated By': operator, 'Last Op ID': p.step };
@@ -1635,7 +1770,13 @@ async function moveToWip(sheets, description, operator, coatings, skidIds, opId)
       });
     }
     // Pass numbers: a resumed skid may already have some of this batch's rows logged.
-    let pass = passAfter(o), running = before;
+    let pass = maxPassOf(hist), running = before;
+    v.removed.forEach((c) => {
+      if (c.logged) return;
+      running = Math.round((running - c.cost) * 100) / 100;
+      pass++;
+      rows.push(voidRowObj(o, c, pass, running, operator, jobId, ts, c.rowOp));
+    });
     matches.forEach((m, i) => {
       running = Math.round((running + m.totalCost) * 100) / 100;
       const rowOp = subOp(op, skidId + '#c' + i);
@@ -1646,19 +1787,12 @@ async function moveToWip(sheets, description, operator, coatings, skidIds, opId)
         'Application Cost': m.appCost, 'Line Cost': m.lineCost, 'Pass Total Cost': m.totalCost, 'Running Total After Pass': running,
         'Notes': 'Moved to WIP', 'Job Name': description, 'Job ID': jobId, 'Skid ID': skidId, 'Op ID': rowOp });
     });
-    moved.push({ skidId, ticket: o['Ticket'], litho: after, wasWip: !!p.wasWip });
+    moved.push({ skidId, ticket: o['Ticket'], litho: after, wasWip: !!p.wasWip, removed: v.removed.map((c) => c.item) });
   });
   if (data.length) await sheets.batchUpdate(data);
 
-  // ONE append for all the coating log rows.
-  if (rows.length) {
-    let headers = await tabHeaders(sheets, TRANSACTIONS);
-    for (const col of ['Op ID', 'Job ID']) if (headers.indexOf(col) === -1) headers = (await ensureColumn(sheets, TRANSACTIONS, headers, col)).headers;
-    const values = rows.map((r) => headers.map((h) => (r.hasOwnProperty(h) ? r[h] : '')));
-    const firstOp = rows[0]['Op ID'];
-    await sheets.appendMany(TRANSACTIONS, values, () => columnHas(sheets, TRANSACTIONS, headers, 'Op ID', firstOp));
-    rows.forEach((r) => ops.add(r['Op ID']));
-  }
+  // ONE append for all the log rows (removals and coatings).
+  await appendTxRows(sheets, rows, ops);
 
   if (job) {   // a retry: keep the count right (harmless if unchanged)
     const n = (await readTab(sheets, MASTER)).rows.filter((r) => String(r['Job ID']).trim() === String(jobId).trim()).length;

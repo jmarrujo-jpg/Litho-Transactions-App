@@ -485,5 +485,72 @@ await concurrency(envBase, 'in-worker lock');
   ok('card shows SIZE + WHITE, no VARNISH', c1.result.coatings.map((c) => c.item).join() === 'SIZE,WHITE', c1.result.coatings);
 }
 
+// 20. Move To WIP with marked removals: taken off in the same batch as the new coats
+{ const f = fresh();
+  const R2 = [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }];
+  await call('moveToWip', ['First', '', R2, ['SKD-000001', 'SKD-000004'], 'op-20-a']);   // litho 6.5 each
+  const c0 = await call('getTicketCard', ['SKD-000001']);
+  const vp = c0.result.coatings.filter((c) => c.item === 'VARNISH')[0].passNumber;
+  const c4 = await call('getTicketCard', ['SKD-000004']);
+  const vp4 = c4.result.coatings.filter((c) => c.item === 'VARNISH')[0].passNumber;
+  const n0 = f.log.length;
+  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  const bad = await call('moveToWip', ['Second', '', [{ group: '603X408', sub: '10-OUT', item: 'WHITE' }], ['SKD-000001'], 'op-20-b', { 'SKD-000001': [vp], 'SKD-000004': [vp4] }]);
+  ok('failed log append reported', !bad.ok, bad);
+  const n1 = f.log.length;
+  const r = await call('moveToWip', ['Second', '', [{ group: '603X408', sub: '10-OUT', item: 'WHITE' }], ['SKD-000001'], 'op-20-b', { 'SKD-000001': [vp], 'SKD-000004': [vp4] }]);
+  const used20 = f.log.length - n1;
+  ok('move with a removal ok', r.ok && r.result.moved[0].removed.join() === 'VARNISH', r);
+  ok('cost: 6.5 - 4 + 6 = 8.5', Number(skidRow(f, 'SKD-000001')['Litho']) === 8.5, skidRow(f, 'SKD-000001')['Litho']);
+  const c1 = await call('getTicketCard', ['SKD-000001']);
+  ok('card: SIZE + WHITE', c1.result.coatings.map((c) => c.item).join() === 'SIZE,WHITE', c1.result.coatings);
+  ok('removal for a ticket not in the batch is ignored', Number(skidRow(f, 'SKD-000004')['Litho']) === 6.5 && c4.result.coatings.length === 2
+    && (await call('getTicketCard', ['SKD-000004'])).result.coatings.length === 2);
+  const again = await call('moveToWip', ['Second', '', [{ group: '603X408', sub: '10-OUT', item: 'WHITE' }], ['SKD-000001'], 'op-20-b', { 'SKD-000001': [vp], 'SKD-000004': [vp4] }]);
+  ok('retry changes nothing', again.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 8.5
+    && txFor(f, 'SKD-000001').filter((t) => t['Item'] === 'COATING REMOVED (VOID)').length === 1, skidRow(f, 'SKD-000001')['Litho']);
+  ok('batch with a removal still a few calls', used20 < 20, used20); void n0;
+}
+
+// 21. Database Master sheet: move between Current / WIP / Used and take coatings off, saved at once
+{ const f = fresh();
+  await call('moveToWip', ['Acme', '', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }], ['SKD-000001'], 'op-21-a']);
+  const j = await call('createJob', ['Pend', 'Ann', [{ group: '603X408', sub: '10-OUT', item: 'SIZE' }], '', 'op-21-j']);
+  await call('jobAddTicket', [j.result.jobId, 'SKD-000005', '', false, '', 'Ann', 'op-21-p', '', '']);
+  await call('markUsedDirect', [['SKD-000004'], '2026-09-01', 'op-21-u']);
+  const ms = await call('getMasterSheet', []);
+  ok('master sheet loads', ms.ok, ms);
+  const m1 = ms.result.rows.filter((x) => x.skidId === 'SKD-000001')[0];
+  ok('master sheet row has live coatings with pass numbers', m1 && m1.status === 'WIP' && m1.coatings.map((c) => c.item).join() === 'SIZE,VARNISH' && m1.coatings[1].passNumber > 0, m1);
+  ok('master sheet includes Current, Used and Pending', ['SKD-000002', 'SKD-000004', 'SKD-000005'].every((id) => ms.result.rows.some((x) => x.skidId === id)));
+  const vp = m1.coatings[1].passNumber;
+  const changes = [
+    { skidId: 'SKD-000001', removePasses: [vp], status: 'Current', from: 'WIP' },
+    { skidId: 'SKD-000002', status: 'Used', from: 'Current' },
+    { skidId: 'SKD-000004', status: 'WIP', from: 'Used' },
+    { skidId: 'SKD-000005', status: 'Current', from: 'Pending' },
+  ];
+  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  const bad = await call('masterEdit', [changes, '', 'op-21-e']);
+  ok('failed log append reported', !bad.ok, bad);
+  const r = await call('masterEdit', [changes, '', 'op-21-e']);
+  ok('master edit ok', r.ok, r);
+  ok('WIP -> Current with VARNISH off', skidRow(f, 'SKD-000001')['Status'] === 'Current' && Number(skidRow(f, 'SKD-000001')['Litho']) === 2.5, skidRow(f, 'SKD-000001'));
+  const s2 = skidRow(f, 'SKD-000002');
+  ok('Current -> Used stamps today, via Database', s2['Status'] === 'Used' && /^\d{4}-\d\d-\d\d$/.test(s2['Used At']) && s2['Used Via'] === 'Database', s2);
+  const s4 = skidRow(f, 'SKD-000004');
+  ok('Used -> WIP clears the used date', s4['Status'] === 'WIP' && !s4['Used At'] && !s4['Used Via'], s4);
+  ok('Pending ticket refused with a reason', skidRow(f, 'SKD-000005')['Status'] === 'Pending' && r.result.skipped.some((x) => x.skidId === 'SKD-000005' && /Review Jobs/.test(x.reason)), r.result.skipped);
+  const log1 = txFor(f, 'SKD-000001');
+  ok('status change and removal logged once each (after the retry)', log1.filter((t) => t['Item'] === 'STATUS CHANGED (DATABASE)').length === 1
+    && log1.filter((t) => t['Item'] === 'COATING REMOVED (VOID)').length === 1 && log1.some((t) => /WIP → Current/.test(t['Notes'])), log1.map((t) => [t['Item'], t['Notes']]));
+  const again = await call('masterEdit', [changes, '', 'op-21-e']);
+  ok('retry of a saved batch changes nothing', again.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 2.5 && txFor(f, 'SKD-000001').length === log1.length, again);
+  const card = await call('getTicketCard', ['SKD-000001']);
+  ok('card: only SIZE left', card.result.coatings.map((c) => c.item).join() === 'SIZE');
+  const none = await call('masterEdit', [[{ skidId: 'SKD-000002', status: 'Used', from: 'Used' }], '', 'op-21-n']);
+  ok('no real change: refused, nothing written', !none.ok && /nothing to change/.test(none.error), none);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

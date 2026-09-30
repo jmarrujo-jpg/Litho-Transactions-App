@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.46.0</span>
+      <span class="version" id="appVersion">v1.47.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -949,9 +949,9 @@
   // A spreadsheet-like admin view of the underlying tabs, read/written BY COLUMN NAME so it matches
   // exactly what the app uses (even where the sheet header has stray duplicate columns). Two tables:
   // Steel Tickets and the Transactions audit log. Tap a row to edit its fields and save back.
-  var DB_TABLE_TABS = [['steel', 'Steel Tickets'], ['tx', 'Transactions']];
+  var DB_TABLE_TABS = [['master', 'Master sheet'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
   var DB_ROW_CAP = 60;                          // rows rendered at once (search to narrow beyond this)
-  var dbTable = 'steel';
+  var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
   var DB_CODE = '1245';                          // passcode to open the Database tab
@@ -987,14 +987,16 @@
     var chips = DB_TABLE_TABS.map(function (c) {
       return '<button data-dbt="' + c[0] + '"' + (dbTable === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
+    var isMaster = dbTable === 'master';
     view.innerHTML =
       '<div class="tabbar">' + chips + '</div>' +
+      (isMaster ? '<div id="msBox"></div>' :
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Search this table</label><input id="dbSearch" placeholder="filter any column…" autocomplete="off" value="' + esc(dbSearch) + '"></div>' +
         '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
       '</div>' +
       '<div class="sub" id="dbCount" style="margin:8px 0"></div>' +
-      '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>' +
+      '<div id="dbTableBox" style="overflow-x:auto;-webkit-overflow-scrolling:touch"></div>') +
       '<div class="card" style="margin-top:16px">' +
         '<h3 style="margin-top:0;font-size:15px">Snapshots</h3>' +
         '<div class="sub">A snapshot of the Current + WIP + Pending rows is saved automatically to your <b>Litho Snapshots</b> spreadsheet every weekday at 3 PM. No action needed.</div>' +
@@ -1011,12 +1013,211 @@
     Array.prototype.forEach.call(view.querySelectorAll('[data-dbt]'), function (b) {
       b.onclick = function () { dbTable = b.getAttribute('data-dbt'); dbSearch = ''; renderDatabaseHome(); };
     });
+    document.getElementById('dbImportBtn').onclick = dbFreshImport;
+    document.getElementById('dbSnapshotBtn').onclick = dbRunSnapshot;
+    if (isMaster) { renderMasterSheet(); return; }
     var s = document.getElementById('dbSearch');
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
-    document.getElementById('dbImportBtn').onclick = dbFreshImport;
-    document.getElementById('dbSnapshotBtn').onclick = dbRunSnapshot;
     loadDbAndRender();
+  }
+
+  // ---------------- Database: Master sheet ----------------
+  // Every Current / WIP / Used ticket (and Pending, read-only) with its live coatings. Mark changes
+  // — a new status, coatings to take off — and nothing is saved until Save all, which sends the
+  // whole batch in one request (masterEdit). Unsaved marks stay while the page is open.
+  var msData = null, msSearch = '', msFilter = 'all', msStatus = {}, msRemove = {}, msOpen = {};
+  var MS_CAP = 100;
+  var MS_STATUSES = ['Current', 'WIP', 'Used'];
+
+  function msChanges() {
+    var out = [];
+    (msData || []).forEach(function (t) {
+      var to = msStatus[t.skidId], passes = Object.keys(msRemove[t.skidId] || {});
+      if ((to && to !== t.status) || passes.length) {
+        var ch = { skidId: t.skidId, from: t.status };
+        if (to && to !== t.status) ch.status = to;
+        if (passes.length) ch.removePasses = passes.map(Number);
+        out.push(ch);
+      }
+    });
+    return out;
+  }
+  function msLoad() {
+    var box = document.getElementById('msList');
+    if (box) box.innerHTML = '<div class="loading">Loading the master sheet&hellip;</div>';
+    google.script.run.withSuccessHandler(function (res) {
+      msData = (res && res.rows) || [];
+      // Drop marks that no longer apply (ticket gone, or the coating already off).
+      Object.keys(msRemove).forEach(function (id) {
+        var t = msData.filter(function (x) { return x.skidId === id; })[0];
+        if (!t) { delete msRemove[id]; return; }
+        Object.keys(msRemove[id]).forEach(function (p) { if (!t.coatings.some(function (c) { return String(c.passNumber) === p; })) delete msRemove[id][p]; });
+        if (!Object.keys(msRemove[id]).length) delete msRemove[id];
+      });
+      Object.keys(msStatus).forEach(function (id) {
+        var t = msData.filter(function (x) { return x.skidId === id; })[0];
+        if (!t || t.status === msStatus[id]) delete msStatus[id];
+      });
+      renderMsList();
+    }).withFailureHandler(function (err) {
+      if (box) box.innerHTML = '<div class="card empty">Could not load: ' + esc(err.message) + ' <button class="btn secondary" id="msRetry">Try again</button></div>';
+      var r = document.getElementById('msRetry'); if (r) r.onclick = msLoad;
+    }).getMasterSheet();
+  }
+
+  function renderMasterSheet() {
+    var box = document.getElementById('msBox');
+    if (!box) return;
+    var chips = [['all', 'All'], ['Current', 'Current'], ['WIP', 'WIP'], ['Used', 'Used'], ['Pending', 'Pending']].map(function (c) {
+      return '<button data-msf="' + c[0] + '"' + (msFilter === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+    box.innerHTML =
+      '<div class="sub" style="margin:4px 0 8px">Change a ticket&rsquo;s status (Current, WIP, Used) or mark coatings to take off. Nothing saves until you tap <b>Save all</b> — then every change goes at once and is logged in Transactions.</div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Find a ticket</label><input id="msSearch" placeholder="ticket, skid, mill, customer…" autocomplete="off" value="' + esc(msSearch) + '"></div>' +
+        '<button class="btn secondary" id="msReload" style="margin:0">↻</button>' +
+      '</div>' +
+      '<div class="tabbar" id="msFilters" style="margin-top:8px">' + chips + '</div>' +
+      '<div class="sub" id="msCount" style="margin:8px 0"></div>' +
+      '<div id="msList"></div>' +
+      '<div id="msBar" class="card" style="position:sticky;bottom:8px;z-index:5;display:none;border:2px solid var(--accent)">' +
+        '<div class="row" style="align-items:center;gap:8px">' +
+          '<div style="flex:1;font-weight:600" id="msBarText"></div>' +
+          '<button class="btn secondary" id="msDiscard">Discard</button>' +
+          '<button class="btn success" id="msSaveBtn">Save all</button>' +
+        '</div></div>';
+    var si = document.getElementById('msSearch');
+    si.oninput = function () { msSearch = si.value; renderMsList(); };
+    document.getElementById('msReload').onclick = msLoad;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msf]'), function (b) {
+      b.onclick = function () {
+        msFilter = b.getAttribute('data-msf');
+        Array.prototype.forEach.call(box.querySelectorAll('[data-msf]'), function (x) { x.classList.toggle('active', x === b); });
+        renderMsList();
+      };
+    });
+    document.getElementById('msDiscard').onclick = function () {
+      showConfirm('Discard all marked changes?', 'Nothing has been saved yet. This clears every status change and coating removal you marked.',
+        function () { msStatus = {}; msRemove = {}; renderMsList(); }, 'Discard', 'danger');
+    };
+    document.getElementById('msSaveBtn').onclick = msSaveAll;
+    if (msData) renderMsList(); else msLoad();
+  }
+
+  function renderMsList() {
+    var box = document.getElementById('msList');
+    if (!box || !msData) return;
+    var term = String(msSearch || '').trim().toLowerCase();
+    var rows = msData.filter(function (t) {
+      if (msFilter !== 'all' && t.status !== msFilter) return false;
+      if (!term) return true;
+      return [t.ticket, t.skidId, t.mill, t.customer, t.jobId].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+    });
+    // Changed tickets first, so marks are easy to review.
+    rows.sort(function (a, b) {
+      var ca = (msStatus[a.skidId] || msRemove[a.skidId]) ? 0 : 1, cb = (msStatus[b.skidId] || msRemove[b.skidId]) ? 0 : 1;
+      return ca - cb;
+    });
+    var shown = rows.slice(0, MS_CAP);
+    var cnt = document.getElementById('msCount');
+    if (cnt) cnt.textContent = 'Showing ' + shown.length + ' of ' + rows.length + (rows.length > MS_CAP ? ' — search to narrow it down.' : '.');
+    box.innerHTML = shown.length ? shown.map(msRowHtml).join('') : '<div class="card empty">No tickets match.</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msst]'), function (sel) {
+      sel.onchange = function () {
+        var id = sel.getAttribute('data-msst');
+        var t = msData.filter(function (x) { return x.skidId === id; })[0];
+        if (!t || sel.value === t.status) delete msStatus[id]; else msStatus[id] = sel.value;
+        renderMsList();
+      };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mscoats]'), function (b) {
+      b.onclick = function () { var id = b.getAttribute('data-mscoats'); msOpen[id] = !msOpen[id]; renderMsList(); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msvoid]'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-msvoid'), p = b.getAttribute('data-pass');
+        var m = msRemove[id] = msRemove[id] || {};
+        if (m[p]) delete m[p]; else m[p] = true;
+        if (!Object.keys(m).length) delete msRemove[id];
+        renderMsList();
+      };
+    });
+    var n = msChanges().length, bar = document.getElementById('msBar');
+    if (bar) {
+      bar.style.display = n ? '' : 'none';
+      var tx = document.getElementById('msBarText');
+      if (tx) tx.textContent = n + ' ticket' + (n === 1 ? '' : 's') + ' changed — not saved yet';
+    }
+  }
+
+  function msRowHtml(t) {
+    var to = msStatus[t.skidId], marks = msRemove[t.skidId] || {}, nMarks = Object.keys(marks).length;
+    var changed = !!to || nMarks > 0, open = msOpen[t.skidId];
+    var off = t.coatings.reduce(function (n, c) { return n + (marks[String(c.passNumber)] ? Number(c.cost) || 0 : 0); }, 0);
+    var statusCtl = t.status === 'Pending'
+      ? '<span class="badge">Pending</span> <span class="sub">on ' + esc(t.jobId || 'a job') + ' — change it in Review Jobs</span>'
+      : '<select data-msst="' + esc(t.skidId) + '" style="min-width:120px">' + MS_STATUSES.map(function (st) {
+          return '<option value="' + st + '"' + ((to || t.status) === st ? ' selected' : '') + '>' + st + '</option>';
+        }).join('') + '</select>' + (to ? ' <span class="sub" style="color:#b26a00;font-weight:600">' + esc(t.status) + ' → ' + esc(to) + '</span>' : '');
+    var coats = '';
+    if (open) {
+      coats = '<div style="margin-top:8px;padding:6px 12px;background:var(--bg);border-radius:8px">' + (t.coatings.length ? t.coatings.map(function (c) {
+        var m = !!marks[String(c.passNumber)];
+        return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0' + (m ? ';text-decoration:line-through;opacity:.6' : '') + '">' +
+          '<strong>' + esc(c.item) + '</strong> <span class="sub">' + esc([c.group, c.sub].filter(Boolean).join(' ')) +
+          (c.chemCode ? ' &middot; chem ' + esc(c.chemCode) : '') + (c.date ? ' &middot; ' + esc(c.date) : '') + ' &middot; ' + money(c.cost) + '</span></div>' +
+          (t.status === 'Pending' ? '' : '<button class="btn ' + (m ? 'secondary' : 'warn') + '" style="padding:6px 10px;font-size:13px" data-msvoid="' + esc(t.skidId) + '" data-pass="' + esc(c.passNumber) + '">' + (m ? 'Undo' : 'Remove') + '</button>') +
+          '</div>';
+      }).join('') : '<div class="sub">No coatings on this ticket.</div>') + '</div>';
+    }
+    return '<div class="card" style="padding:12px 14px;margin-bottom:8px' + (changed ? ';border:2px solid #b26a00' : '') + '">' +
+      '<div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:180px"><span class="ticket-id" style="font-size:16px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+          '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.customer ? ' &middot; ' + esc(t.customer) : '') +
+          ' &middot; litho ' + money(t.litho) + (off ? ' → ' + money(t.litho - off) : '') + (t.status === 'Used' && t.usedOn ? ' &middot; used ' + esc(t.usedOn) : '') + '</span></div>' +
+        '<div>' + statusCtl + '</div>' +
+      '</div>' +
+      '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-mscoats="' + esc(t.skidId) + '">' + (open ? '▾' : '▸') +
+        ' Coatings (' + t.coatings.length + ')' + (nMarks ? ' — ' + nMarks + ' to remove' : '') + '</button>' +
+      coats + '</div>';
+  }
+
+  function msSaveAll() {
+    var changes = msChanges();
+    if (!changes.length) return;
+    var byId = {}; msData.forEach(function (t) { byId[t.skidId] = t; });
+    var lines = changes.map(function (ch) {
+      var t = byId[ch.skidId], parts = [];
+      if (ch.status) parts.push(ch.from + ' → ' + ch.status);
+      (ch.removePasses || []).forEach(function (p) {
+        var c = t.coatings.filter(function (x) { return Number(x.passNumber) === p; })[0];
+        parts.push('remove ' + (c ? c.item : 'coating'));
+      });
+      return (t.ticket || t.skidId) + ': ' + parts.join(', ');
+    });
+    var n = changes.length;
+    showConfirm('Save changes to ' + n + ' ticket' + (n === 1 ? '' : 's') + '?',
+      lines.slice(0, 12).join('; ') + (lines.length > 12 ? '; and ' + (lines.length - 12) + ' more' : '') + '. Every change is logged in Transactions.',
+      function () {
+        var btn = document.getElementById('msSaveBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+        runMutation('masterEdit', [changes, '', newOpId()],
+          function (res) {
+            var saved = (res && res.saved) || [], skipped = (res && res.skipped) || [];
+            saved.forEach(function (x) { delete msStatus[x.skidId]; delete msRemove[x.skidId]; markCacheStatus(x.skidId, x.status); });
+            showInfo('Saved',
+              saved.length + ' ticket' + (saved.length === 1 ? '' : 's') + ' updated.' +
+              (skipped.length ? ' ' + skipped.length + ' not changed: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''));
+            if (btn) { btn.disabled = false; btn.textContent = 'Save all'; }
+            msLoad();
+          },
+          function (err) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Save all'; }
+            showModal({ title: 'Could not save', confirmText: 'OK',
+              message: err.message + ' — Your marks are kept. Tap Save all again without changing anything: it finishes whatever didn\'t save and never applies a change twice.' });
+          });
+      }, 'Save all');
   }
 
   // Manually save a snapshot on demand (same job the 3 PM scheduler runs) and report the result
@@ -1445,10 +1646,13 @@
   }
 
   // WIP tickets on the list can open a drop-down of the coatings already on them (loaded on
-  // demand, one request per ticket) and take a coating off. A removal saves straight away — it
-  // doesn't wait for Move to WIP — and voids that coat's cost the same way the ticket card does.
-  var mwOpen = {};    // skidId -> drop-down open
-  var mwCards = {};   // skidId -> { loading, error, card }
+  // demand, one request per ticket) and mark coatings to take off. Nothing is removed until Move to
+  // WIP: the removals go in the same batch as the new coats, so taking a ticket off the list drops
+  // its marks too.
+  var mwOpen = {};     // skidId -> drop-down open
+  var mwCards = {};    // skidId -> { loading, error, card }
+  var mwRemove = {};   // skidId -> { passNumber: true } marked to take off at Move to WIP
+  function mwMarked(skidId) { return Object.keys(mwRemove[skidId] || {}); }
 
   function mwLoadCard(skidId) {
     mwCards[skidId] = { loading: true };
@@ -1469,12 +1673,18 @@
     else if (c.error) inner = '<div class="sub">Could not load: ' + esc(c.error) + ' <button class="btn secondary" style="padding:6px 10px;font-size:13px" data-mwretry="' + esc(b.skidId) + '">Try again</button></div>';
     else if (c.card) {
       var coats = c.card.coatings || [];
+      var marks = mwRemove[b.skidId] || {}, off = 0;
       inner = coats.length ? coats.map(function (k) {
-        return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+        var m = !!marks[String(k.passNumber)];
+        if (m) off += Number(k.cost) || 0;
+        return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0' + (m ? ';text-decoration:line-through;opacity:.6' : '') + '">' +
           '<strong>' + esc(k.item) + '</strong> <span class="sub">' + esc([k.group, k.sub].filter(Boolean).join(' ')) +
           (k.chemCode ? ' &middot; chem ' + esc(k.chemCode) : '') + ' &middot; ' + money(k.cost) + '</span></div>' +
-          '<button class="btn warn" style="padding:6px 10px;font-size:13px" data-mwvoid="' + esc(b.skidId) + '" data-pass="' + esc(k.passNumber) + '">Remove coating</button></div>';
-      }).join('') + '<div class="sub" style="margin-top:4px">Litho on this ticket now: ' + money(c.card.litho) + '</div>'
+          (m ? '<span class="sub" style="color:#b3261e;font-weight:600;margin-right:6px">comes off at Move</span>' : '') +
+          '<button class="btn ' + (m ? 'secondary' : 'warn') + '" style="padding:6px 10px;font-size:13px" data-mwvoid="' + esc(b.skidId) + '" data-pass="' + esc(k.passNumber) + '">' +
+            (m ? 'Undo' : 'Remove coating') + '</button></div>';
+      }).join('') + '<div class="sub" style="margin-top:4px">Litho on this ticket now: ' + money(c.card.litho) +
+        (off ? ' &middot; after removals: ' + money(c.card.litho - off) + ' (plus the new coatings)' : '') + '</div>'
         : '<div class="sub">No coatings on this ticket.</div>';
     } else inner = '';
     return '<div class="mw-coats" style="margin:0 0 8px;padding:6px 12px;background:var(--bg);border-radius:8px">' + inner + '</div>';
@@ -1493,7 +1703,7 @@
         '<span class="sub">' + esc(b.skidId) + ' &middot; ' + esc(b.qty || 0) + ' sheets' +
         (wip ? ' &middot; <span style="color:#b26a00;font-weight:600">another pass</span>' : '') + '</span>' +
         (wip ? '<div><button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:6px" data-mwcoats="' + esc(b.skidId) + '">' +
-          (open ? '▾' : '▸') + ' Coatings on it now</button></div>' : '') +
+          (open ? '▾' : '▸') + ' Coatings on it now' + (mwMarked(b.skidId).length ? ' (' + mwMarked(b.skidId).length + ' to remove)' : '') + '</button></div>' : '') +
         '</div>' +
         '<button class="btn danger" style="padding:8px 12px" data-mwrem="' + esc(b.skidId) + '">Remove</button></div>' +
         (open ? mwCoatingsHtml(b) : '');
@@ -1502,6 +1712,7 @@
       b.onclick = function () {
         var id = b.getAttribute('data-mwrem');
         mwBatch = mwBatch.filter(function (x) { return x.skidId !== id; });
+        delete mwRemove[id]; delete mwOpen[id];   // its marked removals leave with it
         renderMwList();
         var i = document.getElementById('mwAddInput'); if (i) renderMwPicker(i.value);
       };
@@ -1521,22 +1732,12 @@
     });
   }
 
+  // Mark / unmark a coating to come off at Move to WIP. Nothing is saved here.
   function mwRemoveCoating(skidId, pass) {
-    var c = mwCards[skidId] && mwCards[skidId].card;
-    var coat = c && (c.coatings || []).filter(function (k) { return String(k.passNumber) === String(pass); })[0];
-    if (!coat) return;
-    showConfirm('Remove ' + coat.item + ' from ' + (c.ticket || skidId) + '?',
-      'This takes the coating off the ticket now and subtracts its ' + money(coat.cost) + ' from the ticket\'s litho cost. It saves straight away, even if you don\'t move this list.',
-      function () {
-        runMutation('removeTicketCoating', [skidId, pass, 'Foreman', newOpId()],
-          function (card) {
-            if (card && !card.duplicate) mwCards[skidId] = { card: card };
-            else mwCards[skidId] = null;
-            toast(coat.item + ' removed from ' + (c.ticket || skidId));
-            if (!mwCards[skidId]) mwLoadCard(skidId); else renderMwList();
-          },
-          function (err) { showModal({ title: 'Could not remove the coating', message: err.message, confirmText: 'OK' }); });
-      }, 'Remove coating', 'danger');
+    var m = mwRemove[skidId] = mwRemove[skidId] || {};
+    if (m[String(pass)]) delete m[String(pass)]; else m[String(pass)] = true;
+    if (!Object.keys(m).length) delete mwRemove[skidId];
+    renderMwList();
   }
 
   function mwMoveAll(groupSel, subSel, itemSel) {
@@ -1553,21 +1754,35 @@
     var ids = mwBatch.map(function (b) { return b.skidId; });
     var n = ids.length, per = coatings.reduce(function (s, c) { return s + coatCost(c); }, 0);
     var wipN = mwBatch.filter(function (b) { return b.status === 'WIP'; }).length;
+    var removals = {}, offN = 0, offNames = [];
+    mwBatch.forEach(function (b) {
+      var passes = mwMarked(b.skidId);
+      if (!passes.length) return;
+      removals[b.skidId] = passes.map(Number);
+      offN += passes.length;
+      var card = mwCards[b.skidId] && mwCards[b.skidId].card;
+      passes.forEach(function (p) {
+        var k = card && (card.coatings || []).filter(function (x) { return String(x.passNumber) === p; })[0];
+        offNames.push((k ? k.item : 'coating') + ' from ' + (b.ticket || b.skidId));
+      });
+    });
     showConfirm('Move ' + n + ' ticket' + (n === 1 ? '' : 's') + ' to WIP?',
       'Job: ' + name + '. Each ticket gets ' + coatings.map(function (c) { return c.item; }).join(' + ') + ' (' + money(per) + ' per ticket) and goes straight to WIP with no review step.' +
-        (wipN ? ' ' + wipN + ' already in WIP get these coatings on top.' : ''),
+        (wipN ? ' ' + wipN + ' already in WIP get these coatings on top.' : '') +
+        (offN ? ' Also takes off ' + offN + ' coating' + (offN === 1 ? '' : 's') + ': ' + offNames.join(', ') + '.' : ''),
       function () {
         var btn = document.getElementById('mwMoveBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
-        runMutation('moveToWip', [name, '', coatings, ids, newOpId()],
+        runMutation('moveToWip', [name, '', coatings, ids, newOpId(), removals],
           function (res) {
             var moved = (res && res.moved) || [];
             var skipped = (res && res.skipped) || [];
             moved.forEach(function (m) { markCacheStatus(m.skidId, 'WIP'); });
-            mwBatch = []; mwOpen = {}; mwCards = {};
+            mwBatch = []; mwOpen = {}; mwCards = {}; mwRemove = {};
             mwCoatings = []; mwJobName = '';
             showInfo('Moved to WIP',
               moved.length + ' ticket' + (moved.length === 1 ? '' : 's') + ' moved to WIP' + (res && res.jobId ? ' (job ' + res.jobId + ')' : '') + '.' +
+              (function () { var n = moved.reduce(function (k, m) { return k + ((m.removed || []).length); }, 0); return n ? ' ' + n + ' coating' + (n === 1 ? '' : 's') + ' taken off.' : ''; })() +
               (skipped.length ? ' ' + skipped.length + ' not moved: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''),
               function () { renderMoveWip(); });
           },
