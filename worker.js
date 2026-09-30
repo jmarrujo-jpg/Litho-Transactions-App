@@ -121,7 +121,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'master-54', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'master-55', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1658,6 +1658,11 @@ async function masterEdit(sheets, changes, operator, opId) {
         fields['Status'] = to;
         if (to === STATUS.USED) { fields['Used At'] = today; fields['Used Via'] = 'Database'; }
         if (cur === STATUS.USED) { fields['Used At'] = ''; fields['Used Via'] = ''; }
+        // Back to Current = back to raw stock: it leaves its job and loses the coated / approved
+        // stamps, the same as taking a ticket off a job. (Otherwise it still shows on that job's
+        // ticket list, reports credit it to that customer, and the job can't be deleted.) The
+        // history stays in Transactions, and the status-change log row names the job it left.
+        if (to === STATUS.CURRENT) Object.assign(fields, { 'Job ID': '', 'First Coated At': '', 'First Coated By': '', 'Approved At': '', 'Approved By': '' });
       }
       put(o, fields);
     }
@@ -1669,10 +1674,13 @@ async function masterEdit(sheets, changes, operator, opId) {
       rows.push(voidRowObj(o, c, pass, running, operator, o['Job ID'] || '', ts, c.rowOp));
     });
     const sOp = subOp(op, skidId + '#s');
+    // The job a ticket going back to Current leaves (on a retry the skid's Job ID is already
+    // cleared, so fall back to the last job in its log).
+    const leftJob = String(o['Job ID'] || '').trim() || ((hist.filter((h) => h.jobId).slice(-1)[0] || {}).jobId || '');
     if (to && (moving || resumed) && !ops.has(sOp) && from !== to) {
       rows.push({ 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': 0, 'Operator': operator, 'Group': '', 'Sub-Variant': '',
         'Item': 'STATUS CHANGED (DATABASE)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0, 'Pass Total Cost': 0,
-        'Running Total After Pass': after, 'Notes': (from || '?') + ' → ' + to + ' (Database master sheet)', 'Job Name': '', 'Job ID': o['Job ID'] || '',
+        'Running Total After Pass': after, 'Notes': (from || '?') + ' → ' + to + ' (Database master sheet)' + (to === STATUS.CURRENT && leftJob ? '; left job ' + leftJob : ''), 'Job Name': '', 'Job ID': o['Job ID'] || '',
         'Skid ID': skidId, 'Op ID': sOp });
     }
     done.push({ skidId, ticket: o['Ticket'], from: moving ? cur : (resumed ? from : ''), status: moving ? to : (resumed && to ? to : cur), litho: after, removed: v.removed.map((c) => c.item) });

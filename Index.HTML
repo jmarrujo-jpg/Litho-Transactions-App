@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.47.0</span>
+      <span class="version" id="appVersion">v1.47.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1198,7 +1198,8 @@
     });
     var n = changes.length;
     showConfirm('Save changes to ' + n + ' ticket' + (n === 1 ? '' : 's') + '?',
-      lines.slice(0, 12).join('; ') + (lines.length > 12 ? '; and ' + (lines.length - 12) + ' more' : '') + '. Every change is logged in Transactions.',
+      lines.slice(0, 12).join('; ') + (lines.length > 12 ? '; and ' + (lines.length - 12) + ' more' : '') + '. Every change is logged in Transactions.' +
+        (changes.some(function (c) { return c.status === 'Current'; }) ? ' Tickets going back to Current leave their job and lose their coated / approved dates (the history stays in Transactions).' : ''),
       function () {
         var btn = document.getElementById('msSaveBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
