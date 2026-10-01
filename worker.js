@@ -49,10 +49,15 @@ const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier
 // the service account (Drive reads the text of scanned PDFs). Every search is logged on this tab so
 // a mill is searched once (until "search again"); the review screen groups the hits by file.
 const DRIVE_SEARCH = 'Drive Search';
-const DRIVE_SEARCH_HEADERS = ['Mill', 'File ID', 'File Name', 'File Link', 'Folder ID', 'Folder Name', 'File Date', 'Searched At'];
+const DRIVE_SEARCH_HEADERS = ['Mill', 'File ID', 'File Name', 'File Link', 'Folder ID', 'Folder Name', 'File Date', 'Searched At', 'Scope'];
+// Only scans inside this folder (and every folder in it, at any depth) are searched — "Raw Metal
+// Packing Slip Archive"; env RECEIVER_SOURCE_FOLDER overrides. A search logged under another
+// folder (Scope) doesn't count, so changing it means searching again.
+const DEFAULT_SOURCE_FOLDER = '1wFGdaTg9Rep-ac6DM3rC9x6FA3HLh--_';
+const DRIVE_FOLDERS_PER_QUERY = 40;   // "in parents" terms per Drive query (keeps the query short)
 // Where approved receivers' copies go ("Raw Metal Packing Slips"); env RECEIVER_FOLDER_ID overrides.
 const DEFAULT_RECEIVER_FOLDER = '18PRmpTAcNgjmcjQ3_hELRHcsPkYGND98';
-const DRIVE_BATCH = 30;   // mills searched per request (one Drive call each; Free plan: 50 calls per request)
+const DRIVE_BATCH = 25;   // Drive calls for searching per request (Free plan: 50 calls per request)
 
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
@@ -139,7 +144,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'drive-60', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'drive-61', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -2024,6 +2029,29 @@ async function getReceivers(sheets) {
 
 // ---- Find in Drive ----
 function receiverFolderId(env) { return String((env && env.RECEIVER_FOLDER_ID) || DEFAULT_RECEIVER_FOLDER).trim(); }
+function sourceFolderId(env) { return String((env && env.RECEIVER_SOURCE_FOLDER) || DEFAULT_SOURCE_FOLDER).trim(); }
+// The source folder and every folder under it: {id: name}. One Drive call per level.
+async function driveFolderTree(sheets, rootId) {
+  const FOLDER = 'application/vnd.google-apps.folder';
+  const tree = {};
+  try { tree[rootId] = (await sheets.driveGet(rootId, 'id,name')).name || ''; }
+  catch (e) {
+    e = driveError(e);
+    if (e.status === 404) throw new Error('The app can’t see the receivers archive folder (' + rootId + '). Share it with the service account as Viewer.');
+    throw e;
+  }
+  let level = [rootId];
+  for (let depth = 0; depth < 8 && level.length; depth++) {
+    const next = [];
+    for (let i = 0; i < level.length; i += DRIVE_FOLDERS_PER_QUERY) {
+      const ins = level.slice(i, i + DRIVE_FOLDERS_PER_QUERY).map((id) => "'" + driveQ(id) + "' in parents").join(' or ');
+      const found = await sheets.driveList('(' + ins + ") and mimeType = '" + FOLDER + "' and trashed = false", 'id,name', 1000);
+      found.forEach((f) => { if (!tree[f.id]) { tree[f.id] = f.name || ''; next.push(f.id); } });
+    }
+    level = next;
+  }
+  return tree;
+}
 function driveQ(v) { return String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 function driveError(e) {
   const m = e && e.message ? e.message : String(e);
@@ -2057,13 +2085,13 @@ function driveTickets(masterRows, receivers) {
   return out;
 }
 // Each mill's latest search: {mill: {at, hits: {fileId: {...}}}} (a miss has no hits).
-async function driveSearchLog(sheets) {
+async function driveSearchLog(sheets, scope) {
   let t = null;
   try { t = await readTab(sheets, DRIVE_SEARCH); } catch (e) { t = null; }
   const latest = {}, folders = {};
   ((t && t.rows) || []).forEach((r) => {
     const m = keepKey(r['Mill']);
-    if (!m) return;
+    if (!m || String(r['Scope'] || '').trim() !== scope) return;
     const at = String(r['Searched At'] || '');
     if (!latest[m] || at > latest[m].at) latest[m] = { at, hits: {} };
     const fid = String(r['File ID'] || '').trim();
@@ -2083,36 +2111,43 @@ async function driveSearchMills(sheets, env, again) {
   const want = {};
   driveTickets(master.rows, receivers).forEach((t) => { if (t.searchable) want[t.mill] = 1; });
   await ensureTab(sheets, DRIVE_SEARCH, DRIVE_SEARCH_HEADERS);
-  const log = await driveSearchLog(sheets);
+  let hdr = (await readTab(sheets, DRIVE_SEARCH)).headers;
+  for (const col of DRIVE_SEARCH_HEADERS) hdr = (await ensureColumn(sheets, DRIVE_SEARCH, hdr, col)).headers;
+  const scope = sourceFolderId(env);
+  const log = await driveSearchLog(sheets, scope);
   const ts = nowStamp();
   const cutoff = again ? (again === true ? ts : String(again)) : '';
   // The first "again" call takes every miss up to now; the later ones only those before its cutoff
   // (what that first call and the ones after it searched are stamped at or after it).
   const stale = (at) => (again === true ? at <= cutoff : at < cutoff);
   const todo = Object.keys(want).sort().filter((m) => !log.latest[m] || (cutoff && !Object.keys(log.latest[m].hits).length && stale(log.latest[m].at)));
-  const batch = todo.slice(0, DRIVE_BATCH);
-  const out = [], newFolders = {};
+  if (!todo.length) return { ok: true, searched: 0, found: 0, remaining: 0, cutoff };
+  // Only inside the archive folder: each search names its folders ("in parents" isn't recursive).
+  let tree;
+  try { tree = await driveFolderTree(sheets, scope); } catch (e) { throw driveError(e); }
+  const ids = Object.keys(tree), chunks = [];
+  for (let i = 0; i < ids.length; i += DRIVE_FOLDERS_PER_QUERY) chunks.push(ids.slice(i, i + DRIVE_FOLDERS_PER_QUERY));
+  const batch = todo.slice(0, Math.max(1, Math.floor(DRIVE_BATCH / chunks.length)));
+  const out = [];
   let found = 0;
   for (const m of batch) {
-    let files;
-    try {
-      files = await sheets.driveList("fullText contains '\"" + driveQ(m) + "\"' and trashed = false and (mimeType = 'application/pdf' or mimeType contains 'image/')",
-        'id,name,webViewLink,parents,createdTime,mimeType', 20);
-    } catch (e) { throw driveError(e); }
+    const files = [], seen = {};
+    for (const ch of chunks) {
+      let got;
+      try {
+        got = await sheets.driveList("fullText contains '\"" + driveQ(m) + "\"' and trashed = false and (mimeType = 'application/pdf' or mimeType contains 'image/') and (" +
+          ch.map((id) => "'" + driveQ(id) + "' in parents").join(' or ') + ')', 'id,name,webViewLink,parents,createdTime,mimeType', 20);
+      } catch (e) { throw driveError(e); }
+      got.forEach((f) => { if (!seen[f.id]) { seen[f.id] = 1; files.push(f); } });
+    }
     if (files.length) found++;
-    if (!files.length) out.push({ 'Mill': m, 'Searched At': ts });
+    if (!files.length) out.push({ 'Mill': m, 'Searched At': ts, 'Scope': scope });
     files.forEach((f) => {
-      const folder = (f.parents || [])[0] || '';
-      if (folder && !log.folders[folder]) newFolders[folder] = 1;
+      const folder = (f.parents || []).filter((p) => tree[p] !== undefined)[0] || (f.parents || [])[0] || '';
       out.push({ 'Mill': m, 'File ID': f.id, 'File Name': f.name || '', 'File Link': f.webViewLink || ('https://drive.google.com/file/d/' + f.id + '/view'),
-        'Folder ID': folder, 'File Date': String(f.createdTime || '').slice(0, 10), 'Searched At': ts });
+        'Folder ID': folder, 'Folder Name': tree[folder] || '', 'File Date': String(f.createdTime || '').slice(0, 10), 'Searched At': ts, 'Scope': scope });
     });
   }
-  // Folder names for the review screen (a few per call; later calls fill in the rest).
-  for (const fid of Object.keys(newFolders).slice(0, 8)) {
-    try { log.folders[fid] = (await sheets.driveGet(fid, 'id,name')).name || ''; } catch (e) { /* not visible */ }
-  }
-  out.forEach((r) => { if (r['Folder ID']) r['Folder Name'] = log.folders[r['Folder ID']] || ''; });
   if (out.length) {
     const headers = (await readTab(sheets, DRIVE_SEARCH)).headers;
     await sheets.appendMany(DRIVE_SEARCH, out.map((r) => headers.map((h) => (r[h] != null ? r[h] : ''))),
@@ -2128,7 +2163,7 @@ async function getDriveMatches(sheets, env) {
   const master = await readTab(sheets, MASTER);
   const receivers = await receiverMap(sheets);
   const tickets = driveTickets(master.rows, receivers);
-  const log = await driveSearchLog(sheets);
+  const log = await driveSearchLog(sheets, sourceFolderId(env));
   const dest = receiverFolderId(env);
   const brief = (t) => ({ skidId: t.skidId, ticket: t.ticket, status: t.status, mill: t.mill, po: t.po, supplier: t.supplier, qty: t.qty });
   const byMill = {};
@@ -2180,7 +2215,7 @@ async function getDriveMatches(sheets, env) {
   const sup = {};
   Object.keys(receivers).forEach((id) => { if (receivers[id].supplier) sup[receivers[id].supplier] = 1; });
   return { groups: list, misses, unsearched, millCount: Object.keys(byMill).length, noMill: tickets.filter((t) => !t.searchable).length,
-    unassigned: tickets.map(brief), folderId: dest, saEmail: String(env.GCP_SA_EMAIL || ''), suppliers: Object.keys(sup).sort(),
+    unassigned: tickets.map(brief), folderId: dest, sourceFolderId: sourceFolderId(env), saEmail: String(env.GCP_SA_EMAIL || ''), suppliers: Object.keys(sup).sort(),
     receivers: Object.keys(receivers).sort().reverse().map((id) => ({ id, name: receiverName(receivers[id]) })) };
 }
 

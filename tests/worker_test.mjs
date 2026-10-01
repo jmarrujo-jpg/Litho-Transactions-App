@@ -759,13 +759,23 @@ await concurrency(envBase, 'in-worker lock');
     skid('302', 'SKD-000072', 'Current', 10, 50, { 'Mill': '9999999' }),
     skid('303', 'SKD-000073', 'Current', 10, 50, { 'Mill': '3044661' }),
     skid('304', 'SKD-000074', 'Current', 10, 50, { 'Mill': 'A / B' }));
+  const ARCH = '1wFGdaTg9Rep-ac6DM3rC9x6FA3HLh--_', FOLDER = 'application/vnd.google-apps.folder';
   f.drive.files.push(
-    { id: 'fold-rey', name: '2025 Reynolds', mimeType: 'application/vnd.google-apps.folder', parents: ['arch'] },
+    { id: ARCH, name: 'Raw Metal Packing Slip Archive', mimeType: FOLDER, parents: ['root'] },
+    { id: DEST, name: 'Raw Metal Packing Slips', mimeType: FOLDER, parents: [ARCH] },
+    { id: 'fold-tcc', name: '2026 TCC Steel', mimeType: FOLDER, parents: [ARCH] },
+    { id: 'fold-tcc-sep', name: 'September', mimeType: FOLDER, parents: ['fold-tcc'] },
+    { id: 'out-1', name: 'Steel report.pdf', mimeType: 'application/pdf', parents: ['mine'], text: '3045220 3044661 9999999' },
+    { id: 'fold-rey', name: '2025 Reynolds', mimeType: FOLDER, parents: [ARCH] },
     { id: 'src-1', name: 'Container Supply_20251028_121716.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-28T16:58:38Z', text: 'P.O.#: 7730-DC 1 3045220 85 T-5 2 3045214/ 85' },
     { id: 'src-2', name: 'Container Supply_20251014.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-14T10:00:00Z', text: '3044661 v' },
     { id: 'dst-1', name: '25-10-14--RN--R-00001.pdf', mimeType: 'application/pdf', parents: [DEST], createdTime: '2026-10-01T10:00:00Z', text: '3044661' },
     { id: 'xls-1', name: '26-09-30 Current.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', parents: ['mine'], text: '3045220 3044661' });
   await call('saveReceiver', [{ date: '2025-10-14', supplier: 'RN' }, '', 'op-26-r1']);
+  // A search logged before the archive limit (no Scope) doesn't count.
+  f.books[SID].tabs['Drive Search'] = { id: 990, rows: [['Mill', 'File ID', 'File Name', 'File Link', 'Folder ID', 'Folder Name', 'File Date', 'Searched At'],
+    ['3045220', 'out-1', 'Steel report.pdf', 'x', 'mine', '', '', '2026-01-01 00:00:00']], rowCount: 1000, colCount: 40 };
+  f.books[SID].order.push('Drive Search');
   const s1 = await call('driveSearchMills', [false]);
   ok('drive: searched every unassigned mill once', s1.ok && s1.result.searched === 5 && s1.result.remaining === 0 && s1.result.found === 3, s1);
   const s2 = await call('driveSearchMills', [false]);
@@ -778,6 +788,7 @@ await concurrency(envBase, 'in-worker lock');
     && gid('src-1').mills.join() === '3045214,3045220', gid('src-1'));
   ok('drive: an original already copied points to the copy', gid('src-2') && gid('src-2').coveredBy.join() === 'R-00001', gid('src-2'));
   ok('drive: spreadsheets are not searched', !gid('xls-1'));
+  ok('drive: only scans inside the archive folder', !gid('out-1'), gr.map((x) => x.fileId));
   ok('drive: not found and not searchable listed', g.result.misses.map((x) => x.mill).join() === '9999999,M77' && g.result.noMill >= 1 && g.result.unsearched === 0, g.result);
   // Approve the scan: new receiver, copy, attach (first try loses the attach's log append).
   const rec = { fileId: 'src-1', date: '2025-10-28', supplier: 'rn', pos: '7730-DC', notes: '', skidIds: ['SKD-000070', 'SKD-000071'] };
@@ -797,9 +808,11 @@ await concurrency(envBase, 'in-worker lock');
   ok('drive: attach to the receiver already in the folder', a4.ok && !a4.result.created && skidRow(f, 'SKD-000073')['Receiver'] === 'R-00001', a4);
   // A My Drive folder: Google refuses the service account's copy -> linked to the original.
   f.books[SID].tabs['Steel Tickets'].rows.push(skid('305', 'SKD-000075', 'Current', 10, 50, { 'Mill': '5550001' }));
-  f.drive.files.push({ id: 'src-3', name: 'TCC_0915.pdf', mimeType: 'application/pdf', parents: ['fold-tcc'], createdTime: '2026-09-15T08:00:00Z', text: '5550001' });
+  f.drive.files.push({ id: 'src-3', name: 'TCC_0915.pdf', mimeType: 'application/pdf', parents: ['fold-tcc-sep'], createdTime: '2026-09-15T08:00:00Z', text: '5550001' });
   f.drive.quota = true;
   await call('driveSearchMills', [false]);
+  const gq = await call('getDriveMatches', []);
+  ok('drive: a folder two levels down is searched too', gq.ok && gq.result.groups.some((x) => x.fileId === 'src-3' && x.folderName === 'September'), gq.result && gq.result.groups.map((x) => [x.fileId, x.folderName]));
   const q = await call('approveDriveMatch', [{ fileId: 'src-3', date: '2026-09-15', supplier: 'TCC', skidIds: ['SKD-000075'] }, 'Jo', 'op-26-q']);
   const r3 = f.rows(SID, 'Receivers').filter((x) => x['Receiver ID'] === 'R-00003')[0];
   ok('drive: copy refused -> receiver still made, linked to the original, told why', q.ok && q.result.copy && !q.result.copy.copied && /My Drive/.test(q.result.copy.copyError)
@@ -816,6 +829,9 @@ await concurrency(envBase, 'in-worker lock');
     && g2.result.misses.map((x) => x.mill).join() === 'M77', g2.result && g2.result.groups);
   const bad = await call('approveDriveMatch', [{ fileId: 'src-4', supplier: 'TCC', skidIds: [] }, 'Jo', 'op-26-x']);
   ok('drive: approve needs a ticket', !bad.ok && /ticket/.test(bad.error), bad);
+  f.books[SID].tabs['Steel Tickets'].rows.push(skid('306', 'SKD-000076', 'Current', 10, 50, { 'Mill': '7770001' }));
+  const ns = await call('driveSearchMills', [false], Object.assign({}, envBase, { RECEIVER_SOURCE_FOLDER: 'not-shared' }));
+  ok('drive: archive folder not shared -> says to share it', !ns.ok && /Share it with the service account/.test(ns.error), ns);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

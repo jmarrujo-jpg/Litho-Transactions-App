@@ -74,7 +74,9 @@ export function makeFake(seed) {
       let list = drive.files.filter((f) => !f.trashed);
       let m;
       if ((m = /fullText contains '"((?:[^"\\]|\\.)*)"'/.exec(q))) { const w = m[1].toUpperCase(); list = list.filter((f) => (' ' + String(f.text || '').toUpperCase().replace(/[^A-Z0-9-]+/g, ' ') + ' ').includes(' ' + w + ' ')); }
-      if ((m = /'([^']+)' in parents/.exec(q))) { const id = m[1]; list = list.filter((f) => (f.parents || []).includes(id)); }
+      const ins = [...q.matchAll(/'([^']+)' in parents/g)].map((x) => x[1]);
+      if (ins.length) list = list.filter((f) => (f.parents || []).some((p) => ins.includes(p)));
+      if (/mimeType = 'application\/vnd\.google-apps\.folder'/.test(q)) list = list.filter((f) => f.mimeType === 'application/vnd.google-apps.folder');
       if ((m = /name contains '([^']+)'/.exec(q))) { const w = m[1]; list = list.filter((f) => f.name.includes(w)); }
       if (/mimeType = 'application\/pdf'/.test(q)) list = list.filter((f) => f.mimeType === 'application/pdf' || /^image\//.test(f.mimeType));
       return { files: list.slice(0, Number(u.searchParams.get('pageSize') || 100)).map(pick) };

@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.52.0</span>
+      <span class="version" id="appVersion">v1.53.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1387,6 +1387,9 @@
       var b = document.getElementById('drvBack'); if (b) b.onclick = function () { rcvSel = null; renderReceivers(); };
     }).getDriveMatches();
   }
+  function drvArchiveLink(d) {
+    return d.sourceFolderId ? '<a target="_blank" rel="noopener" href="https://drive.google.com/drive/folders/' + esc(d.sourceFolderId) + '" style="color:var(--accent)">receivers archive</a>' : 'receivers archive';
+  }
   function drvGroup(fileId) { return ((drvData && drvData.groups) || []).filter(function (g) { return g.fileId === fileId; })[0]; }
   function drvUnassigned(id) { return ((drvData && drvData.unassigned) || []).filter(function (t) { return t.skidId === id; })[0]; }
   // The group's tickets plus any added by hand, each with whether it's ticked.
@@ -1421,7 +1424,7 @@
     var d = drvData, searched = d.millCount - d.unsearched;
     var html = '<button class="btn secondary" id="drvBack" style="margin-bottom:10px">&larr; All receivers</button>' +
       '<div class="card"><h3 style="margin-top:0">Find receivers in Drive</h3>' +
-      '<div class="sub" style="margin-bottom:8px">Searches the receiver scans shared with the app for the mill number of every ticket that has no receiver yet. Drive reads the text in scanned PDFs, so most are found; handwritten or blurry ones, or a misread digit, may not be. Nothing is saved until you approve it.</div>' +
+      '<div class="sub" style="margin-bottom:8px">Searches the receiver scans in the ' + drvArchiveLink(d) + ' folder (and every folder inside it) for the mill number of every ticket that has no receiver yet. Drive reads the text in scanned PDFs, so most are found; handwritten or blurry ones, or a misread digit, may not be. Nothing is saved until you approve it.</div>' +
       '<div style="font-weight:600">' + d.millCount + ' mill number' + (d.millCount === 1 ? '' : 's') + ' on tickets with no receiver &middot; ' + searched + ' searched &middot; ' +
         d.groups.length + ' file' + (d.groups.length === 1 ? '' : 's') + ' found &middot; ' + d.misses.length + ' not found' + (d.unsearched ? ' &middot; <span style="color:var(--warn)">' + d.unsearched + ' not searched yet</span>' : '') + '</div>' +
       (d.noMill ? '<div class="sub">' + d.noMill + ' ticket' + (d.noMill === 1 ? ' has' : 's have') + ' no mill number (or one made of several), so ' + (d.noMill === 1 ? 'it' : 'they') + ' can’t be searched — add ' + (d.noMill === 1 ? 'it' : 'them') + ' by hand.</div>' : '') +
@@ -1430,8 +1433,7 @@
         (d.misses.length ? '<button class="btn secondary" id="drvAgain"' + (drvBusy ? ' disabled' : '') + '>Search again for the ' + d.misses.length + ' not found</button>' : '') +
         '<button class="btn secondary" id="drvReload"' + (drvBusy ? ' disabled' : '') + '>↻</button></div>' +
       '<div class="sub" id="drvProgress" style="margin-top:8px;font-weight:600">' + esc(drvProgress) + '</div>' +
-      (searched && !d.groups.length ? '<div class="sub" style="margin-top:6px">Nothing found yet. The scans have to be shared with the app’s account' + (d.saEmail ? ' (<b>' + esc(d.saEmail) + '</b>)' : '') + ' — sharing the folder that holds them (e.g. <i>Raw Metal Packing Slip Archive</i>) as Viewer covers every folder inside it.</div>'
-        : (d.saEmail ? '<div class="sub" style="margin-top:6px">Searches what’s shared with ' + esc(d.saEmail) + '.</div>' : '')) +
+      (searched && !d.groups.length ? '<div class="sub" style="margin-top:6px">Nothing found yet. The ' + drvArchiveLink(d) + ' folder has to be shared with the app’s account' + (d.saEmail ? ' (<b>' + esc(d.saEmail) + '</b>)' : '') + ' as Viewer.</div>' : '') +
       '</div>';
     html += d.groups.map(drvGroupHtml).join('');
     if (d.misses.length) {
