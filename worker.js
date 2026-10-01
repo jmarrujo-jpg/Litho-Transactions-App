@@ -131,7 +131,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-58', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-59', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1688,7 +1688,7 @@ async function getMasterSheet(sheets) {
     if (MASTER_STATUSES.indexOf(st) === -1 && st !== STATUS.PENDING) return;
     const t = traceOf(o, ctx);
     out.push({ skidId: o['Skid ID'] || '', ticket: o['Ticket'] || '', status: st, litho: num(o['Litho']), mill: t.mill, customer: t.customer,
-      jobId: t.jobId, qty: t.qty, usedOn: t.usedOn, po: t.po, receiver: t.receiver, receiverName: t.receiverName, receiverFrom: t.receiverFrom,
+      jobId: t.jobId, qty: t.qty, usedOn: t.usedOn, po: t.po, receiver: t.receiver, receiverName: t.receiverName, receiverLink: t.receiverLink, receiverFrom: t.receiverFrom,
       receiverOwn: String(o['Receiver'] || '').trim(),
       coatings: activeCoatings(skidHist(ctx, o)).map((c) => ({ passNumber: c.passNumber, item: c.item, group: c.group || '', sub: c.sub || '', chemCode: c.chemCode || '', cost: c.cost, date: c.date })) });
   });

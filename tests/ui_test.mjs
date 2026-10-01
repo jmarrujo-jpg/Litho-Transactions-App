@@ -751,9 +751,7 @@ const base = {
   await page.click('#histClose'); await page.waitForTimeout(100);
   // Database: Master sheet and raw Steel Tickets editor
   await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
-  await page.click('#msList [data-hist="SKD-1"]'); await page.waitForTimeout(300);
-  ok('Master sheet row opens history', !!(await page.$('#histRoot')));
-  await page.click('#histClose'); await page.waitForTimeout(100);
+  ok('Master sheet rows have no History button (the Coatings drop-down covers it)', !(await page.$('#msList [data-hist]')) && !!(await page.$('#msList [data-mscoats]')));
   await page.click('[data-dbt="steel"]'); await page.waitForTimeout(300);
   await page.click('#dbTableBox tbody tr'); await page.waitForTimeout(200);
   await page.click('[data-hist="SKD-1"]'); await page.waitForTimeout(300);
@@ -837,10 +835,8 @@ const base = {
   await page.evaluate(() => openSkidHistory('SKD-1')); await page.waitForTimeout(300);
   let h = await page.textContent('#histRoot');
   ok('history shows PO and receiver', h.includes('PO 7974-DC') && h.includes('26-10-01--TCC--R-00008') && h.includes('RECEIVER SET'));
-  ok('Open file uses the saved link', await page.$eval('#histRoot a[href*="drive.google.com/file"]', (a) => a.target === '_blank'));
-  await page.click('#histRoot a[data-hist="rcv:R-00008"]'); await page.waitForTimeout(300);
-  h = await page.textContent('#histRoot');
-  ok('tapping the receiver lists its tickets', h.includes('Receiver 26-10-01--TCC--R-00008') && h.includes('100126-001') && h.includes('7974-DC, 7976-DC') && !!(await page.$('#histBack')));
+  ok('the receiver name opens its file (saved link, new tab)', await page.$eval('#histRoot a[href*="drive.google.com/file"]', (a) => a.target === '_blank' && a.textContent === '26-10-01--TCC--R-00008'));
+  ok('no separate Open file button, no receiver page', !(await page.$('#histRoot [data-hist^="rcv:"]')) && !(await page.textContent('#histRoot')).includes('Open file'));
   ok('no link: Drive search for the number', await page.evaluate(() => rcvFileBtn('R-00007', '').includes('drive/search?q=%22R-00007%22')));
   await page.click('#histClose'); await page.waitForTimeout(100);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
@@ -857,6 +853,7 @@ const base = {
   await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
   let txt = await page.textContent('#msList');
   ok('rows show PO and receiver (and where an inherited one came from)', txt.includes('PO 7974-DC') && txt.includes('26-10-01--TCC--R-00001') && txt.includes('(from 501)'), txt);
+  ok('receiver name links to its file (Drive search when no link is saved)', await page.$eval('#msList a[href*="drive/search"]', (x) => x.target === '_blank' && x.textContent === '26-10-01--TCC--R-00001' && x.href.includes('R-00001')));
   await page.click('[data-msrcvedit="SKD-1"]'); await page.waitForTimeout(100);
   await page.selectOption('[data-msrcv="SKD-1"]', 'R-00002'); await page.waitForTimeout(100);
   ok('marked, not saved', (await page.textContent('#msBarText')).includes('1 ticket changed') && (await page.textContent('#msList')).includes('R-00001 → R-00002'));
