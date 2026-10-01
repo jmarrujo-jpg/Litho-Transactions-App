@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.51.0</span>
+      <span class="version" id="appVersion">v1.52.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1294,7 +1294,7 @@
       var byId = {}; rcvData.tickets.forEach(function (t) { byId[t.skidId] = t; });
       Object.keys(rcvAdd).forEach(function (id) { if (!byId[id] || byId[id].receiver === rcvSel) delete rcvAdd[id]; });
       Object.keys(rcvDrop).forEach(function (id) { if (!byId[id] || byId[id].receiver !== rcvSel) delete rcvDrop[id]; });
-      if (rcvSel && rcvSel !== 'new' && !rcvById(rcvSel)) rcvSel = null;
+      if (rcvSel && rcvSel !== 'new' && rcvSel !== 'drive' && !rcvById(rcvSel)) rcvSel = null;
       if (then) then(); else renderReceivers();
     }).withFailureHandler(function (err) {
       var box = document.getElementById('rcvBox');
@@ -1306,13 +1306,15 @@
   function renderReceivers() {
     var box = document.getElementById('rcvBox');
     if (!box) return;
+    if (rcvSel === 'drive') { renderDriveView(); return; }
     if (!rcvData) { box.innerHTML = '<div class="loading">Loading receivers&hellip;</div>'; rcvLoad(); return; }
     if (rcvSel) { renderReceiverDetail(); return; }
     box.innerHTML =
       '<div class="sub" style="margin:4px 0 8px">Each receiver is the paperwork a load came in on. Tickets point to it by its number, and the file name to give the Drive scan is shown on each one.</div>' +
-      '<div class="row" style="align-items:flex-end;gap:8px">' +
-        '<div class="field" style="flex:1;margin:0"><label>Find a receiver</label><input id="rcvSearch" placeholder="number, supplier, PO, date…" autocomplete="off" value="' + esc(rcvSearch) + '"></div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">' +
+        '<div class="field" style="flex:1;min-width:200px;margin:0"><label>Find a receiver</label><input id="rcvSearch" placeholder="number, supplier, PO, date…" autocomplete="off" value="' + esc(rcvSearch) + '"></div>' +
         '<button class="btn secondary" id="rcvReload" style="margin:0">↻</button>' +
+        '<button class="btn secondary" id="rcvDrive" style="margin:0">🔎 Find in Drive</button>' +
         '<button class="btn success" id="rcvNew" style="margin:0">+ New receiver</button>' +
       '</div><div id="rcvKeep"></div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
     renderRcvKeep();
@@ -1320,6 +1322,7 @@
     si.oninput = function () { rcvSearch = si.value; renderRcvList(); };
     document.getElementById('rcvReload').onclick = function () { rcvData = null; renderReceivers(); };
     document.getElementById('rcvNew').onclick = function () { rcvSel = 'new'; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
+    document.getElementById('rcvDrive').onclick = function () { rcvSel = 'drive'; renderReceivers(); };
     renderRcvList();
   }
   // Kept numbers: each receiver remembers its tickets' mill / ticket numbers, so a wipe of Steel
@@ -1370,6 +1373,203 @@
           });
         }, 'Attach');
     };
+  }
+  // ---- Find in Drive: mill numbers of tickets with no receiver, searched in the shared scans ----
+  // Hits are grouped by file. Review one: untick tickets that aren't on it, add ones the search
+  // missed, fill in the details, then Approve = new receiver + copy into the receivers folder +
+  // tickets attached (or put them on a receiver that already exists).
+  var drvData = null, drvBusy = false, drvOpen = {}, drvPick = {}, drvExtra = {}, drvForm = {}, drvQ = {}, drvOps = {}, drvProgress = '';
+  function drvLoad() {
+    google.script.run.withSuccessHandler(function (res) { drvData = res; renderDriveView(); }).withFailureHandler(function (err) {
+      var box = document.getElementById('rcvBox');
+      if (box) box.innerHTML = '<button class="btn secondary" id="drvBack" style="margin-bottom:10px">&larr; All receivers</button><div class="card empty">Could not load: ' + esc(err.message) + ' <button class="btn secondary" id="drvRetry">Try again</button></div>';
+      var r = document.getElementById('drvRetry'); if (r) r.onclick = function () { drvData = null; renderDriveView(); };
+      var b = document.getElementById('drvBack'); if (b) b.onclick = function () { rcvSel = null; renderReceivers(); };
+    }).getDriveMatches();
+  }
+  function drvGroup(fileId) { return ((drvData && drvData.groups) || []).filter(function (g) { return g.fileId === fileId; })[0]; }
+  function drvUnassigned(id) { return ((drvData && drvData.unassigned) || []).filter(function (t) { return t.skidId === id; })[0]; }
+  // The group's tickets plus any added by hand, each with whether it's ticked.
+  function drvTickets(g) {
+    var seen = {}, out = [], pick = drvPick[g.fileId] || {};
+    g.tickets.forEach(function (t) { if (!seen[t.skidId]) { seen[t.skidId] = 1; out.push({ t: t, on: pick[t.skidId] !== false, found: true }); } });
+    Object.keys(drvExtra[g.fileId] || {}).forEach(function (id) { var t = drvUnassigned(id); if (t && !seen[id]) { seen[id] = 1; out.push({ t: t, on: pick[id] !== false, found: false }); } });
+    return out;
+  }
+  function drvChosen(g) { return drvTickets(g).filter(function (x) { return x.on; }).map(function (x) { return x.t.skidId; }); }
+  function drvFormOf(g) {
+    if (!drvForm[g.fileId]) drvForm[g.fileId] = { date: g.date || '', supplier: g.supplier || '', pos: g.pos || '', notes: '' };
+    return drvForm[g.fileId];
+  }
+  // Tickets to add by hand: a ticket range ("100126-001 to 100126-012"), or any part of a ticket, mill or PO.
+  function drvFindTickets(g, q) {
+    q = String(q || '').trim();
+    if (!q) return null;
+    var have = {}; drvTickets(g).forEach(function (x) { have[x.t.skidId] = 1; });
+    var parts = q.split(/\s+(?:to|-|–)\s+|\s*\.\.\s*/), kf = parts.length === 2 ? rcvTicketKey(parts[0]) : null, kt = parts.length === 2 ? rcvTicketKey(parts[1]) : null;
+    var low = q.toLowerCase();
+    return (drvData.unassigned || []).filter(function (t) {
+      if (have[t.skidId]) return false;
+      if (kf && kt) { var k = rcvTicketKey(t.ticket); return !!k && k >= kf && k <= kt; }
+      return [t.ticket, t.mill, t.po, t.skidId].some(function (v) { return String(v || '').toLowerCase().indexOf(low) !== -1; });
+    }).slice(0, 40);
+  }
+  function renderDriveView() {
+    var box = document.getElementById('rcvBox');
+    if (!box) return;
+    if (!drvData) { box.innerHTML = '<div class="loading">Loading what was found in Drive&hellip;</div>'; drvLoad(); return; }
+    var d = drvData, searched = d.millCount - d.unsearched;
+    var html = '<button class="btn secondary" id="drvBack" style="margin-bottom:10px">&larr; All receivers</button>' +
+      '<div class="card"><h3 style="margin-top:0">Find receivers in Drive</h3>' +
+      '<div class="sub" style="margin-bottom:8px">Searches the receiver scans shared with the app for the mill number of every ticket that has no receiver yet. Drive reads the text in scanned PDFs, so most are found; handwritten or blurry ones, or a misread digit, may not be. Nothing is saved until you approve it.</div>' +
+      '<div style="font-weight:600">' + d.millCount + ' mill number' + (d.millCount === 1 ? '' : 's') + ' on tickets with no receiver &middot; ' + searched + ' searched &middot; ' +
+        d.groups.length + ' file' + (d.groups.length === 1 ? '' : 's') + ' found &middot; ' + d.misses.length + ' not found' + (d.unsearched ? ' &middot; <span style="color:var(--warn)">' + d.unsearched + ' not searched yet</span>' : '') + '</div>' +
+      (d.noMill ? '<div class="sub">' + d.noMill + ' ticket' + (d.noMill === 1 ? ' has' : 's have') + ' no mill number (or one made of several), so ' + (d.noMill === 1 ? 'it' : 'they') + ' can’t be searched — add ' + (d.noMill === 1 ? 'it' : 'them') + ' by hand.</div>' : '') +
+      '<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">' +
+        (d.unsearched ? '<button class="btn success" id="drvSearch"' + (drvBusy ? ' disabled' : '') + '>Search Drive (' + d.unsearched + ')</button>' : '') +
+        (d.misses.length ? '<button class="btn secondary" id="drvAgain"' + (drvBusy ? ' disabled' : '') + '>Search again for the ' + d.misses.length + ' not found</button>' : '') +
+        '<button class="btn secondary" id="drvReload"' + (drvBusy ? ' disabled' : '') + '>↻</button></div>' +
+      '<div class="sub" id="drvProgress" style="margin-top:8px;font-weight:600">' + esc(drvProgress) + '</div>' +
+      (searched && !d.groups.length ? '<div class="sub" style="margin-top:6px">Nothing found yet. The scans have to be shared with the app’s account' + (d.saEmail ? ' (<b>' + esc(d.saEmail) + '</b>)' : '') + ' — sharing the folder that holds them (e.g. <i>Raw Metal Packing Slip Archive</i>) as Viewer covers every folder inside it.</div>'
+        : (d.saEmail ? '<div class="sub" style="margin-top:6px">Searches what’s shared with ' + esc(d.saEmail) + '.</div>' : '')) +
+      '</div>';
+    html += d.groups.map(drvGroupHtml).join('');
+    if (d.misses.length) {
+      html += '<details class="card"><summary style="cursor:pointer;font-weight:600">' + d.misses.length + ' mill number' + (d.misses.length === 1 ? '' : 's') + ' not found</summary>' +
+        '<div class="sub" style="margin:6px 0">Handwritten or blurry scans, a misread digit, or a scan not shared yet. Add these by hand to a receiver, or search again after new scans are added.</div>' +
+        d.misses.map(function (m) { return '<div class="queue-item" style="padding:4px 0"><div><b>Mill ' + esc(m.mill) + '</b> <span class="sub">' + m.tickets.map(function (t) { return esc(t.ticket + (t.po ? ' (PO ' + t.po + ')' : '')); }).join(', ') + '</span></div></div>'; }).join('') + '</details>';
+    }
+    box.innerHTML = html;
+    document.getElementById('drvBack').onclick = function () { rcvSel = null; rcvData = null; renderReceivers(); };
+    var s1 = document.getElementById('drvSearch'); if (s1) s1.onclick = function () { drvRunSearch(false); };
+    var s2 = document.getElementById('drvAgain'); if (s2) s2.onclick = function () { drvRunSearch(true); };
+    document.getElementById('drvReload').onclick = function () { drvData = null; drvProgress = ''; renderDriveView(); };
+    drvWire(box);
+  }
+  function drvGroupHtml(g) {
+    var open = !!drvOpen[g.fileId], list = drvTickets(g), on = list.filter(function (x) { return x.on; }).length;
+    var note = g.receiver ? '<span class="badge" style="background:#e8f5e9;color:var(--good)">In the receivers folder as ' + esc(g.receiver) + '</span>'
+      : g.namedReceiver ? '<span class="badge">Named ' + esc(g.namedReceiver) + ', but that receiver isn’t in the app</span>'
+      : (g.coveredBy && g.coveredBy.length) ? '<span class="badge">Already copied as ' + esc(g.coveredBy.join(', ')) + ' — attach there</span>'
+      : g.madeFrom.length ? '<span class="badge">' + esc(g.madeFrom.join(', ')) + ' made from this file</span>' : '';
+    var head = '<div class="row" style="align-items:center;gap:8px;flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:200px"><a target="_blank" rel="noopener" href="' + esc(g.link) + '" style="font-weight:700;color:var(--accent);text-decoration:underline;font-size:15px">' + esc(g.name) + '</a>' +
+        '<div class="sub">' + esc([g.folderName, g.date && ('scanned ' + g.date), g.mills.length + ' mill number' + (g.mills.length === 1 ? '' : 's'), g.tickets.length + ' ticket' + (g.tickets.length === 1 ? '' : 's') + ' with no receiver'].filter(Boolean).join(' · ')) + '</div>' +
+        (note ? '<div style="margin-top:4px">' + note + '</div>' : '') + '</div>' +
+      (g.receiver ? '<button class="btn success" data-drvquick="' + esc(g.fileId) + '" style="padding:6px 10px;font-size:13px">Attach ' + g.tickets.length + ' to ' + esc(g.receiver) + '</button>' : '') +
+      '<button class="btn secondary" data-drvopen="' + esc(g.fileId) + '" style="padding:6px 10px;font-size:13px">' + (open ? 'Close' : 'Review') + '</button></div>';
+    if (!open) return '<div class="card" style="padding:12px 14px' + ((g.coveredBy && g.coveredBy.length) ? ';opacity:.75' : '') + '">' + head + '</div>';
+    var f = drvFormOf(g), sups = ((drvData.suppliers || []).concat(rcvData ? rcvData.suppliers || [] : [])).filter(function (v, i, a) { return a.indexOf(v) === i; });
+    var fid = esc(g.fileId), q = drvQ[g.fileId] || '', found = drvFindTickets(g, q);
+    var body = '<div style="margin-top:10px"><div class="sub" style="font-weight:600">Tickets (' + on + ' of ' + list.length + ' ticked)</div>' +
+      list.map(function (x) {
+        var t = x.t;
+        return '<label class="queue-item" style="padding:6px 0;cursor:pointer;display:flex;align-items:center;gap:8px"><input type="checkbox" style="width:auto" data-drvtk="' + fid + '|' + esc(t.skidId) + '"' + (x.on ? ' checked' : '') + '>' +
+          '<div style="flex:1;min-width:0' + (x.on ? '' : ';opacity:.55') + '"><b>' + esc(t.ticket || t.skidId) + '</b> <span class="sub">' + esc([t.status, t.mill && ('Mill ' + t.mill), t.po && ('PO ' + t.po), (t.qty !== '' && t.qty != null) ? t.qty + ' sheets' : '', x.found ? 'mill found in this file' : 'added by hand'].filter(Boolean).join(' · ')) + '</span></div></label>';
+      }).join('') +
+      '<div class="field" style="margin:8px 0 4px"><label>Add a ticket the search missed</label><input data-drvq="' + fid + '" autocomplete="off" placeholder="ticket, mill or PO — or a range: 100126-001 to 100126-012" value="' + esc(q) + '"></div>' +
+      '<div id="drvq-' + fid + '">' + drvFoundHtml(g, found) + '</div></div>' +
+      '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">' +
+        '<div class="field" style="flex:1;min-width:140px"><label>Date received</label><input type="date" data-drvf="' + fid + '|date" value="' + esc(f.date) + '"></div>' +
+        '<div class="field" style="flex:1;min-width:140px"><label>Supplier</label><input data-drvf="' + fid + '|supplier" list="drvSup" autocomplete="off" placeholder="e.g. RN" value="' + esc(f.supplier) + '"><datalist id="drvSup">' + sups.map(function (v) { return '<option value="' + esc(v) + '">'; }).join('') + '</datalist></div></div>' +
+      '<div class="field"><label>POs on it</label><input data-drvf="' + fid + '|pos" autocomplete="off" value="' + esc(f.pos) + '"></div>' +
+      '<div class="field"><label>Notes</label><input data-drvf="' + fid + '|notes" autocomplete="off" placeholder="e.g. packing slip 178608" value="' + esc(f.notes) + '"></div>' +
+      '<div class="sub" style="margin-bottom:8px">The scan is copied into the receivers folder as <code id="drvName-' + fid + '">' + esc(rcvFileName('', f.date, f.supplier)) + '</code> (the R-number is given when you approve). The original stays where it is.' +
+        (g.date ? ' Date is the day it was scanned — change it if it was received on another day.' : '') + '</div>' +
+      '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">' +
+        '<button class="btn success" data-drvapprove="' + fid + '" style="flex:1;min-width:220px"' + (on ? '' : ' disabled') + '>Approve: new receiver for ' + on + ' ticket' + (on === 1 ? '' : 's') + '</button>' +
+        '<select data-drvexsel="' + fid + '" style="max-width:220px"><option value="">…or put them on an existing receiver</option>' + (drvData.receivers || []).map(function (r) {
+          return '<option value="' + esc(r.id) + '"' + ((g.receiver || (g.coveredBy || [])[0] || g.madeFrom[0]) === r.id ? ' selected' : '') + '>' + esc(r.name) + '</option>'; }).join('') + '</select>' +
+        '<button class="btn secondary" data-drvexisting="' + fid + '"' + (on ? '' : ' disabled') + '>Attach</button></div>';
+    return '<div class="card" style="padding:12px 14px;border:2px solid var(--accent)">' + head + body + '</div>';
+  }
+  function drvFoundHtml(g, found) {
+    if (found === null) return '';
+    if (!found.length) return '<div class="sub">No ticket without a receiver matches.</div>';
+    return found.map(function (t) {
+      return '<div class="queue-item" style="padding:4px 0"><div style="min-width:0"><b>' + esc(t.ticket || t.skidId) + '</b> <span class="sub">' + esc([t.status, t.mill && ('Mill ' + t.mill), t.po && ('PO ' + t.po)].filter(Boolean).join(' · ')) + '</span></div>' +
+        '<button class="btn success" style="padding:4px 10px;font-size:13px" data-drvadd="' + esc(g.fileId) + '|' + esc(t.skidId) + '">Add</button></div>';
+    }).join('');
+  }
+  function drvWire(box) {
+    var each = function (sel, fn) { Array.prototype.forEach.call(box.querySelectorAll(sel), fn); };
+    var split = function (v) { var i = v.indexOf('|'); return [v.slice(0, i), v.slice(i + 1)]; };
+    each('[data-drvopen]', function (b) { b.onclick = function () { var id = b.getAttribute('data-drvopen'); drvOpen[id] = !drvOpen[id]; renderDriveView(); }; });
+    each('[data-drvtk]', function (c) { c.onchange = function () { var p = split(c.getAttribute('data-drvtk')); (drvPick[p[0]] = drvPick[p[0]] || {})[p[1]] = c.checked; renderDriveView(); }; });
+    each('[data-drvadd]', function (b) { b.onclick = function () { var p = split(b.getAttribute('data-drvadd')); (drvExtra[p[0]] = drvExtra[p[0]] || {})[p[1]] = true; if (drvPick[p[0]]) delete drvPick[p[0]][p[1]]; renderDriveView(); }; });
+    each('[data-drvq]', function (inp) {
+      inp.oninput = function () {
+        var id = inp.getAttribute('data-drvq'), g = drvGroup(id); drvQ[id] = inp.value;
+        var el = document.getElementById('drvq-' + id); if (el && g) { el.innerHTML = drvFoundHtml(g, drvFindTickets(g, inp.value)); drvWire(el); }
+      };
+    });
+    each('[data-drvf]', function (inp) {
+      inp.oninput = function () {
+        var p = split(inp.getAttribute('data-drvf')), g = drvGroup(p[0]); if (!g) return;
+        var f = drvFormOf(g); f[p[1]] = inp.value;
+        var n = document.getElementById('drvName-' + p[0]); if (n) n.textContent = rcvFileName('', f.date, f.supplier);
+      };
+    });
+    each('[data-drvapprove]', function (b) { b.onclick = function () { drvApprove(b.getAttribute('data-drvapprove'), ''); }; });
+    each('[data-drvexisting]', function (b) { b.onclick = function () {
+      var id = b.getAttribute('data-drvexisting'), sel = box.querySelector('[data-drvexsel="' + id + '"]');
+      if (!sel || !sel.value) { toast('Pick the receiver to put them on'); return; }
+      drvApprove(id, sel.value);
+    }; });
+    each('[data-drvquick]', function (b) { b.onclick = function () { var g = drvGroup(b.getAttribute('data-drvquick')); if (g) drvApprove(g.fileId, g.receiver); }; });
+  }
+  // Searches in batches until every mill is done (each batch is one request).
+  function drvRunSearch(again) {
+    if (drvBusy) return;
+    drvBusy = true;
+    var total = 0, found = 0;
+    drvProgress = 'Searching Drive…';
+    renderDriveView();
+    var step = function (arg) {
+      runMutation('driveSearchMills', [arg], function (res) {
+        total += res.searched; found += res.found;
+        drvProgress = 'Searched ' + total + ' mill number' + (total === 1 ? '' : 's') + ', found ' + found + (res.remaining ? ' — ' + res.remaining + ' to go…' : '.');
+        var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
+        if (res.remaining > 0 && res.searched > 0) step(again ? res.cutoff : false);
+        else { drvBusy = false; drvData = null; renderDriveView(); }
+      }, function (err) {
+        drvBusy = false;
+        drvProgress = 'Stopped: ' + err.message + (total ? ' (' + total + ' searched before it stopped — tap Search to carry on)' : '');
+        drvData = null; renderDriveView();
+      });
+    };
+    step(again ? true : false);
+  }
+  function drvApprove(fileId, existingId) {
+    var g = drvGroup(fileId);
+    if (!g) return;
+    var ids = drvChosen(g), f = drvFormOf(g);
+    if (!ids.length) { toast('Tick at least one ticket'); return; }
+    if (!existingId && !rcvCleanSupplier(f.supplier)) { toast('Enter the supplier'); return; }
+    var n = ids.length + ' ticket' + (ids.length === 1 ? '' : 's');
+    showConfirm(existingId ? 'Put ' + n + ' on ' + existingId + '?' : 'Approve a new receiver for ' + n + '?',
+      existingId ? 'They go on ' + existingId + '. Each change is logged in the ticket’s history.'
+        : 'It gets the next R-number, the scan is copied into the receivers folder as ' + rcvFileName('R-?????', f.date, f.supplier) + ', and the tickets are put on it. Each change is logged in the ticket’s history.',
+      function () {
+        var op = drvOps[fileId] = drvOps[fileId] || newOpId();
+        drvProgress = 'Saving…'; var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
+        runMutation('approveDriveMatch', [{ fileId: fileId, receiverId: existingId || '', date: f.date, supplier: f.supplier, pos: f.pos, notes: f.notes, skidIds: ids }, '', op], function (res) {
+          delete drvOps[fileId]; delete drvOpen[fileId]; delete drvPick[fileId]; delete drvExtra[fileId]; delete drvForm[fileId]; delete drvQ[fileId];
+          drvData = null; rcvData = null; msData = null; drvProgress = '';
+          var c = res.copy, saved = res.saved || [], skipped = res.skipped || [];
+          var msg = (res.created ? res.receiver + ' created (' + res.name + '). ' : 'Put on ' + res.receiver + '. ') +
+            (c ? (c.copied ? (c.already ? '' : 'The scan was copied into the receivers folder as ' + c.copyName + '. ')
+              : c.copyError + ' The receiver is linked to the original scan for now; make the copy yourself, name it ' + c.copyName + ', and paste its link on the receiver. ') : '') +
+            saved.length + ' ticket' + (saved.length === 1 ? '' : 's') + ' put on it.' +
+            (skipped.length ? ' ' + skipped.length + ' not changed: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : '');
+          showInfo(c && !c.copied ? 'Approved — copy it by hand' : 'Approved', msg);
+          renderDriveView();
+        }, function (err) {
+          drvProgress = '';
+          renderDriveView();
+          showModal({ title: 'Could not finish', confirmText: 'OK', message: err.message + ' — Tap Approve again: it picks up where it stopped and never makes a second receiver or copy.' });
+        });
+      }, existingId ? 'Attach' : 'Approve');
   }
   function renderRcvList() {
     var box = document.getElementById('rcvList');

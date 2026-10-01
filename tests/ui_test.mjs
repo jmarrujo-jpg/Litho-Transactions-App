@@ -915,6 +915,67 @@ const base = {
   await page.close();
 }
 
+// ---- 25. Find in Drive: search in batches, review a file's tickets, approve (retry keeps the op), attach to existing
+{ let searchedTimes = 0, approves = 0;
+  const unassigned = [
+    { skidId: 'SKD-1', ticket: '102825-001', status: 'Current', mill: '3045220', po: '7730-DC', supplier: 'RN', qty: 1723 },
+    { skidId: 'SKD-2', ticket: '102825-002', status: 'WIP', mill: '3045214', po: '7730-DC', supplier: 'RN', qty: 1568 },
+    { skidId: 'SKD-3', ticket: '102825-003', status: 'Current', mill: '30452091', po: '7730-DC', supplier: 'RN', qty: 1568 },
+    { skidId: 'SKD-4', ticket: '101425-001', status: 'Current', mill: '3044661', po: '7621-DC', supplier: 'RN', qty: 368 }];
+  const matches = () => ({ millCount: 4, unsearched: searchedTimes >= 2 ? 0 : 4, noMill: 1, saEmail: 'litho@proj.iam.gserviceaccount.com', folderId: 'DEST',
+    suppliers: ['RN'], receivers: [{ id: 'R-00001', name: '25-10-14--RN--R-00001' }], unassigned,
+    misses: searchedTimes >= 2 ? [{ mill: '30452091', tickets: [unassigned[2]] }] : [],
+    groups: searchedTimes >= 2 ? [
+      { fileId: 'dst-1', name: '25-10-14--RN--R-00001.pdf', link: 'https://drive.google.com/file/d/dst-1/view', folderId: 'DEST', folderName: 'Raw Metal Packing Slips', date: '2026-10-01', mills: ['3044661'], tickets: [unassigned[3]], inFolder: true, receiver: 'R-00001', namedReceiver: 'R-00001', madeFrom: [], supplier: 'RN', pos: '7621-DC' },
+      { fileId: 'src-1', name: 'Container Supply_20251028_121716.pdf', link: 'https://drive.google.com/file/d/src-1/view', folderId: 'rey', folderName: '2025 Reynolds', date: '2025-10-28', mills: ['3045214', '3045220'], tickets: [unassigned[0], unassigned[1]], inFolder: false, receiver: '', namedReceiver: '', madeFrom: [], coveredBy: [], supplier: 'RN', pos: '7730-DC' }] : [] });
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R({ receivers: [], suppliers: [], tickets: [] }),
+    getDriveMatches: () => R(matches()),
+    driveSearchMills: () => { searchedTimes++; return R({ ok: true, searched: 2, found: searchedTimes === 1 ? 2 : 1, remaining: searchedTimes === 1 ? 2 : 0, cutoff: '' }); },
+    approveDriveMatch: (a) => {
+      if (approves++ === 0) return { ok: false, error: 'Drive API 503: backend error' };
+      return R({ ok: true, receiver: a[0].receiverId || 'R-00002', name: a[0].receiverId ? '' : '25-10-28--RN--R-00002', created: !a[0].receiverId,
+        copy: a[0].receiverId ? null : { copied: false, copyName: '25-10-28--RN--R-00002.pdf', copyError: 'Google won’t let the service account own files in a My Drive folder (it has no storage of its own), so the copy wasn’t made.' },
+        saved: a[0].skidIds.map((x) => ({ skidId: x })), skipped: [] });
+    },
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  await page.click('#rcvDrive'); await page.waitForTimeout(300);
+  ok('drive view: counts and a Search button', (await page.textContent('#rcvBox')).includes('4 mill numbers on tickets with no receiver') && !!(await page.$('#drvSearch')));
+  await page.click('#drvSearch'); await page.waitForTimeout(600);
+  ok('drive: searches in batches until done', calls.filter((c) => c.fn === 'driveSearchMills').length === 2 && calls.filter((c) => c.fn === 'driveSearchMills')[0].args[0] === false, calls.filter((c) => c.fn === 'driveSearchMills').map((c) => c.args));
+  let box = await page.textContent('#rcvBox');
+  ok('drive: files listed, the folder copy says where it is', box.includes('Container Supply_20251028_121716.pdf') && box.includes('In the receivers folder as R-00001') && box.includes('1 mill number not found'), box);
+  ok('drive: file name opens the scan', await page.$eval('#rcvBox a[href*="src-1"]', (a) => a.target === '_blank'));
+  await page.click('[data-drvopen="src-1"]'); await page.waitForTimeout(200);
+  box = await page.textContent('#rcvBox');
+  ok('drive review: tickets ticked, details filled in from the scan', box.includes('2 of 2 ticked') && (await page.inputValue('[data-drvf="src-1|supplier"]')) === 'RN'
+    && (await page.inputValue('[data-drvf="src-1|date"]')) === '2025-10-28' && (await page.textContent('#drvName-src-1')) === '25-10-28--RN--R-?????');
+  await page.uncheck('[data-drvtk="src-1|SKD-2"]'); await page.waitForTimeout(150);
+  await page.fill('[data-drvq="src-1"]', '102825-002 to 102825-003'); await page.waitForTimeout(150);
+  ok('drive review: a range finds the missed ticket', (await page.textContent('#drvq-src-1')).includes('102825-003'), await page.textContent('#drvq-src-1'));
+  await page.click('[data-drvadd="src-1|SKD-3"]'); await page.waitForTimeout(150);
+  ok('drive review: added by hand', (await page.textContent('#rcvBox')).includes('added by hand') && (await page.textContent('#rcvBox')).includes('2 of 3 ticked'));
+  await page.fill('[data-drvf="src-1|notes"]', 'slip 178608');
+  await page.click('[data-drvapprove="src-1"]'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  ok('drive approve: failure says it picks up where it stopped', ((await page.textContent('#modalRoot')) || '').includes('never makes a second receiver'));
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  await page.click('[data-drvapprove="src-1"]'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const ap = calls.filter((c) => c.fn === 'approveDriveMatch');
+  ok('drive approve: sends the ticked tickets and details, same op on retry', ap.length === 2 && ap[1].args[0].skidIds.join() === 'SKD-1,SKD-3' && ap[1].args[0].supplier === 'RN'
+    && ap[1].args[0].notes === 'slip 178608' && ap[1].args[0].fileId === 'src-1' && ap[0].args[2] === ap[1].args[2], ap.map((c) => c.args));
+  ok('drive approve: copy refused is explained with the name to use', ((await page.textContent('#modalRoot')) || '').includes('name it 25-10-28--RN--R-00002.pdf'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  await page.click('[data-drvquick="dst-1"]'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const ap2 = calls.filter((c) => c.fn === 'approveDriveMatch').slice(-1)[0];
+  ok('drive: attach straight to the receiver already in the folder', ap2.args[0].receiverId === 'R-00001' && ap2.args[0].skidIds.join() === 'SKD-4' && ap2.args[2] !== ap[1].args[2], ap2.args);
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

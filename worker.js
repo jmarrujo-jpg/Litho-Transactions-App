@@ -44,7 +44,15 @@ const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output
 // 'Tickets'), so wiping Steel Tickets (Fresh Import) doesn't lose the work — see keepPlan.
 const RECEIVERS = 'Receivers';
 const RECEIVER_KEEP_COLS = ['Mill Numbers', 'Tickets'];
-const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Notes', 'Mill Numbers', 'Tickets', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Source File ID', 'Notes', 'Mill Numbers', 'Tickets', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+// Find in Drive: each unassigned ticket's mill number is searched in the receiver scans shared with
+// the service account (Drive reads the text of scanned PDFs). Every search is logged on this tab so
+// a mill is searched once (until "search again"); the review screen groups the hits by file.
+const DRIVE_SEARCH = 'Drive Search';
+const DRIVE_SEARCH_HEADERS = ['Mill', 'File ID', 'File Name', 'File Link', 'Folder ID', 'Folder Name', 'File Date', 'Searched At'];
+// Where approved receivers' copies go ("Raw Metal Packing Slips"); env RECEIVER_FOLDER_ID overrides.
+const DEFAULT_RECEIVER_FOLDER = '18PRmpTAcNgjmcjQ3_hELRHcsPkYGND98';
+const DRIVE_BATCH = 30;   // mills searched per request (one Drive call each; Free plan: 50 calls per request)
 
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
@@ -81,7 +89,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getDriveMatches', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -131,7 +139,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-59', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'drive-60', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -281,6 +289,12 @@ async function handle(fn, args, env) {
       return deleteReceiver(sheets, args[0], args[1], args[2]);
     case 'keepReceiverNumbers': // (operator, opId) write every receiver's kept mill / ticket numbers up to date
       return keepReceiverNumbers(sheets);
+    case 'driveSearchMills': // (again) search Drive for the next batch of unassigned tickets' mill numbers
+      return driveSearchMills(sheets, env, args[0]);
+    case 'getDriveMatches': // () the Drive hits grouped by file, for review
+      return getDriveMatches(sheets, env);
+    case 'approveDriveMatch': // ({fileId, receiverId?, date, supplier, pos, notes, skidIds[]}, operator, opId) new receiver + copy + attach
+      return approveDriveMatch(sheets, env, args[0], args[1], args[2]);
     case 'moveToWip': // (description, operator, coatings[], skidIds[], opId, removals{skidId:[pass]}) foreman batch: coat + straight to WIP
       return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
@@ -398,7 +412,8 @@ async function mintToken(env) {
   if (!email || !key) throw new Error('Service account not configured (GCP_SA_EMAIL / GCP_SA_PRIVATE_KEY).');
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: 'RS256', typ: 'JWT' };
-  const claim = { iss: email, scope: 'https://www.googleapis.com/auth/spreadsheets', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 };
+  // Drive: search the shared receiver scans by mill number and copy them into the receivers folder.
+  const claim = { iss: email, scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 };
   const unsigned = b64urlStr(JSON.stringify(header)) + '.' + b64urlStr(JSON.stringify(claim));
   const ck = await crypto.subtle.importKey('pkcs8', pemToPkcs8(key), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', ck, new TextEncoder().encode(unsigned));
@@ -456,8 +471,14 @@ async function makeSheets(env) {
         if (j === null) throw new Error('Sheets API non-JSON: ' + t.slice(0, 200));
         return j;
       }
-      const msg = 'Sheets API ' + r.status + ': ' + (j && j.error && j.error.message ? j.error.message : t.slice(0, 200));
-      if (RETRYABLE.indexOf(r.status) === -1) throw new Error(msg);
+      const api = url.indexOf('/drive/v3/') !== -1 ? 'Drive API ' : 'Sheets API ';
+      const msg = api + r.status + ': ' + (j && j.error && j.error.message ? j.error.message : t.slice(0, 200));
+      if (RETRYABLE.indexOf(r.status) === -1) {
+        const err = new Error(msg);
+        err.status = r.status;
+        err.reason = j && j.error && j.error.errors && j.error.errors[0] ? j.error.errors[0].reason : '';
+        throw err;
+      }
       lastErr = new Error(msg);
       if (unsafe && r.status !== 429) { lastErr.ambiguous = true; throw lastErr; }
     }
@@ -578,6 +599,20 @@ async function makeSheets(env) {
     async readFrom(spreadsheetId, rangeA1) {
       const j = await call('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(rangeA1), { headers: auth });
       return j.values || [];
+    },
+    // ---- Google Drive (v3): the service account sees only files / folders shared with it ----
+    async driveList(q, fields, pageSize) {
+      const u = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) + '&fields=' + encodeURIComponent('files(' + fields + ')') +
+        '&pageSize=' + (pageSize || 20) + '&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true';
+      return (await call(u, { headers: auth })).files || [];
+    },
+    async driveGet(fileId, fields) {
+      return call('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?supportsAllDrives=true&fields=' + encodeURIComponent(fields), { headers: auth });
+    },
+    // A copy can't be blindly re-sent (it would make two); landed() looks for it first.
+    async driveCopy(fileId, name, folderId, landed) {
+      return callChecked('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '/copy?supportsAllDrives=true&fields=' + encodeURIComponent('id,name,webViewLink'),
+        json({ name, parents: [folderId] }), landed);
     },
   };
 }
@@ -1825,7 +1860,7 @@ function cleanPos(v) {
 }
 function receiverOut(o) {
   return { id: String(o['Receiver ID'] || '').trim().toUpperCase(), date: toYMD(o['Date Received']), supplier: String(o['Supplier'] || '').trim(),
-    pos: String(o['POs'] || ''), link: String(o['Drive Link'] || '').trim(), notes: String(o['Notes'] || ''),
+    pos: String(o['POs'] || ''), link: String(o['Drive Link'] || '').trim(), sourceFileId: String(o['Source File ID'] || '').trim(), notes: String(o['Notes'] || ''),
     createdAt: String(o['Created At'] || ''), createdBy: String(o['Created By'] || ''),
     mills: keptList(o['Mill Numbers']), keptTickets: keptList(o['Tickets']), row: o.__row };
 }
@@ -1987,6 +2022,226 @@ async function getReceivers(sheets) {
   return { receivers: list, suppliers: Object.keys(sup).sort(), tickets };
 }
 
+// ---- Find in Drive ----
+function receiverFolderId(env) { return String((env && env.RECEIVER_FOLDER_ID) || DEFAULT_RECEIVER_FOLDER).trim(); }
+function driveQ(v) { return String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function driveError(e) {
+  const m = e && e.message ? e.message : String(e);
+  if (/Drive API has not been used|drive\.googleapis\.com.*(disabled|not been used)|SERVICE_DISABLED/i.test(m)) {
+    return new Error('The Google Drive API is turned off for the service account’s Google Cloud project. Turn it on (APIs & Services → Library → Google Drive API), wait a minute, and try again.');
+  }
+  return e;
+}
+// Tickets not on any receiver (own, inherited or by a kept number) — what Find in Drive looks for.
+// A mill made of several ("A / B", slitter pallets) isn't searched: those come from tickets that
+// have receivers of their own.
+function driveTickets(masterRows, receivers) {
+  const ctx = { skids: {}, tickets: {}, receivers };
+  masterRows.forEach((o) => {
+    if (o['Skid ID']) ctx.skids[String(o['Skid ID']).trim()] = o;
+    const t = String(o['Ticket'] || '').trim(); if (t && !ctx.tickets[t]) ctx.tickets[t] = o;
+  });
+  const lists = {};
+  Object.keys(receivers).forEach((id) => { lists[id] = { mills: receivers[id].mills || [], tickets: receivers[id].keptTickets || [] }; });
+  const look = receiverLookup(lists);
+  const out = [];
+  masterRows.forEach((o) => {
+    if (!(o['Ticket'] || o['Skid ID'])) return;
+    if (String(o['Receiver'] || '').trim() || receiverTrace(o, ctx).receiver) return;
+    const mt = matchReceiver(look, o['Mill'], o['Ticket']);
+    if (mt && mt.receiver) return;   // the Receivers screen's "Attach all" puts those back
+    const mill = keepKey(o['Mill']);
+    out.push({ skidId: String(o['Skid ID'] || ''), ticket: String(o['Ticket'] || ''), status: o['Status'] || '', mill, searchable: !!mill && mill.indexOf('/') === -1,
+      po: o['PO Number'] != null ? String(o['PO Number']) : '', supplier: String(o['Supplier'] || ''), qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '' });
+  });
+  return out;
+}
+// Each mill's latest search: {mill: {at, hits: {fileId: {...}}}} (a miss has no hits).
+async function driveSearchLog(sheets) {
+  let t = null;
+  try { t = await readTab(sheets, DRIVE_SEARCH); } catch (e) { t = null; }
+  const latest = {}, folders = {};
+  ((t && t.rows) || []).forEach((r) => {
+    const m = keepKey(r['Mill']);
+    if (!m) return;
+    const at = String(r['Searched At'] || '');
+    if (!latest[m] || at > latest[m].at) latest[m] = { at, hits: {} };
+    const fid = String(r['File ID'] || '').trim();
+    if (at === latest[m].at && fid) latest[m].hits[fid] = { fileId: fid, name: String(r['File Name'] || ''), link: String(r['File Link'] || ''),
+      folderId: String(r['Folder ID'] || ''), date: toYMD(r['File Date']) };
+    if (r['Folder ID'] && r['Folder Name']) folders[String(r['Folder ID'])] = String(r['Folder Name']);
+  });
+  return { tab: t, latest, folders };
+}
+
+// Searches the next DRIVE_BATCH not-yet-searched mills (the app calls it until remaining is 0).
+// again: true starts "search again for the ones not found"; the reply's `cutoff` is passed back on
+// the following calls so each miss is searched again only once.
+async function driveSearchMills(sheets, env, again) {
+  const master = await readTab(sheets, MASTER);
+  const receivers = await receiverMap(sheets);
+  const want = {};
+  driveTickets(master.rows, receivers).forEach((t) => { if (t.searchable) want[t.mill] = 1; });
+  await ensureTab(sheets, DRIVE_SEARCH, DRIVE_SEARCH_HEADERS);
+  const log = await driveSearchLog(sheets);
+  const ts = nowStamp();
+  const cutoff = again ? (again === true ? ts : String(again)) : '';
+  // The first "again" call takes every miss up to now; the later ones only those before its cutoff
+  // (what that first call and the ones after it searched are stamped at or after it).
+  const stale = (at) => (again === true ? at <= cutoff : at < cutoff);
+  const todo = Object.keys(want).sort().filter((m) => !log.latest[m] || (cutoff && !Object.keys(log.latest[m].hits).length && stale(log.latest[m].at)));
+  const batch = todo.slice(0, DRIVE_BATCH);
+  const out = [], newFolders = {};
+  let found = 0;
+  for (const m of batch) {
+    let files;
+    try {
+      files = await sheets.driveList("fullText contains '\"" + driveQ(m) + "\"' and trashed = false and (mimeType = 'application/pdf' or mimeType contains 'image/')",
+        'id,name,webViewLink,parents,createdTime,mimeType', 20);
+    } catch (e) { throw driveError(e); }
+    if (files.length) found++;
+    if (!files.length) out.push({ 'Mill': m, 'Searched At': ts });
+    files.forEach((f) => {
+      const folder = (f.parents || [])[0] || '';
+      if (folder && !log.folders[folder]) newFolders[folder] = 1;
+      out.push({ 'Mill': m, 'File ID': f.id, 'File Name': f.name || '', 'File Link': f.webViewLink || ('https://drive.google.com/file/d/' + f.id + '/view'),
+        'Folder ID': folder, 'File Date': String(f.createdTime || '').slice(0, 10), 'Searched At': ts });
+    });
+  }
+  // Folder names for the review screen (a few per call; later calls fill in the rest).
+  for (const fid of Object.keys(newFolders).slice(0, 8)) {
+    try { log.folders[fid] = (await sheets.driveGet(fid, 'id,name')).name || ''; } catch (e) { /* not visible */ }
+  }
+  out.forEach((r) => { if (r['Folder ID']) r['Folder Name'] = log.folders[r['Folder ID']] || ''; });
+  if (out.length) {
+    const headers = (await readTab(sheets, DRIVE_SEARCH)).headers;
+    await sheets.appendMany(DRIVE_SEARCH, out.map((r) => headers.map((h) => (r[h] != null ? r[h] : ''))),
+      () => columnHas(sheets, DRIVE_SEARCH, headers, 'Searched At', ts));
+  }
+  return { ok: true, searched: batch.length, found, remaining: todo.length - batch.length, cutoff };
+}
+
+// The review list: every file that holds the mill number of a ticket not on a receiver yet,
+// with those tickets. A file already in the receivers folder named for a receiver says so (attach
+// there); an original scan whose mills are all in such a copy points to it instead.
+async function getDriveMatches(sheets, env) {
+  const master = await readTab(sheets, MASTER);
+  const receivers = await receiverMap(sheets);
+  const tickets = driveTickets(master.rows, receivers);
+  const log = await driveSearchLog(sheets);
+  const dest = receiverFolderId(env);
+  const brief = (t) => ({ skidId: t.skidId, ticket: t.ticket, status: t.status, mill: t.mill, po: t.po, supplier: t.supplier, qty: t.qty });
+  const byMill = {};
+  tickets.forEach((t) => { if (t.searchable) (byMill[t.mill] = byMill[t.mill] || []).push(t); });
+  const groups = {}, misses = [];
+  let unsearched = 0;
+  Object.keys(byMill).sort().forEach((m) => {
+    const L = log.latest[m];
+    if (!L) { unsearched++; return; }
+    const ids = Object.keys(L.hits);
+    if (!ids.length) { misses.push({ mill: m, at: L.at, tickets: byMill[m].map(brief) }); return; }
+    ids.forEach((fid) => {
+      const h = L.hits[fid];
+      const g = groups[fid] = groups[fid] || { fileId: fid, name: h.name, link: h.link, folderId: h.folderId, folderName: log.folders[h.folderId] || '', date: h.date, mills: [], tickets: [] };
+      g.mills.push(m);
+      byMill[m].forEach((t) => g.tickets.push(brief(t)));
+    });
+  });
+  // Supplier code last used for a receiver made from a scan in the same folder (2025 Reynolds -> RN).
+  const fileFolder = {};
+  Object.keys(log.latest).forEach((m) => Object.keys(log.latest[m].hits).forEach((fid) => { fileFolder[fid] = log.latest[m].hits[fid].folderId; }));
+  const folderSupplier = {}, madeFrom = {};
+  Object.keys(receivers).sort().forEach((id) => {
+    const r = receivers[id];
+    if (!r.sourceFileId) return;
+    (madeFrom[r.sourceFileId] = madeFrom[r.sourceFileId] || []).push(id);
+    if (fileFolder[r.sourceFileId] && r.supplier) folderSupplier[fileFolder[r.sourceFileId]] = r.supplier;
+  });
+  const list = Object.keys(groups).map((k) => groups[k]);
+  list.forEach((g) => {
+    const rm = /R-\d{5}/i.exec(g.name);
+    g.inFolder = g.folderId === dest;
+    g.namedReceiver = g.inFolder && rm ? rm[0].toUpperCase() : '';
+    g.receiver = g.namedReceiver && receivers[g.namedReceiver] ? g.namedReceiver : '';
+    g.madeFrom = madeFrom[g.fileId] || [];
+    const sc = {};
+    g.tickets.forEach((t) => { const c = cleanSupplier(t.supplier); if (c) sc[c] = (sc[c] || 0) + 1; });
+    g.supplier = folderSupplier[g.folderId] || Object.keys(sc).sort((a, b) => sc[b] - sc[a])[0] || '';
+    g.pos = cleanPos(g.tickets.map((t) => t.po).filter(Boolean).join(', '));
+  });
+  const copies = list.filter((g) => g.inFolder);
+  list.forEach((g) => {
+    if (g.inFolder) return;
+    const cover = copies.filter((c) => g.mills.every((m) => c.mills.indexOf(m) !== -1));
+    g.coveredBy = cover.map((c) => c.receiver || c.namedReceiver || c.name);
+  });
+  list.sort((a, b) => (b.inFolder - a.inFolder) || (a.coveredBy && a.coveredBy.length ? 1 : 0) - (b.coveredBy && b.coveredBy.length ? 1 : 0) ||
+    (b.tickets.length - a.tickets.length) || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const sup = {};
+  Object.keys(receivers).forEach((id) => { if (receivers[id].supplier) sup[receivers[id].supplier] = 1; });
+  return { groups: list, misses, unsearched, millCount: Object.keys(byMill).length, noMill: tickets.filter((t) => !t.searchable).length,
+    unassigned: tickets.map(brief), folderId: dest, saEmail: String(env.GCP_SA_EMAIL || ''), suppliers: Object.keys(sup).sort(),
+    receivers: Object.keys(receivers).sort().reverse().map((id) => ({ id, name: receiverName(receivers[id]) })) };
+}
+
+// Copies the scan into the receivers folder named for the receiver (25-10-28--RN--R-00003.pdf) and
+// saves the link. Retry-safe: a copy already there (found by its R-number) is reused. If Google
+// refuses the copy (a service account can't own files in a My Drive folder) the receiver is linked
+// to the original scan instead, and copyError says so.
+async function copyReceiverFile(sheets, env, id, name, fileId, haveLink) {
+  if (haveLink && haveLink.indexOf(fileId) === -1) return { link: haveLink, copied: true, already: true };
+  const dest = receiverFolderId(env);
+  const find = async () => (await sheets.driveList("'" + driveQ(dest) + "' in parents and name contains '" + driveQ(id) + "' and trashed = false", 'id,name,webViewLink', 5))[0] || null;
+  let f, src = null, copyError = '';
+  try { f = await find(); } catch (e) { throw driveError(e); }
+  if (!f) {
+    try { src = await sheets.driveGet(fileId, 'id,name,webViewLink,mimeType'); } catch (e) { throw new Error('Could not open the scan in Drive: ' + driveError(e).message); }
+    const ext = (/\.[a-z0-9]{2,5}$/i.exec(src.name || '') || [''])[0] || (src.mimeType === 'application/pdf' ? '.pdf' : '');
+    try {
+      f = await sheets.driveCopy(fileId, name + ext, dest, async () => !!(await find()));
+      if (!f || !f.id) f = await find();
+    } catch (e) {
+      f = null;
+      copyError = (e.reason === 'storageQuotaExceeded' || /storage quota/i.test(e.message || ''))
+        ? 'Google won’t let the service account own files in a My Drive folder (it has no storage of its own), so the copy wasn’t made.'
+        : 'The copy failed: ' + driveError(e).message;
+    }
+  }
+  const link = f ? (f.webViewLink || 'https://drive.google.com/file/d/' + f.id + '/view') : (src.webViewLink || 'https://drive.google.com/file/d/' + fileId + '/view');
+  const t = await readTab(sheets, RECEIVERS);
+  const o = t.rows.filter((r) => String(r['Receiver ID'] || '').trim().toUpperCase() === id)[0];
+  if (o) await stampCells(sheets, RECEIVERS, o.__row, t.map, { 'Drive Link': link, 'Last Updated At': nowStamp() });
+  return { link, copied: !!f, copyName: f ? f.name : name + ((/\.[a-z0-9]{2,5}$/i.exec((src && src.name) || '') || ['.pdf'])[0]), copyError };
+}
+
+// Approve one file's match: a new receiver (with its copy) — or an existing one — and the tickets
+// put on it, in one go. Retry-safe end to end: the receiver is found again by its Op ID, the copy
+// by its R-number, and the attach by its own sub-op.
+async function approveDriveMatch(sheets, env, rec, operator, opId) {
+  rec = rec || {};
+  const skidIds = (rec.skidIds || []).map((x) => String(x || '').trim()).filter(Boolean);
+  if (!skidIds.length) throw new Error('Pick at least one ticket.');
+  if (skidIds.length > 300) throw new Error('Approve at most 300 tickets at a time.');
+  const op = opId || autoOpId();
+  let id = String(rec.receiverId || '').trim().toUpperCase(), r = null, copy = null;
+  if (!id) {
+    const fileId = String(rec.fileId || '').trim();
+    if (!fileId) throw new Error('No file picked.');
+    r = await saveReceiver(sheets, { date: rec.date, supplier: rec.supplier, pos: rec.pos, notes: rec.notes, sourceFileId: fileId }, operator, op);
+    id = r.id;
+    copy = await copyReceiverFile(sheets, env, id, r.name, fileId, r.link);
+  }
+  let res;
+  try { res = await masterEdit(sheets, skidIds.map((s) => ({ skidId: s, receiver: id })), operator, subOp(op, 'attach')); }
+  catch (e) {
+    // Every ticket already on it (attached some other way): nothing left to do.
+    const m = /^Nothing saved: (.*)$/.exec(e.message || '');
+    if (!m || m[1].replace(/[^,()]+\(already on [^)]+\)/g, '').replace(/[,\s]/g, '') !== '') throw e;
+    res = { saved: [], skipped: [] };
+  }
+  return { ok: true, receiver: id, name: r ? r.name : '', created: !!r, copy, saved: res.saved || [], skipped: res.skipped || [] };
+}
+
 // Create (no rec.id) or edit a receiver's details. A new one gets the next R-number. Retry-safe: a
 // create is found again by its Op ID; an edit just writes the same cells again.
 async function saveReceiver(sheets, rec, operator, opId) {
@@ -2004,6 +2259,7 @@ async function saveReceiver(sheets, rec, operator, opId) {
   if (hdr !== t.headers) t = await readTab(sheets, RECEIVERS);
   const ts = nowStamp();
   const fields = { 'Date Received': date, 'Supplier': supplier, 'POs': cleanPos(rec.pos), 'Drive Link': link, 'Notes': String(rec.notes || '').trim(), 'Last Updated At': ts };
+  if (rec.sourceFileId) fields['Source File ID'] = String(rec.sourceFileId).trim();
   const id = String(rec.id || '').trim().toUpperCase();
   if (id) {
     const o = t.rows.filter((r) => String(r['Receiver ID'] || '').trim().toUpperCase() === id)[0];

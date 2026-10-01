@@ -62,9 +62,40 @@ export function makeFake(seed) {
     return out;
   }
 
+  // Google Drive v3, just what the receivers search uses. drive.files: [{id, name, mimeType,
+  // parents, text, createdTime}]; drive.quota = true makes copies fail like a service account
+  // copying into a My Drive folder.
+  const drive = { files: [], quota: false, next: 1 };
+  function driveApply(u, method, body) {
+    const p = u.pathname.replace(/^\/drive\/v3\/files/, '');
+    const pick = (f) => ({ id: f.id, name: f.name, mimeType: f.mimeType, parents: f.parents, createdTime: f.createdTime, webViewLink: 'https://drive.google.com/file/d/' + f.id + '/view' });
+    if (p === '' && method === 'GET') {
+      const q = u.searchParams.get('q') || '';
+      let list = drive.files.filter((f) => !f.trashed);
+      let m;
+      if ((m = /fullText contains '"((?:[^"\\]|\\.)*)"'/.exec(q))) { const w = m[1].toUpperCase(); list = list.filter((f) => (' ' + String(f.text || '').toUpperCase().replace(/[^A-Z0-9-]+/g, ' ') + ' ').includes(' ' + w + ' ')); }
+      if ((m = /'([^']+)' in parents/.exec(q))) { const id = m[1]; list = list.filter((f) => (f.parents || []).includes(id)); }
+      if ((m = /name contains '([^']+)'/.exec(q))) { const w = m[1]; list = list.filter((f) => f.name.includes(w)); }
+      if (/mimeType = 'application\/pdf'/.test(q)) list = list.filter((f) => f.mimeType === 'application/pdf' || /^image\//.test(f.mimeType));
+      return { files: list.slice(0, Number(u.searchParams.get('pageSize') || 100)).map(pick) };
+    }
+    let m = /^\/([^/]+)(\/copy)?$/.exec(p);
+    if (m) {
+      const f = drive.files.find((x) => x.id === decodeURIComponent(m[1]));
+      if (!f) { const e = new Error('File not found: ' + m[1]); e.status = 404; throw e; }
+      if (!m[2]) return pick(f);
+      if (drive.quota) { const e = new Error('Service Accounts do not have storage quota. Leverage shared drives.'); e.status = 403; e.reason = 'storageQuotaExceeded'; throw e; }
+      const c = Object.assign({}, f, { id: 'copy-' + (drive.next++), name: body.name, parents: body.parents, createdTime: '2026-10-02T00:00:00Z' });
+      drive.files.push(c);
+      return pick(c);
+    }
+    throw new Error('fake: unhandled drive ' + method + ' ' + u.pathname);
+  }
+
   function apply(req) {
     const u = new URL(req.url);
     const method = req.method;
+    if (u.pathname.startsWith('/drive/v3/')) return driveApply(u, method, req.body ? JSON.parse(req.body) : null);
     let m = /^\/v4\/spreadsheets\/([^/:]+)(.*)$/.exec(u.pathname);
     if (!m) throw new Error('fake: unknown url ' + req.url);
     const bid = m[1], rest = m[2];
@@ -125,12 +156,12 @@ export function makeFake(seed) {
     if (f && f.mode === 'html') { f.times--; return new Response('<html>502 Bad Gateway</html>', { status: 502 }); }
     let out;
     try { out = apply(req); }
-    catch (e) { return new Response(JSON.stringify({ error: { message: e.message } }), { status: e.status || 500 }); }
+    catch (e) { return new Response(JSON.stringify({ error: { message: e.message, errors: e.reason ? [{ reason: e.reason }] : undefined } }), { status: e.status || 500 }); }
     if (f && f.mode === 'after') { f.times--; return new Response(JSON.stringify({ error: { message: 'The service is currently unavailable.' } }), { status: f.status || 503 }); }
     return new Response(JSON.stringify(out), { status: 200 });
   }
 
-  return { books, book, faults, log, fetchImpl,
+  return { books, book, faults, log, fetchImpl, drive,
     rows(bid, tab) { const t = book(bid).tabs[tab]; if (!t) return []; const h = t.rows[0] || []; return t.rows.slice(1).filter((r) => r.some((v) => v !== '' && v != null)).map((r) => { const o = {}; h.forEach((k, i) => { o[k] = r[i] == null ? '' : r[i]; }); return o; }); },
   };
 }

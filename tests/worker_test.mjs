@@ -749,5 +749,74 @@ await concurrency(envBase, 'in-worker lock');
   ok('retry puts the receiver back from the kept numbers', i2.ok && r200 && r200['Receiver'] === 'R-00001' && i2.result.receiversRestored === 1, [i2, r200]);
 }
 
+// 26. Find in Drive: search unassigned tickets' mill numbers in the shared scans, review by file,
+//     approve = new receiver + copy into the receivers folder + attach. Retry-safe; quota fallback.
+{ const f = fresh();
+  const DEST = '18PRmpTAcNgjmcjQ3_hELRHcsPkYGND98';
+  f.books[SID].tabs['Steel Tickets'].rows.push(
+    skid('300', 'SKD-000070', 'Current', 10, 50, { 'Mill': '3045220' }),
+    skid('301', 'SKD-000071', 'WIP', 10, 50, { 'Mill': '3045214' }),
+    skid('302', 'SKD-000072', 'Current', 10, 50, { 'Mill': '9999999' }),
+    skid('303', 'SKD-000073', 'Current', 10, 50, { 'Mill': '3044661' }),
+    skid('304', 'SKD-000074', 'Current', 10, 50, { 'Mill': 'A / B' }));
+  f.drive.files.push(
+    { id: 'fold-rey', name: '2025 Reynolds', mimeType: 'application/vnd.google-apps.folder', parents: ['arch'] },
+    { id: 'src-1', name: 'Container Supply_20251028_121716.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-28T16:58:38Z', text: 'P.O.#: 7730-DC 1 3045220 85 T-5 2 3045214/ 85' },
+    { id: 'src-2', name: 'Container Supply_20251014.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-14T10:00:00Z', text: '3044661 v' },
+    { id: 'dst-1', name: '25-10-14--RN--R-00001.pdf', mimeType: 'application/pdf', parents: [DEST], createdTime: '2026-10-01T10:00:00Z', text: '3044661' },
+    { id: 'xls-1', name: '26-09-30 Current.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', parents: ['mine'], text: '3045220 3044661' });
+  await call('saveReceiver', [{ date: '2025-10-14', supplier: 'RN' }, '', 'op-26-r1']);
+  const s1 = await call('driveSearchMills', [false]);
+  ok('drive: searched every unassigned mill once', s1.ok && s1.result.searched === 5 && s1.result.remaining === 0 && s1.result.found === 3, s1);
+  const s2 = await call('driveSearchMills', [false]);
+  ok('drive: nothing left to search', s2.ok && s2.result.searched === 0, s2);
+  const g = await call('getDriveMatches', []);
+  const gr = g.ok ? g.result.groups : [];
+  const gid = (id) => gr.filter((x) => x.fileId === id)[0];
+  ok('drive: the copy in the receivers folder comes first, pointing at its receiver', gr[0] && gr[0].fileId === 'dst-1' && gr[0].receiver === 'R-00001' && gr[0].tickets[0].ticket === '303', gr);
+  ok('drive: a scan groups its tickets, with folder and suggested supplier / PO', gid('src-1') && gid('src-1').tickets.length === 2 && gid('src-1').folderName === '2025 Reynolds'
+    && gid('src-1').mills.join() === '3045214,3045220', gid('src-1'));
+  ok('drive: an original already copied points to the copy', gid('src-2') && gid('src-2').coveredBy.join() === 'R-00001', gid('src-2'));
+  ok('drive: spreadsheets are not searched', !gid('xls-1'));
+  ok('drive: not found and not searchable listed', g.result.misses.map((x) => x.mill).join() === '9999999,M77' && g.result.noMill >= 1 && g.result.unsearched === 0, g.result);
+  // Approve the scan: new receiver, copy, attach (first try loses the attach's log append).
+  const rec = { fileId: 'src-1', date: '2025-10-28', supplier: 'rn', pos: '7730-DC', notes: '', skidIds: ['SKD-000070', 'SKD-000071'] };
+  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  const a1 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
+  ok('drive approve: failed attach reported', !a1.ok, a1);
+  const a2 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
+  const copies = f.drive.files.filter((x) => (x.parents || []).includes(DEST) && /R-00002/.test(x.name));
+  ok('drive approve: one receiver, one copy named for it', a2.ok && a2.result.receiver === 'R-00002' && f.rows(SID, 'Receivers').length === 2 && copies.length === 1 && copies[0].name === '25-10-28--RN--R-00002.pdf', [a2, copies]);
+  const r2 = f.rows(SID, 'Receivers').filter((x) => x['Receiver ID'] === 'R-00002')[0];
+  ok('drive approve: linked to the copy, source remembered', r2['Drive Link'] === 'https://drive.google.com/file/d/' + copies[0].id + '/view' && r2['Source File ID'] === 'src-1', r2);
+  ok('drive approve: tickets on it, numbers kept', skidRow(f, 'SKD-000070')['Receiver'] === 'R-00002' && skidRow(f, 'SKD-000071')['Receiver'] === 'R-00002' && r2['Mill Numbers'] === '3045214, 3045220', r2);
+  const a3 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
+  ok('drive approve: again with the same op changes nothing', a3.ok && f.rows(SID, 'Receivers').length === 2 && f.drive.files.filter((x) => /R-00002/.test(x.name)).length === 1
+    && txFor(f, 'SKD-000070').filter((x) => x['Item'] === 'RECEIVER SET').length === 1, a3);
+  const a4 = await call('approveDriveMatch', [{ receiverId: 'R-00001', skidIds: ['SKD-000073'] }, 'Jo', 'op-26-b']);
+  ok('drive: attach to the receiver already in the folder', a4.ok && !a4.result.created && skidRow(f, 'SKD-000073')['Receiver'] === 'R-00001', a4);
+  // A My Drive folder: Google refuses the service account's copy -> linked to the original.
+  f.books[SID].tabs['Steel Tickets'].rows.push(skid('305', 'SKD-000075', 'Current', 10, 50, { 'Mill': '5550001' }));
+  f.drive.files.push({ id: 'src-3', name: 'TCC_0915.pdf', mimeType: 'application/pdf', parents: ['fold-tcc'], createdTime: '2026-09-15T08:00:00Z', text: '5550001' });
+  f.drive.quota = true;
+  await call('driveSearchMills', [false]);
+  const q = await call('approveDriveMatch', [{ fileId: 'src-3', date: '2026-09-15', supplier: 'TCC', skidIds: ['SKD-000075'] }, 'Jo', 'op-26-q']);
+  const r3 = f.rows(SID, 'Receivers').filter((x) => x['Receiver ID'] === 'R-00003')[0];
+  ok('drive: copy refused -> receiver still made, linked to the original, told why', q.ok && q.result.copy && !q.result.copy.copied && /My Drive/.test(q.result.copy.copyError)
+    && q.result.copy.copyName === '26-09-15--TCC--R-00003.pdf' && r3 && r3['Drive Link'] === 'https://drive.google.com/file/d/src-3/view' && skidRow(f, 'SKD-000075')['Receiver'] === 'R-00003', [q, r3]);
+  f.drive.quota = false;
+  // Search again finds a scan added later for a mill that wasn't found.
+  f.drive.files.push({ id: 'src-4', name: 'late.pdf', mimeType: 'application/pdf', parents: ['fold-tcc'], text: '9999999' });
+  const ag = await call('driveSearchMills', [true]);
+  ok('drive: search again only re-searches the misses', ag.ok && ag.result.searched === 2 && ag.result.found === 1, ag);
+  const ag2 = await call('driveSearchMills', [ag.result.cutoff]);
+  ok('drive: ...once', ag2.ok && ag2.result.searched === 0, ag2);
+  const g2 = await call('getDriveMatches', []);
+  ok('drive: approved files drop off the list; the late scan shows', g2.ok && !g2.result.groups.some((x) => x.fileId === 'src-1' || x.fileId === 'dst-1') && g2.result.groups.some((x) => x.fileId === 'src-4')
+    && g2.result.misses.map((x) => x.mill).join() === 'M77', g2.result && g2.result.groups);
+  const bad = await call('approveDriveMatch', [{ fileId: 'src-4', supplier: 'TCC', skidIds: [] }, 'Jo', 'op-26-x']);
+  ok('drive: approve needs a ticket', !bad.ok && /ticket/.test(bad.error), bad);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
