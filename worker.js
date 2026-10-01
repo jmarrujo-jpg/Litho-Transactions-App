@@ -40,8 +40,11 @@ const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output
 // Google Drive. The app numbers them itself (R-00001, never reused) since the paper has no common
 // number. Steel Tickets gets a 'Receiver' column holding just that number; this tab holds the rest.
 // The file name shown to copy onto the Drive scan is YY-MM-DD--SUPPLIER--R-00001.
+// Each receiver also keeps the mill and ticket numbers of the tickets put on it ('Mill Numbers',
+// 'Tickets'), so wiping Steel Tickets (Fresh Import) doesn't lose the work — see keepPlan.
 const RECEIVERS = 'Receivers';
-const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Notes', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+const RECEIVER_KEEP_COLS = ['Mill Numbers', 'Tickets'];
+const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Notes', 'Mill Numbers', 'Tickets', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
 
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
@@ -128,7 +131,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-57', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-58', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -276,6 +279,8 @@ async function handle(fn, args, env) {
       return saveReceiver(sheets, args[0], args[1], args[2]);
     case 'deleteReceiver': // (receiverId, operator, opId) only while no ticket is on it
       return deleteReceiver(sheets, args[0], args[1], args[2]);
+    case 'keepReceiverNumbers': // (operator, opId) write every receiver's kept mill / ticket numbers up to date
+      return keepReceiverNumbers(sheets);
     case 'moveToWip': // (description, operator, coatings[], skidIds[], opId, removals{skidId:[pass]}) foreman batch: coat + straight to WIP
       return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
@@ -1711,6 +1716,7 @@ async function masterEdit(sheets, changes, operator, opId) {
   const ctx = await traceContext(sheets, master.rows);
   const ts = nowStamp(), today = todayYMD();
   const data = [], rows = [], done = [], skipped = [];
+  const rcvOver = {}, rcvIds = {}, rcvDropped = [];   // for the receivers' kept mill / ticket numbers
   const put = (o, fields) => Object.keys(fields).forEach((name) => {
     if (master.map[name]) data.push({ range: "'" + MASTER + "'!" + colLetter(master.map[name]) + o.__row, values: [[fields[name]]] });
   });
@@ -1772,6 +1778,14 @@ async function masterEdit(sheets, changes, operator, opId) {
         'Running Total After Pass': after, 'Notes': (from || '?') + ' → ' + to + ' (Database master sheet)' + (to === STATUS.CURRENT && leftJob ? '; left job ' + leftJob : ''), 'Job Name': '', 'Job ID': o['Job ID'] || '',
         'Skid ID': skidId, 'Op ID': sOp });
     }
+    if (wantRcv && (rcvChange || resumed)) {
+      rcvOver[skidId] = rcv;
+      if (rcv) rcvIds[rcv] = 1;
+      if (rcvChange && prevRcv) {
+        rcvIds[keepKey(prevRcv)] = 1;
+        rcvDropped.push({ receiver: keepKey(prevRcv), mill: keepKey(o['Mill']), ticket: keepKey(o['Ticket']) });
+      }
+    }
     const rOp = subOp(op, skidId + '#r');
     if (wantRcv && (rcvChange || resumed) && !ops.has(rOp)) {
       const name = rcv ? receiverName(ctx.receivers[rcv]) : '';
@@ -1785,6 +1799,11 @@ async function masterEdit(sheets, changes, operator, opId) {
       removed: v.removed.map((c) => c.item), receiver: wantRcv ? rcv : prevRcv });
   }
   if (!done.length) throw new Error('Nothing saved: ' + skipped.map((x) => (x.ticket || x.skidId) + ' (' + x.reason + ')').join(', '));
+  // The receivers' kept numbers go in the SAME write as the tickets, so they can't drift apart.
+  if (Object.keys(rcvIds).length) {
+    const rt = await receiverTabForKeeping(sheets);
+    if (rt) keepPlan(rt, master.rows, { override: rcvOver, dropped: rcvDropped, ids: rcvIds }).data.forEach((d) => data.push(d));
+  }
   if (data.length) await sheets.batchUpdate(data);
   await appendTxRows(sheets, rows, ops);
   return { ok: true, saved: done, skipped };
@@ -1807,7 +1826,8 @@ function cleanPos(v) {
 function receiverOut(o) {
   return { id: String(o['Receiver ID'] || '').trim().toUpperCase(), date: toYMD(o['Date Received']), supplier: String(o['Supplier'] || '').trim(),
     pos: String(o['POs'] || ''), link: String(o['Drive Link'] || '').trim(), notes: String(o['Notes'] || ''),
-    createdAt: String(o['Created At'] || ''), createdBy: String(o['Created By'] || ''), row: o.__row };
+    createdAt: String(o['Created At'] || ''), createdBy: String(o['Created By'] || ''),
+    mills: keptList(o['Mill Numbers']), keptTickets: keptList(o['Tickets']), row: o.__row };
 }
 async function receiverMap(sheets) {
   const map = {};
@@ -1838,6 +1858,99 @@ function receiverFields(id, from, ctx) {
   return { receiver: id, receiverName: r ? receiverName(r) : id + ' (not in Receivers)', receiverLink: r ? r.link : '', receiverFrom: from };
 }
 
+// ---- Kept numbers: a receiver remembers which mills / tickets were put on it ----
+// Steel Tickets can be wiped and rebuilt (Fresh Import gives every row a new Skid ID), so the
+// Receiver column alone would lose the work. Each Receivers row therefore keeps the mill and ticket
+// numbers of its tickets ('Mill Numbers', 'Tickets'). A list only grows as tickets go on; a number
+// comes off only when its ticket is taken off (and no other ticket still on it shares that number).
+// Matching back never uses row order or Skid IDs — only these numbers — and a number found on two
+// receivers is never guessed (see receiverLookup).
+function keepKey(v) { return String(v == null ? '' : v).trim().toUpperCase().replace(/\s+/g, ' '); }
+function keptList(v) {
+  const seen = {}, out = [];
+  String(v == null ? '' : v).split(/[,\n]+/).map(keepKey).filter(Boolean).forEach((x) => { if (!seen[x]) { seen[x] = 1; out.push(x); } });
+  return out;
+}
+// The Receivers tab with its two keep columns (made if missing), or null when there's no tab yet.
+async function receiverTabForKeeping(sheets) {
+  let t;
+  try { t = await readTab(sheets, RECEIVERS); } catch (e) { return null; }
+  if (!t.headers.length || !t.map['Receiver ID']) return null;
+  let hdr = t.headers;
+  for (const col of RECEIVER_KEEP_COLS) hdr = (await ensureColumn(sheets, RECEIVERS, hdr, col)).headers;
+  if (hdr !== t.headers) t = await readTab(sheets, RECEIVERS);
+  return t;
+}
+// Works out each receiver's kept lists from Steel Tickets. opts.override {skidId: receiver|''} is
+// what an edit is about to write; opts.dropped [{receiver, mill, ticket}] are tickets coming off;
+// opts.ids {R-x:1} limits it to those receivers (default: all). Returns the cells to write.
+function keepPlan(rt, masterRows, opts) {
+  opts = opts || {};
+  const over = opts.override || {}, dropped = opts.dropped || [], only = opts.ids || null;
+  const onM = {}, onT = {};
+  masterRows.forEach((o) => {
+    const sid = String(o['Skid ID'] || '').trim();
+    const id = keepKey(Object.prototype.hasOwnProperty.call(over, sid) ? over[sid] : o['Receiver']);
+    if (!id) return;
+    const m = keepKey(o['Mill']), tk = keepKey(o['Ticket']);
+    if (m) (onM[id] = onM[id] || {})[m] = 1;
+    if (tk) (onT[id] = onT[id] || {})[tk] = 1;
+  });
+  const data = [], lists = {};
+  let changed = 0;
+  rt.rows.forEach((r) => {
+    const id = keepKey(r['Receiver ID']);
+    if (!id) return;
+    let mills = keptList(r['Mill Numbers']), tix = keptList(r['Tickets']);
+    if (!only || only[id]) {
+      const before = mills.join(', ') + '|' + tix.join(', ');
+      dropped.filter((d) => d.receiver === id).forEach((d) => {
+        if (d.mill && !(onM[id] || {})[d.mill]) mills = mills.filter((x) => x !== d.mill);
+        if (d.ticket && !(onT[id] || {})[d.ticket]) tix = tix.filter((x) => x !== d.ticket);
+      });
+      Object.keys(onM[id] || {}).forEach((m) => { if (mills.indexOf(m) === -1) mills.push(m); });
+      Object.keys(onT[id] || {}).forEach((t) => { if (tix.indexOf(t) === -1) tix.push(t); });
+      if (mills.join(', ') + '|' + tix.join(', ') !== before) {
+        changed++;
+        data.push({ range: "'" + RECEIVERS + "'!" + colLetter(rt.map['Mill Numbers']) + r.__row, values: [[mills.join(', ')]] });
+        data.push({ range: "'" + RECEIVERS + "'!" + colLetter(rt.map['Tickets']) + r.__row, values: [[tix.join(', ')]] });
+      }
+    }
+    lists[id] = { mills, tickets: tix };
+  });
+  return { data, lists, changed };
+}
+// mill -> receiver and ticket -> receiver from the kept lists. A number on two receivers maps to
+// null (ambiguous: never guessed).
+function receiverLookup(lists) {
+  const byMill = {}, byTicket = {};
+  const add = (map, k, id) => { map[k] = (map[k] === undefined || map[k] === id) ? id : null; };
+  Object.keys(lists).forEach((id) => {
+    lists[id].mills.forEach((m) => add(byMill, m, id));
+    lists[id].tickets.forEach((t) => add(byTicket, t, id));
+  });
+  return { byMill, byTicket };
+}
+// Which receiver a ticket matches by its kept numbers: mill first, then ticket number.
+// {receiver, by: 'mill'|'ticket'} | {conflict: true} | null.
+function matchReceiver(look, mill, ticket) {
+  const m = keepKey(mill), t = keepKey(ticket);
+  let conflict = false;
+  if (m && look.byMill[m] !== undefined) { if (look.byMill[m]) return { receiver: look.byMill[m], by: 'mill' }; conflict = true; }
+  if (t && look.byTicket[t] !== undefined) { if (look.byTicket[t]) return { receiver: look.byTicket[t], by: 'ticket' }; conflict = true; }
+  return conflict ? { conflict: true } : null;
+}
+// Writes every receiver's kept lists up to date from Steel Tickets (the Receivers screen's
+// "Save them now"; the Fresh Import does the same before it wipes). Re-running is harmless.
+async function keepReceiverNumbers(sheets) {
+  const rt = await receiverTabForKeeping(sheets);
+  if (!rt) return { ok: true, changed: 0 };
+  const master = await readTab(sheets, MASTER);
+  const plan = keepPlan(rt, master.rows);
+  if (plan.data.length) await sheets.batchUpdate(plan.data);
+  return { ok: true, changed: plan.changed };
+}
+
 // Every receiver with its ticket count, the supplier codes in use, and a light list of every ticket
 // (to find and attach them by ticket range, PO or mill). One read of each tab.
 async function getReceivers(sheets) {
@@ -1848,18 +1961,27 @@ async function getReceivers(sheets) {
     if (o['Skid ID']) ctx.skids[String(o['Skid ID']).trim()] = o;
     const t = String(o['Ticket'] || '').trim(); if (t && !ctx.tickets[t]) ctx.tickets[t] = o;
   });
-  const count = {}, tickets = [], sup = {};
+  const lists = {};
+  Object.keys(receivers).forEach((id) => { lists[id] = { mills: receivers[id].mills, tickets: receivers[id].keptTickets }; });
+  const look = receiverLookup(lists);
+  const count = {}, unkept = {}, tickets = [], sup = {};
   master.rows.forEach((o) => {
     if (!(o['Ticket'] || o['Skid ID'])) return;
     const own = String(o['Receiver'] || '').trim().toUpperCase();
     const tr = receiverTrace(o, ctx);
     if (own) count[own] = (count[own] || 0) + 1;
     const s = cleanSupplier(o['Supplier']); if (s) sup[s] = 1;
+    const mk = keepKey(o['Mill']), tk = keepKey(o['Ticket']);
+    // On a receiver but its numbers aren't kept there yet (attached before keeping existed).
+    if (own && lists[own] && ((mk && lists[own].mills.indexOf(mk) === -1) || (tk && lists[own].tickets.indexOf(tk) === -1))) unkept[own] = (unkept[own] || 0) + 1;
+    // Not on any receiver, but a receiver kept its mill / ticket number (e.g. after a wipe).
+    const mt = !own && !tr.receiver ? matchReceiver(look, o['Mill'], o['Ticket']) : null;
     tickets.push({ skidId: o['Skid ID'] || '', ticket: String(o['Ticket'] || ''), status: o['Status'] || '', mill: String(o['Mill'] || ''),
       po: o['PO Number'] != null ? String(o['PO Number']) : '', supplier: String(o['Supplier'] || ''), qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '',
-      receiver: own, via: own ? '' : tr.receiver, viaFrom: own ? '' : tr.receiverFrom, splitOf: o['Split Of'] || '' });
+      receiver: own, via: own ? '' : tr.receiver, viaFrom: own ? '' : tr.receiverFrom, splitOf: o['Split Of'] || '',
+      match: mt && mt.receiver ? mt.receiver : '', matchBy: mt && mt.receiver ? mt.by : '', matchConflict: !!(mt && mt.conflict) });
   });
-  const list = Object.keys(receivers).map((id) => Object.assign({}, receivers[id], { name: receiverName(receivers[id]), ticketCount: count[id] || 0 }));
+  const list = Object.keys(receivers).map((id) => Object.assign({}, receivers[id], { name: receiverName(receivers[id]), ticketCount: count[id] || 0, unkept: unkept[id] || 0 }));
   list.sort((a, b) => (b.id < a.id ? -1 : b.id > a.id ? 1 : 0));   // newest number first
   list.forEach((r) => { if (r.supplier) sup[r.supplier] = 1; });
   return { receivers: list, suppliers: Object.keys(sup).sort(), tickets };
@@ -1911,6 +2033,8 @@ async function deleteReceiver(sheets, receiverId, operator, opId) {
   const master = await readTab(sheets, MASTER);
   const on = master.rows.filter((r) => String(r['Receiver'] || '').trim().toUpperCase() === id);
   if (on.length) throw new Error(id + ' still has ' + on.length + ' ticket(s) on it. Take them off first, then delete it.');
+  const kept = keptList(o['Mill Numbers']).length + keptList(o['Tickets']).length;
+  if (kept) throw new Error(id + ' still remembers ' + kept + ' mill / ticket number(s) — they put its tickets back after a wipe, so it can\'t be deleted.');
   const grid = await sheetGrid(sheets, RECEIVERS);
   if (!grid) throw new Error('Could not locate the Receivers tab.');
   // Re-check the row still holds THIS receiver right before deleting by position.
@@ -2600,7 +2724,7 @@ const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 // but we pre-create them (blank) so the fresh Steel Tickets header is complete — the app never has to
 // widen the sheet later and nothing reads as a "missing header". Names are exact (from the code that
 // stamps them), so no phantom duplicates get created.
-const IMPORT_LIFECYCLE_COLS = ['System Notes', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Litho', 'Litho Notes',
+const IMPORT_LIFECYCLE_COLS = ['System Notes', 'Split Of', 'Cut Type', 'Load #', 'Run ID', 'Job ID', 'Receiver', 'Litho', 'Litho Notes',
   'First Coated At', 'First Coated By', 'Used At', 'Used By', 'Used Via', 'Loaded On', 'Finished On',
   'Counted At', 'Counted By', 'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Spoilage'];
 
@@ -2655,6 +2779,23 @@ async function importStaging(sheets, opId) {
   const ci = header.indexOf('Comments'), si = header.indexOf('System Notes');
   if (ci !== -1 && si !== -1 && si !== ci + 1) { header.splice(si, 1); header.splice(header.indexOf('Comments') + 1, 0, 'System Notes'); }
 
+  // 2b) Receivers survive the wipe: first bring every receiver's kept mill / ticket numbers up to
+  //     date from the Steel Tickets about to be wiped, then put each imported ticket back on the
+  //     receiver that kept its mill (else ticket) number. Never by row order or Skid ID.
+  let look = null;
+  const expected = [];   // Current / WIP tickets on a receiver now, to report any that don't come back
+  const rt = await receiverTabForKeeping(sheets);
+  if (rt) {
+    const old = await readTab(sheets, MASTER);
+    const plan = keepPlan(rt, old.rows);
+    if (plan.data.length) await sheets.batchUpdate(plan.data);
+    look = receiverLookup(plan.lists);
+    old.rows.forEach((o) => {
+      const id = keepKey(o['Receiver']), st = o['Status'] || STATUS.CURRENT;
+      if (id && (st === STATUS.CURRENT || st === STATUS.WIP)) expected.push({ id, ticket: String(o['Ticket'] || o['Skid ID'] || ''), mill: keepKey(o['Mill']), tk: keepKey(o['Ticket']) });
+    });
+  }
+
   // 3) Reset Steel Tickets (clean header) + clear the audit log.
   const date = todayYMD();
   await resetTabToHeader(sheets, MASTER, header);
@@ -2673,8 +2814,9 @@ async function importStaging(sheets, opId) {
   // import and stops partway (leaving the wiped sheet half-filled). One values.update per chunk is a
   // single subrequest regardless of how many rows it carries.
   const allRows = [];
-  let n = 0;
+  let n = 0, restored = 0;
   const counts = { Current: 0, WIP: 0 };
+  const back = {}, conflicts = [];   // back: "R-x|mill" / "R-x|#ticket" that found its ticket again
   for (const p of parts) {
     for (const o of p.rows) {
       n += 1;
@@ -2685,6 +2827,13 @@ async function importStaging(sheets, opId) {
       rec['Status'] = p.status;
       rec['Last Updated At'] = date;
       rec['Last Updated By'] = 'import';
+      if (look && !String(rec['Receiver'] || '').trim()) {
+        const mt = matchReceiver(look, o['Mill'], o['Ticket']);
+        if (mt && mt.receiver) { rec['Receiver'] = mt.receiver; restored++; }
+        else if (mt && mt.conflict) conflicts.push(String(o['Ticket']));
+      }
+      const rid = keepKey(rec['Receiver']);
+      if (rid) { if (keepKey(o['Mill'])) back[rid + '|' + keepKey(o['Mill'])] = 1; back[rid + '|#' + keepKey(o['Ticket'])] = 1; }
       allRows.push(header.map((h) => (rec[h] == null ? '' : rec[h])));
       counts[p.tabName] = (counts[p.tabName] || 0) + 1;
     }
@@ -2696,9 +2845,13 @@ async function importStaging(sheets, opId) {
   // Log the import into the (freshly cleared) audit tab. This doubles as the opId dedup marker, so a
   // double-submit of the same import is caught instead of wiping and reloading twice.
   await eventTx(sheets, { skidId: '', ticket: '', itemText: 'FRESH IMPORT', operator: '',
-    note: 'Imported ' + n + ' skids from staging (Current ' + (counts['Current'] || 0) + ', WIP ' + (counts['WIP'] || 0) + ')',
+    note: 'Imported ' + n + ' skids from staging (Current ' + (counts['Current'] || 0) + ', WIP ' + (counts['WIP'] || 0) + ')' +
+      (look ? '; receivers put back on ' + restored : ''),
     timestamp: date, runningTotal: 0 }, opId || '');
+  const notBack = expected.filter((e) => !(e.mill && back[e.id + '|' + e.mill]) && !(e.tk && back[e.id + '|#' + e.tk]))
+    .map((e) => e.ticket + ' (' + e.id + ')');
   return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, total: n,
+    receiversRestored: restored, receiversNotBack: notBack.slice(0, 100), receiversNotBackCount: notBack.length, receiverConflicts: conflicts.slice(0, 100),
     firstSkid: n ? fmtId('SKD-', 1) : '', lastSkid: n ? fmtId('SKD-', n) : '', columns: header.length };
 }
 

@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.49.0</span>
+      <span class="version" id="appVersion">v1.50.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1311,12 +1311,62 @@
         '<div class="field" style="flex:1;margin:0"><label>Find a receiver</label><input id="rcvSearch" placeholder="number, supplier, PO, date…" autocomplete="off" value="' + esc(rcvSearch) + '"></div>' +
         '<button class="btn secondary" id="rcvReload" style="margin:0">↻</button>' +
         '<button class="btn success" id="rcvNew" style="margin:0">+ New receiver</button>' +
-      '</div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
+      '</div><div id="rcvKeep"></div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
+    renderRcvKeep();
     var si = document.getElementById('rcvSearch');
     si.oninput = function () { rcvSearch = si.value; renderRcvList(); };
     document.getElementById('rcvReload').onclick = function () { rcvData = null; renderReceivers(); };
     document.getElementById('rcvNew').onclick = function () { rcvSel = 'new'; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
     renderRcvList();
+  }
+  // Kept numbers: each receiver remembers its tickets' mill / ticket numbers, so a wipe of Steel
+  // Tickets (Fresh Import) doesn't lose the work. Two notices: tickets whose numbers aren't kept yet
+  // (attached before this existed), and tickets that match a receiver by a kept number but aren't on it.
+  function renderRcvKeep() {
+    var box = document.getElementById('rcvKeep');
+    if (!box) return;
+    var unkept = rcvData.receivers.reduce(function (n, r) { return n + (r.unkept || 0); }, 0);
+    var found = rcvData.tickets.filter(function (t) { return t.match; });
+    var clash = rcvData.tickets.filter(function (t) { return t.matchConflict; });
+    var html = '';
+    if (unkept) html += '<div class="card" style="border:2px solid var(--warn)"><div style="font-weight:600">' + unkept + ' ticket' + (unkept === 1 ? ' is' : 's are') + ' on a receiver, but the receiver hasn’t saved ' + (unkept === 1 ? 'its' : 'their') + ' mill and ticket numbers yet.</div>' +
+      '<div class="sub" style="margin:4px 0 8px">Save them so wiping Current and WIP can’t lose which receiver they came on.</div>' +
+      '<button class="btn success" id="rcvKeepNow">Save them now</button></div>';
+    if (found.length) {
+      var per = {}; found.forEach(function (t) { per[t.match] = (per[t.match] || 0) + 1; });
+      html += '<div class="card" style="border:2px solid var(--accent)"><div style="font-weight:600">' + found.length + ' ticket' + (found.length === 1 ? '' : 's') + ' match a receiver by a saved mill or ticket number, but ' + (found.length === 1 ? 'isn’t' : 'aren’t') + ' on it.</div>' +
+        '<div class="sub" style="margin:4px 0 8px">' + esc(Object.keys(per).sort().map(function (id) { return id + ': ' + per[id]; }).join(' · ')) + '. Open a receiver to see them one by one, or attach them all.</div>' +
+        '<button class="btn success" id="rcvAttachFound">Attach all ' + found.length + '</button></div>';
+    }
+    if (clash.length) html += '<div class="card"><div style="font-weight:600">' + clash.length + ' ticket' + (clash.length === 1 ? '' : 's') + ' match two receivers</div>' +
+      '<div class="sub">Their mill or ticket number is saved on more than one receiver, so they weren’t guessed. Attach ' + (clash.length === 1 ? 'it' : 'them') + ' by hand: ' +
+      esc(clash.slice(0, 20).map(function (t) { return t.ticket || t.skidId; }).join(', ')) + (clash.length > 20 ? '…' : '') + '</div></div>';
+    box.innerHTML = html;
+    var k = document.getElementById('rcvKeepNow');
+    if (k) k.onclick = function () {
+      k.disabled = true; k.textContent = 'Saving…';
+      runMutation('keepReceiverNumbers', ['', newOpId()], function (res) { toast('Saved on ' + ((res && res.changed) || 0) + ' receiver' + ((res && res.changed) === 1 ? '' : 's')); rcvLoad(); },
+        function (err) { k.disabled = false; k.textContent = 'Save them now'; showInfo('Could not save', err.message); });
+    };
+    var a = document.getElementById('rcvAttachFound');
+    if (a) a.onclick = function () {
+      var batch = found.slice(0, 300);
+      showConfirm('Attach ' + batch.length + ' ticket' + (batch.length === 1 ? '' : 's') + '?',
+        'Each goes on the receiver that saved its mill (or ticket) number. ' + (found.length > 300 ? 'This does the first 300; tap again for the rest. ' : '') + 'Each change is logged in the ticket’s history.',
+        function () {
+          a.disabled = true; a.textContent = 'Saving…';
+          runMutation('masterEdit', [batch.map(function (t) { return { skidId: t.skidId, receiver: t.match, from: t.status || '' }; }), '', newOpId()], function (res) {
+            var saved = (res && res.saved) || [], skipped = (res && res.skipped) || [];
+            msData = null;
+            showInfo('Attached', saved.length + ' ticket' + (saved.length === 1 ? '' : 's') + ' put back on their receiver.' +
+              (skipped.length ? ' ' + skipped.length + ' not changed: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''));
+            rcvLoad();
+          }, function (err) {
+            a.disabled = false; a.textContent = 'Attach all ' + found.length;
+            showModal({ title: 'Could not save', confirmText: 'OK', message: err.message + ' — Tap Attach again: it finishes whatever didn\'t save and never applies a change twice.' });
+          });
+        }, 'Attach');
+    };
   }
   function renderRcvList() {
     var box = document.getElementById('rcvList');
@@ -1363,7 +1413,7 @@
         '</div>' +
         '<div class="row" style="gap:8px">' +
           '<button class="btn success" id="rcvSave" style="flex:1">' + (isNew ? 'Create receiver' : 'Save details') + '</button>' +
-          (!isNew && !r.ticketCount ? '<button class="btn danger" id="rcvDelete">Delete</button>' : '') +
+          (!isNew && !r.ticketCount && !(r.mills || []).length && !(r.keptTickets || []).length ? '<button class="btn danger" id="rcvDelete">Delete</button>' : '') +
         '</div>' +
         (isNew ? '<div class="sub" style="margin-top:8px">The number (R-00001, R-00002, …) is given when you create it. Then you can add its tickets.</div>' : '') +
       '</div>' +
@@ -1430,6 +1480,8 @@
     var on = all.filter(function (t) { return t.receiver === id; });
     var adding = all.filter(function (t) { return rcvAdd[t.skidId]; });
     var pieces = all.filter(function (t) { return !t.receiver && t.via === id; });
+    var found = all.filter(function (t) { return t.match === id; }), foundNotYet = found.filter(function (t) { return !rcvAdd[t.skidId]; });
+    var r = rcvById(id) || {}, km = r.mills || [], kt = r.keptTickets || [];
     box.innerHTML = '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this receiver <span class="sub" style="font-weight:400">&middot; ' + on.length + '</span></h3>' +
       (adding.length ? '<div class="sub" style="color:var(--good);font-weight:600;margin-top:4px">Adding (not saved yet):</div>' + adding.map(function (t) {
         return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, true), t.receiver ? 'moves off ' + t.receiver : '');
@@ -1437,7 +1489,17 @@
       (on.length ? on.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvdrop', t.skidId, !!rcvDrop[t.skidId], '', 'Take off'), rcvDrop[t.skidId] ? 'comes off at Save' : '', !!rcvDrop[t.skidId]); }).join('')
         : (adding.length ? '' : '<div class="sub">None yet. Find them below.</div>')) +
       (pieces.length ? '<div class="sub" style="margin-top:8px">Pieces that take it from the ticket they were cut from:</div>' + pieces.map(function (t) { return rcvTicketLine(t, '', 'from ' + t.viaFrom); }).join('') : '') +
+      (found.length ? '<div class="row" style="align-items:center;gap:8px;margin-top:10px"><div class="sub" style="flex:1;color:var(--accent);font-weight:600">Found by a saved number (not on it yet):</div>' +
+        (foundNotYet.length ? '<button class="btn secondary" id="rcvAddFound" style="padding:6px 10px;font-size:13px">Add all ' + foundNotYet.length + '</button>' : '') + '</div>' +
+        found.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, !!rcvAdd[t.skidId], '', 'Add'), 'same ' + (t.matchBy === 'mill' ? 'mill' : 'ticket number')); }).join('') : '') +
+      '<details style="margin-top:10px"><summary class="sub" style="cursor:pointer">Saved on this receiver: ' + km.length + ' mill number' + (km.length === 1 ? '' : 's') + ', ' + kt.length + ' ticket number' + (kt.length === 1 ? '' : 's') +
+        (r.unkept ? ' &middot; <b>' + r.unkept + ' not saved yet</b>' : '') + '</summary>' +
+        '<div class="sub" style="margin-top:6px">These stay on the Receivers tab even if Current and WIP are wiped, and the Fresh Import puts this receiver back on tickets with these numbers.' + (r.unkept ? ' Save on the receiver list to bring them up to date (it also happens on your next Save here).' : '') + '</div>' +
+        '<div class="sub" style="margin-top:6px"><b>Mill:</b> ' + (km.length ? esc(km.join(', ')) : 'none') + '</div>' +
+        '<div class="sub" style="margin-top:4px"><b>Tickets:</b> ' + (kt.length ? esc(kt.join(', ')) : 'none') + '</div></details>' +
       '</div>';
+    var af = document.getElementById('rcvAddFound');
+    if (af) af.onclick = function () { foundNotYet.forEach(function (t) { rcvAdd[t.skidId] = true; }); renderRcvTickets(); renderRcvCands(); };
     rcvWireToggles(box);
     rcvUpdateBar();
   }
@@ -1572,18 +1634,22 @@
   // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP staging tabs.
   function dbFreshImport() {
     showConfirm('Wipe and re-import from Current + WIP?',
-      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current and WIP tabs. Make sure you have a backup copy of the sheet. Continue?',
+      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current and WIP tabs. Receivers are kept: each ticket goes back on the receiver that saved its mill (or ticket) number. Make sure you have a backup copy of the sheet. Continue?',
       function () {
         var btn = document.getElementById('dbImportBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
         runMutation('importStaging', [newOpId()],
           function (res) {
             var cur = (res && res.current) || 0, wip = (res && res.wip) || 0, total = (res && res.total) || 0;
-            allCache = []; dbData.steel = null; dbData.tx = null;   // force a full reload
+            allCache = []; dbData.steel = null; dbData.tx = null; rcvData = null; msData = null;   // force a full reload
             ensureAllCache(function () {});
             showInfo('Import complete',
               'Imported ' + total + ' skid' + (total === 1 ? '' : 's') + ' — ' + cur + ' Current, ' + wip + ' WIP.' +
-              (res && res.firstSkid ? ' Skid IDs ' + res.firstSkid + '–' + res.lastSkid + '.' : ''),
+              (res && res.firstSkid ? ' Skid IDs ' + res.firstSkid + '–' + res.lastSkid + '.' : '') +
+              (res && res.receiversRestored != null ? ' Receivers put back on ' + res.receiversRestored + ' ticket' + (res.receiversRestored === 1 ? '' : 's') + '.' : '') +
+              (res && res.receiversNotBackCount ? ' ' + res.receiversNotBackCount + ' ticket' + (res.receiversNotBackCount === 1 ? '' : 's') + ' that had a receiver didn’t come back on it (not in Current / WIP, or the mill and ticket number changed): ' +
+                res.receiversNotBack.slice(0, 30).join(', ') + (res.receiversNotBackCount > 30 ? '…' : '') + '.' : '') +
+              (res && res.receiverConflicts && res.receiverConflicts.length ? ' ' + res.receiverConflicts.length + ' matched two receivers and were left off: ' + res.receiverConflicts.slice(0, 30).join(', ') + '.' : ''),
               function () { renderDatabaseHome(); });
           },
           function (err) {

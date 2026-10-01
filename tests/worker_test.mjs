@@ -659,5 +659,95 @@ await concurrency(envBase, 'in-worker lock');
   ok('numbers are not reused after a delete', c.ok && c.result.id === 'R-00003', c.result);
 }
 
+// 24. Receivers keep their tickets' mill / ticket numbers, so a wipe of Steel Tickets (Fresh Import)
+//     puts each ticket back on the right receiver — by mill, then ticket number, never guessing.
+{ const f = fresh();
+  const tab = (name) => f.books[SID].tabs[name];
+  const addTab = (name, rows) => { f.books[SID].tabs[name] = { id: 900 + f.books[SID].order.length, rows, rowCount: 1000, colCount: 40 }; f.books[SID].order.push(name); };
+  const setCell = (name, keyCol, key, col, v) => {
+    const t = tab(name), h = t.rows[0], ki = h.indexOf(keyCol), ci = h.indexOf(col);
+    const row = t.rows.filter((r) => r[ki] === key)[0];
+    while (row.length <= ci) row.push('');
+    row[ci] = v;
+  };
+  const rcvRow = (id) => f.rows(SID, 'Receivers').filter((r) => r['Receiver ID'] === id)[0];
+  tab('Steel Tickets').rows.push(
+    skid('200', 'SKD-000060', 'Current', 10, 50, { 'Mill': 'MA1' }),
+    skid('201', 'SKD-000061', 'WIP', 10, 50, { 'Mill': 'ma2 ' }),
+    skid('202', 'SKD-000062', 'Current', 10, 50),
+    skid('203', 'SKD-000063', 'Current', 10, 50, { 'Mill': 'MB1' }),
+    skid('204', 'SKD-000064', 'Current', 10, 50, { 'Mill': 'MZ' }));
+  await call('saveReceiver', [{ date: '2026-10-01', supplier: 'TCC' }, '', 'op-24-a']);
+  await call('saveReceiver', [{ date: '2026-10-02', supplier: 'CMD' }, '', 'op-24-b']);
+  const m = await call('masterEdit', [[['SKD-000060', 'R-00001'], ['SKD-000061', 'R-00001'], ['SKD-000062', 'R-00001'], ['SKD-000063', 'R-00002']]
+    .map((x) => ({ skidId: x[0], receiver: x[1] })), '', 'op-24-m']);
+  ok('kept: attached', m.ok && m.result.saved.length === 4, m);
+  ok('kept: mills and tickets written on the receiver', rcvRow('R-00001')['Mill Numbers'] === 'MA1, MA2' && rcvRow('R-00001')['Tickets'] === '200, 201, 202'
+    && rcvRow('R-00002')['Mill Numbers'] === 'MB1' && rcvRow('R-00002')['Tickets'] === '203', f.rows(SID, 'Receivers'));
+  const mv = await call('masterEdit', [[{ skidId: 'SKD-000061', receiver: 'R-00002' }], '', 'op-24-mv']);
+  ok('kept: moving a ticket moves its numbers', mv.ok && rcvRow('R-00001')['Mill Numbers'] === 'MA1' && rcvRow('R-00001')['Tickets'] === '200, 202'
+    && rcvRow('R-00002')['Mill Numbers'] === 'MB1, MA2' && rcvRow('R-00002')['Tickets'] === '203, 201', f.rows(SID, 'Receivers'));
+  // A ticket put on a receiver before keeping existed (Receiver typed in the sheet).
+  setCell('Steel Tickets', 'Skid ID', 'SKD-000001', 'Receiver', 'R-00002');
+  const g1 = await call('getReceivers', []);
+  ok('kept: not-yet-saved numbers counted', g1.ok && g1.result.receivers.filter((r) => r.id === 'R-00002')[0].unkept === 1, g1.result && g1.result.receivers);
+  const k = await call('keepReceiverNumbers', ['', 'op-24-k']);
+  ok('kept: Save them now', k.ok && k.result.changed === 1 && rcvRow('R-00002')['Tickets'] === '203, 201, 100', k);
+  const k2 = await call('keepReceiverNumbers', ['', 'op-24-k2']);
+  ok('kept: running it again changes nothing', k2.ok && k2.result.changed === 0, k2);
+  // MZ kept on both receivers -> never guessed.
+  setCell('Receivers', 'Receiver ID', 'R-00001', 'Mill Numbers', 'MA1, MZ');
+  setCell('Receivers', 'Receiver ID', 'R-00002', 'Mill Numbers', 'MB1, MA2, MZ');
+  const g2 = await call('getReceivers', []);
+  const t204 = g2.ok && g2.result.tickets.filter((t) => t.skidId === 'SKD-000064')[0];
+  ok('kept: a mill on two receivers is a conflict, not a match', t204 && !t204.match && t204.matchConflict, t204);
+  // Wipe & re-import: same tickets come back with new Skid IDs, one with a new ticket number.
+  addTab('Current', [['Ticket', 'QTY/LOAD', 'Mill'], ['202', 10, ''], ['999', 5, 'MB1'], ['300', 5, 'MZ'], ['200', 10, 'MA1']]);
+  addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill'], ['201', 10, 'MA2']]);
+  const imp = await call('importStaging', ['op-24-i']);
+  ok('import ok', imp.ok && imp.result.total === 5, imp);
+  const byT = (t) => f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === t)[0];
+  ok('import: back on by mill', byT('200')['Receiver'] === 'R-00001' && byT('201')['Receiver'] === 'R-00002' && byT('999')['Receiver'] === 'R-00002',
+    f.rows(SID, 'Steel Tickets').map((r) => [r['Ticket'], r['Skid ID'], r['Receiver']]));
+  ok('import: no mill -> back on by ticket number', byT('202')['Receiver'] === 'R-00001', byT('202'));
+  ok('import: two-receiver mill left blank and reported', !byT('300')['Receiver'] && imp.result.receiverConflicts.indexOf('300') !== -1, imp.result);
+  ok('import: count put back', imp.result.receiversRestored === 4, imp.result);
+  // 203's mill came back as ticket 999 (same coil, new number) so it counts as back; 100 isn't in the import.
+  ok('import: tickets that didn\'t come back are named', imp.result.receiversNotBack.join() === '100 (R-00002)' && imp.result.receiversNotBackCount === 1, imp.result);
+  ok('import: receivers and their numbers untouched', f.rows(SID, 'Receivers').length === 2 && /203/.test(rcvRow('R-00002')['Tickets']), f.rows(SID, 'Receivers'));
+  // Lost again by hand (Receiver cell cleared): the Receivers screen finds it by mill.
+  setCell('Steel Tickets', 'Ticket', '999', 'Receiver', '');
+  const g3 = await call('getReceivers', []);
+  const t999 = g3.ok && g3.result.tickets.filter((t) => t.ticket === '999')[0];
+  ok('found by a kept number', t999 && t999.match === 'R-00002' && t999.matchBy === 'mill', t999);
+  // A receiver that still remembers numbers can't be deleted.
+  const d = await call('deleteReceiver', ['R-00001', '', 'op-24-d']);
+  ok('delete refused while numbers are kept', !d.ok, d);
+  const off = await call('masterEdit', [[{ skidId: byT('200')['Skid ID'], receiver: '' }, { skidId: byT('202')['Skid ID'], receiver: '' }], '', 'op-24-o']);
+  setCell('Receivers', 'Receiver ID', 'R-00001', 'Mill Numbers', '');
+  ok('taking tickets off drops their numbers', off.ok && rcvRow('R-00001')['Tickets'] === '', rcvRow('R-00001'));
+  const d2 = await call('deleteReceiver', ['R-00001', '', 'op-24-d2']);
+  ok('delete once nothing is kept', d2.ok && !rcvRow('R-00001'), d2);
+}
+
+// 25. Fresh Import dies after the wipe, before the rows are written: the retry still puts the
+//     receivers back (from the numbers kept on the Receivers tab, saved before the wipe).
+{ const f = fresh();
+  const tab = (name) => f.books[SID].tabs[name];
+  tab('Steel Tickets').rows.push(skid('200', 'SKD-000060', 'Current', 10, 50, { 'Mill': 'MA1' }));
+  await call('saveReceiver', [{ date: '2026-10-01', supplier: 'TCC' }, '', 'op-25-a']);
+  await call('masterEdit', [[{ skidId: 'SKD-000060', receiver: 'R-00001' }], '', 'op-25-m']);
+  for (const [name, rows] of [['Current', [['Ticket', 'Mill'], ['200', 'MA1']]], ['WIP', [['Ticket', 'Mill']]]]) {
+    f.books[SID].tabs[name] = { id: 950 + f.books[SID].order.length, rows, rowCount: 1000, colCount: 40 }; f.books[SID].order.push(name);
+  }
+  f.faults.push({ match: (r) => r.kind === 'write' && r.decoded.includes("Steel Tickets'!A2"), mode: 'before', status: 503, times: 50 });
+  const i1 = await call('importStaging', ['op-25-i']);
+  ok('import attempt 1 fails after the wipe', !i1.ok && !f.rows(SID, 'Steel Tickets').length, i1);
+  f.faults.length = 0;
+  const i2 = await call('importStaging', ['op-25-i']);
+  const r200 = f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === '200')[0];
+  ok('retry puts the receiver back from the kept numbers', i2.ok && r200 && r200['Receiver'] === 'R-00001' && i2.result.receiversRestored === 1, [i2, r200]);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

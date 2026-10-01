@@ -869,6 +869,55 @@ const base = {
   await page.close();
 }
 
+// ---- 24. Receivers kept numbers: save-now notice, attach tickets found by a saved mill, delete hidden
+{ const db = { receivers: [
+      { id: 'R-00002', name: '26-10-02--CMD--R-00002', date: '2026-10-02', supplier: 'CMD', pos: '', link: '', notes: '', mills: ['MB1'], keptTickets: ['203'], unkept: 0 },
+      { id: 'R-00001', name: '26-10-01--TCC--R-00001', date: '2026-10-01', supplier: 'TCC', pos: '', link: '', notes: '', mills: ['MA1', 'MA2'], keptTickets: ['200', '201'], unkept: 1 }],
+    suppliers: ['TCC', 'CMD'], tickets: [
+      { skidId: 'SKD-1', ticket: '200', status: 'Current', mill: 'MA1', receiver: '', via: '', viaFrom: '', match: 'R-00001', matchBy: 'mill' },
+      { skidId: 'SKD-2', ticket: '201', status: 'WIP', mill: '', receiver: '', via: '', viaFrom: '', match: 'R-00001', matchBy: 'ticket' },
+      { skidId: 'SKD-3', ticket: '300', status: 'Current', mill: 'MZ', receiver: '', via: '', viaFrom: '', match: '', matchConflict: true },
+      { skidId: 'SKD-4', ticket: '100', status: 'Current', mill: 'MQ', receiver: 'R-00001', via: '', viaFrom: '' }] };
+  const out = () => { const c = {}; db.tickets.forEach((t) => { if (t.receiver) c[t.receiver] = (c[t.receiver] || 0) + 1; });
+    return JSON.parse(JSON.stringify(Object.assign({}, db, { receivers: db.receivers.map((r) => Object.assign({}, r, { ticketCount: c[r.id] || 0 })) }))); };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R(out()),
+    keepReceiverNumbers: () => { db.receivers.forEach((r) => { r.unkept = 0; }); return R({ ok: true, changed: 1 }); },
+    masterEdit: (a) => {
+      a[0].forEach((c) => { const t = db.tickets.filter((x) => x.skidId === c.skidId)[0]; t.receiver = c.receiver; t.match = ''; });
+      return R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, receiver: c.receiver })), skipped: [] });
+    },
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  let k = await page.textContent('#rcvKeep');
+  ok('keep: not-saved notice', k.includes('1 ticket is on a receiver') && !!(await page.$('#rcvKeepNow')), k);
+  ok('keep: found-by-number notice', k.includes('2 tickets match a receiver') && k.includes('R-00001: 2'), k);
+  ok('keep: two-receiver tickets named, not guessed', k.includes('1 ticket match two receivers') && k.includes('300'), k);
+  await page.click('#rcvKeepNow'); await page.waitForTimeout(300);
+  ok('keep: Save them now calls the worker and clears the notice', calls.some((c) => c.fn === 'keepReceiverNumbers') && !(await page.textContent('#rcvKeep')).includes('hasn'));
+  // One receiver: found tickets listed with Add, kept numbers shown, no Delete while it keeps numbers.
+  await page.click('[data-rcvopen="R-00002"]'); await page.waitForTimeout(200);
+  ok('keep: no Delete while numbers are kept', !(await page.$('#rcvDelete')));
+  ok('keep: kept numbers listed', (await page.textContent('#rcvTickets')).includes('1 mill number, 1 ticket number') && (await page.textContent('#rcvTickets')).includes('MB1'));
+  await page.click('#rcvBackList'); await page.waitForTimeout(200);
+  await page.click('[data-rcvopen="R-00001"]'); await page.waitForTimeout(200);
+  let tk = await page.textContent('#rcvTickets');
+  ok('keep: found tickets shown on their receiver', tk.includes('Found by a saved number') && tk.includes('same mill') && tk.includes('same ticket number'), tk);
+  await page.click('#rcvAddFound'); await page.waitForTimeout(100);
+  ok('keep: Add all marks them', (await page.textContent('#rcvBarText')).includes('2 to add'));
+  await page.click('#rcvBar #rcvDiscard'); await page.waitForTimeout(100);
+  await page.click('#rcvBackList'); await page.waitForTimeout(200);
+  await page.click('#rcvAttachFound'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const me = calls.filter((c) => c.fn === 'masterEdit');
+  ok('keep: Attach all sends each to its matched receiver', me.length === 1 && me[0].args[0].length === 2 && me[0].args[0].every((c) => c.receiver === 'R-00001'), me.map((c) => c.args[0]));
+  await page.click('#modalOk'); await page.waitForTimeout(200);
+  ok('keep: found notice gone after attaching', !(await page.textContent('#rcvKeep')).includes('match a receiver by'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
