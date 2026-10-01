@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.48.0</span>
+      <span class="version" id="appVersion">v1.49.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -949,7 +949,7 @@
   // A spreadsheet-like admin view of the underlying tabs, read/written BY COLUMN NAME so it matches
   // exactly what the app uses (even where the sheet header has stray duplicate columns). Two tables:
   // Steel Tickets and the Transactions audit log. Tap a row to edit its fields and save back.
-  var DB_TABLE_TABS = [['master', 'Master sheet'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
+  var DB_TABLE_TABS = [['master', 'Master sheet'], ['receivers', 'Receivers'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
   var DB_ROW_CAP = 60;                          // rows rendered at once (search to narrow beyond this)
   var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
@@ -987,10 +987,10 @@
     var chips = DB_TABLE_TABS.map(function (c) {
       return '<button data-dbt="' + c[0] + '"' + (dbTable === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
-    var isMaster = dbTable === 'master';
+    var isMaster = dbTable === 'master', isRcv = dbTable === 'receivers';
     view.innerHTML =
       '<div class="tabbar">' + chips + '</div>' +
-      (isMaster ? '<div id="msBox"></div>' :
+      (isMaster ? '<div id="msBox"></div>' : isRcv ? '<div id="rcvBox"></div>' :
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Search this table</label><input id="dbSearch" placeholder="filter any column…" autocomplete="off" value="' + esc(dbSearch) + '"></div>' +
         '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
@@ -1011,11 +1011,17 @@
         '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP</button>' +
       '</div>';
     Array.prototype.forEach.call(view.querySelectorAll('[data-dbt]'), function (b) {
-      b.onclick = function () { dbTable = b.getAttribute('data-dbt'); dbSearch = ''; renderDatabaseHome(); };
+      b.onclick = function () {
+        var go = function () { dbTable = b.getAttribute('data-dbt'); dbSearch = ''; renderDatabaseHome(); };
+        if (dbTable === 'receivers' && rcvSel && rcvMarkCount() && b.getAttribute('data-dbt') !== 'receivers') {
+          showConfirm('Leave without saving?', 'The tickets you marked to add or take off are not saved yet.', function () { rcvAdd = {}; rcvDrop = {}; go(); }, 'Leave', 'danger');
+        } else go();
+      };
     });
     document.getElementById('dbImportBtn').onclick = dbFreshImport;
     document.getElementById('dbSnapshotBtn').onclick = dbRunSnapshot;
     if (isMaster) { renderMasterSheet(); return; }
+    if (isRcv) { renderReceivers(); return; }
     var s = document.getElementById('dbSearch');
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
@@ -1027,6 +1033,7 @@
   // — a new status, coatings to take off — and nothing is saved until Save all, which sends the
   // whole batch in one request (masterEdit). Unsaved marks stay while the page is open.
   var msData = null, msSearch = '', msFilter = 'all', msStatus = {}, msRemove = {}, msOpen = {};
+  var msRcv = {}, msRcvEdit = {}, msReceivers = [];   // receiver marks: skidId -> new receiver ('' = none)
   var MS_CAP = 100;
   var MS_STATUSES = ['Current', 'WIP', 'Used'];
 
@@ -1034,10 +1041,12 @@
     var out = [];
     (msData || []).forEach(function (t) {
       var to = msStatus[t.skidId], passes = Object.keys(msRemove[t.skidId] || {});
-      if ((to && to !== t.status) || passes.length) {
+      var rc = msRcv[t.skidId], rcChange = rc !== undefined && rc !== (t.receiverOwn || '');
+      if ((to && to !== t.status) || passes.length || rcChange) {
         var ch = { skidId: t.skidId, from: t.status };
         if (to && to !== t.status) ch.status = to;
         if (passes.length) ch.removePasses = passes.map(Number);
+        if (rcChange) ch.receiver = rc;
         out.push(ch);
       }
     });
@@ -1048,6 +1057,11 @@
     if (box) box.innerHTML = '<div class="loading">Loading the master sheet&hellip;</div>';
     google.script.run.withSuccessHandler(function (res) {
       msData = (res && res.rows) || [];
+      msReceivers = (res && res.receivers) || [];
+      Object.keys(msRcv).forEach(function (id) {
+        var t = msData.filter(function (x) { return x.skidId === id; })[0];
+        if (!t || (t.receiverOwn || '') === msRcv[id]) { delete msRcv[id]; delete msRcvEdit[id]; }
+      });
       // Drop marks that no longer apply (ticket gone, or the coating already off).
       Object.keys(msRemove).forEach(function (id) {
         var t = msData.filter(function (x) { return x.skidId === id; })[0];
@@ -1073,7 +1087,7 @@
       return '<button data-msf="' + c[0] + '"' + (msFilter === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
     box.innerHTML =
-      '<div class="sub" style="margin:4px 0 8px">Change a ticket&rsquo;s status (Current, WIP, Used) or mark coatings to take off. Nothing saves until you tap <b>Save all</b> — then every change goes at once and is logged in Transactions.</div>' +
+      '<div class="sub" style="margin:4px 0 8px">Change a ticket&rsquo;s status (Current, WIP, Used) or receiver, or mark coatings to take off. Nothing saves until you tap <b>Save all</b> — then every change goes at once and is logged in Transactions.</div>' +
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Find a ticket</label><input id="msSearch" placeholder="ticket, skid, mill, customer…" autocomplete="off" value="' + esc(msSearch) + '"></div>' +
         '<button class="btn secondary" id="msReload" style="margin:0">↻</button>' +
@@ -1099,7 +1113,7 @@
     });
     document.getElementById('msDiscard').onclick = function () {
       showConfirm('Discard all marked changes?', 'Nothing has been saved yet. This clears every status change and coating removal you marked.',
-        function () { msStatus = {}; msRemove = {}; renderMsList(); }, 'Discard', 'danger');
+        function () { msStatus = {}; msRemove = {}; msRcv = {}; msRcvEdit = {}; renderMsList(); }, 'Discard', 'danger');
     };
     document.getElementById('msSaveBtn').onclick = msSaveAll;
     if (msData) renderMsList(); else msLoad();
@@ -1112,11 +1126,11 @@
     var rows = msData.filter(function (t) {
       if (msFilter !== 'all' && t.status !== msFilter) return false;
       if (!term) return true;
-      return [t.ticket, t.skidId, t.mill, t.customer, t.jobId].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+      return [t.ticket, t.skidId, t.mill, t.customer, t.jobId, t.po, t.receiver, t.receiverName].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
     });
     // Changed tickets first, so marks are easy to review.
     rows.sort(function (a, b) {
-      var ca = (msStatus[a.skidId] || msRemove[a.skidId]) ? 0 : 1, cb = (msStatus[b.skidId] || msRemove[b.skidId]) ? 0 : 1;
+      var ca = (msStatus[a.skidId] || msRemove[a.skidId] || msRcv[a.skidId] !== undefined) ? 0 : 1, cb = (msStatus[b.skidId] || msRemove[b.skidId] || msRcv[b.skidId] !== undefined) ? 0 : 1;
       return ca - cb;
     });
     var shown = rows.slice(0, MS_CAP);
@@ -1128,6 +1142,17 @@
         var id = sel.getAttribute('data-msst');
         var t = msData.filter(function (x) { return x.skidId === id; })[0];
         if (!t || sel.value === t.status) delete msStatus[id]; else msStatus[id] = sel.value;
+        renderMsList();
+      };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msrcvedit]'), function (b) {
+      b.onclick = function () { var id = b.getAttribute('data-msrcvedit'); msRcvEdit[id] = true; renderMsList(); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msrcv]'), function (sel) {
+      sel.onchange = function () {
+        var id = sel.getAttribute('data-msrcv');
+        var t = msData.filter(function (x) { return x.skidId === id; })[0];
+        if (!t || sel.value === (t.receiverOwn || '')) delete msRcv[id]; else msRcv[id] = sel.value;
         renderMsList();
       };
     });
@@ -1153,7 +1178,19 @@
 
   function msRowHtml(t) {
     var to = msStatus[t.skidId], marks = msRemove[t.skidId] || {}, nMarks = Object.keys(marks).length;
-    var changed = !!to || nMarks > 0, open = msOpen[t.skidId];
+    var rc = msRcv[t.skidId], rcChanged = rc !== undefined;
+    var changed = !!to || nMarks > 0 || rcChanged, open = msOpen[t.skidId];
+    var rcvCtl;
+    if (msRcvEdit[t.skidId] || rcChanged) {
+      var cur = rcChanged ? rc : (t.receiverOwn || '');
+      rcvCtl = '<select data-msrcv="' + esc(t.skidId) + '" style="max-width:100%"><option value="">— no receiver —</option>' + msReceivers.map(function (r) {
+        return '<option value="' + esc(r.id) + '"' + (cur === r.id ? ' selected' : '') + '>' + esc(r.name) + '</option>';
+      }).join('') + '</select>' + (rcChanged ? ' <span class="sub" style="color:#b26a00;font-weight:600">' + esc((t.receiverOwn || 'none') + ' → ' + (rc || 'none')) + '</span>' : '');
+    } else {
+      rcvCtl = (t.receiver ? '<a href="#" data-hist="rcv:' + esc(t.receiver) + '" style="color:var(--accent)">' + esc(t.receiverName || t.receiver) + '</a>' +
+          (t.receiverFrom ? ' <span class="sub">(from ' + esc(t.receiverFrom) + ')</span>' : '') : '<span class="sub">none</span>') +
+        ' <button class="btn secondary" style="padding:3px 8px;font-size:12px" data-msrcvedit="' + esc(t.skidId) + '">Change</button>';
+    }
     var off = t.coatings.reduce(function (n, c) { return n + (marks[String(c.passNumber)] ? Number(c.cost) || 0 : 0); }, 0);
     var statusCtl = t.status === 'Pending'
       ? '<span class="badge">Pending</span> <span class="sub">on ' + esc(t.jobId || 'a job') + ' — change it in Review Jobs</span>'
@@ -1178,6 +1215,7 @@
           ' &middot; litho ' + money(t.litho) + (off ? ' → ' + money(t.litho - off) : '') + (t.status === 'Used' && t.usedOn ? ' &middot; used ' + esc(t.usedOn) : '') + '</span></div>' +
         '<div>' + statusCtl + '</div>' +
       '</div>' +
+      '<div class="sub" style="margin-top:6px">' + (t.po ? 'PO ' + esc(t.po) + ' &middot; ' : '') + 'Receiver: ' + rcvCtl + '</div>' +
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-mscoats="' + esc(t.skidId) + '">' + (open ? '▾' : '▸') +
         ' Coatings (' + t.coatings.length + ')' + (nMarks ? ' — ' + nMarks + ' to remove' : '') + '</button> ' +
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-hist="' + esc(t.skidId) + '">🕘 History</button>' +
@@ -1191,6 +1229,7 @@
     var lines = changes.map(function (ch) {
       var t = byId[ch.skidId], parts = [];
       if (ch.status) parts.push(ch.from + ' → ' + ch.status);
+      if (ch.receiver !== undefined) parts.push(ch.receiver ? 'receiver ' + ch.receiver : 'take off receiver ' + (t.receiverOwn || ''));
       (ch.removePasses || []).forEach(function (p) {
         var c = t.coatings.filter(function (x) { return Number(x.passNumber) === p; })[0];
         parts.push('remove ' + (c ? c.item : 'coating'));
@@ -1207,7 +1246,8 @@
         runMutation('masterEdit', [changes, '', newOpId()],
           function (res) {
             var saved = (res && res.saved) || [], skipped = (res && res.skipped) || [];
-            saved.forEach(function (x) { delete msStatus[x.skidId]; delete msRemove[x.skidId]; markCacheStatus(x.skidId, x.status); });
+            saved.forEach(function (x) { delete msStatus[x.skidId]; delete msRemove[x.skidId]; delete msRcv[x.skidId]; delete msRcvEdit[x.skidId]; markCacheStatus(x.skidId, x.status); });
+            if (changes.some(function (c) { return c.receiver !== undefined; })) rcvData = null;
             showInfo('Saved',
               saved.length + ' ticket' + (saved.length === 1 ? '' : 's') + ' updated.' +
               (skipped.length ? ' ' + skipped.length + ' not changed: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''));
@@ -1220,6 +1260,290 @@
               message: err.message + ' — Your marks are kept. Tap Save all again without changing anything: it finishes whatever didn\'t save and never applies a change twice.' });
           });
       }, 'Save all');
+  }
+
+  // ---------------- Database: Receivers ----------------
+  // A receiver is the paperwork a load arrived on (packing slip / bill of lading), scanned to Drive.
+  // The app numbers them (R-00001…); a ticket's Receiver column holds that number. Here you create
+  // and edit receivers, and attach tickets to them (by ticket range, PO or mill). Like the Master
+  // sheet, ticket changes are only marked until Save, then go in one request (masterEdit).
+  var rcvData = null, rcvSearch = '', rcvSel = null, rcvAdd = {}, rcvDrop = {};
+  var rcvFind = { from: '', to: '', po: '', text: '', onlyNone: true };
+  var RCV_CAP = 150;
+
+  function rcvCleanSupplier(v) { return String(v || '').toUpperCase().replace(/[\/\\]+/g, ' ').replace(/-{2,}/g, '-').replace(/\s+/g, ' ').trim(); }
+  function rcvFileName(id, date, supplier) {
+    var d = /^\d{4}-\d\d-\d\d$/.test(date || '') ? date.slice(2) : 'NO-DATE';
+    return d + '--' + (rcvCleanSupplier(supplier) || 'UNKNOWN') + '--' + (id || 'R-?????');
+  }
+  // Open the scan: the saved Drive link, or a Drive search for the receiver number.
+  function rcvFileHref(id, link) { return link || ('https://drive.google.com/drive/search?q=' + encodeURIComponent('"' + id + '"')); }
+  function rcvFileBtn(id, link) {
+    return '<a class="btn secondary" style="padding:4px 10px;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;vertical-align:middle" target="_blank" rel="noopener" href="' + esc(rcvFileHref(id, link)) + '">' +
+      (link ? 'Open file' : 'Search Drive') + '</a>';
+  }
+  function rcvMarkCount() { return Object.keys(rcvAdd).length + Object.keys(rcvDrop).length; }
+  function rcvById(id) { return ((rcvData && rcvData.receivers) || []).filter(function (r) { return r.id === id; })[0]; }
+
+  function rcvLoad(then) {
+    google.script.run.withSuccessHandler(function (res) {
+      rcvData = res || { receivers: [], suppliers: [], tickets: [] };
+      var byId = {}; rcvData.tickets.forEach(function (t) { byId[t.skidId] = t; });
+      Object.keys(rcvAdd).forEach(function (id) { if (!byId[id] || byId[id].receiver === rcvSel) delete rcvAdd[id]; });
+      Object.keys(rcvDrop).forEach(function (id) { if (!byId[id] || byId[id].receiver !== rcvSel) delete rcvDrop[id]; });
+      if (rcvSel && rcvSel !== 'new' && !rcvById(rcvSel)) rcvSel = null;
+      if (then) then(); else renderReceivers();
+    }).withFailureHandler(function (err) {
+      var box = document.getElementById('rcvBox');
+      if (box) box.innerHTML = '<div class="card empty">Could not load: ' + esc(err.message) + ' <button class="btn secondary" id="rcvRetry">Try again</button></div>';
+      var r = document.getElementById('rcvRetry'); if (r) r.onclick = function () { rcvLoad(); };
+    }).getReceivers();
+  }
+
+  function renderReceivers() {
+    var box = document.getElementById('rcvBox');
+    if (!box) return;
+    if (!rcvData) { box.innerHTML = '<div class="loading">Loading receivers&hellip;</div>'; rcvLoad(); return; }
+    if (rcvSel) { renderReceiverDetail(); return; }
+    box.innerHTML =
+      '<div class="sub" style="margin:4px 0 8px">Each receiver is the paperwork a load came in on. Tickets point to it by its number, and the file name to give the Drive scan is shown on each one.</div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Find a receiver</label><input id="rcvSearch" placeholder="number, supplier, PO, date…" autocomplete="off" value="' + esc(rcvSearch) + '"></div>' +
+        '<button class="btn secondary" id="rcvReload" style="margin:0">↻</button>' +
+        '<button class="btn success" id="rcvNew" style="margin:0">+ New receiver</button>' +
+      '</div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
+    var si = document.getElementById('rcvSearch');
+    si.oninput = function () { rcvSearch = si.value; renderRcvList(); };
+    document.getElementById('rcvReload').onclick = function () { rcvData = null; renderReceivers(); };
+    document.getElementById('rcvNew').onclick = function () { rcvSel = 'new'; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
+    renderRcvList();
+  }
+  function renderRcvList() {
+    var box = document.getElementById('rcvList');
+    if (!box) return;
+    var term = String(rcvSearch || '').trim().toLowerCase();
+    var rows = rcvData.receivers.filter(function (r) {
+      return !term || [r.name, r.id, r.supplier, r.pos, r.notes, r.date].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+    });
+    var cnt = document.getElementById('rcvCount');
+    if (cnt) cnt.textContent = rows.length + ' receiver' + (rows.length === 1 ? '' : 's') + (term ? ' match' : '') + '.';
+    box.innerHTML = rows.length ? rows.slice(0, RCV_CAP).map(function (r) {
+      return '<div class="card" data-rcvopen="' + esc(r.id) + '" style="padding:12px 14px;margin-bottom:8px;cursor:pointer">' +
+        '<div class="ticket-id" style="font-size:16px">' + esc(r.name) + '</div>' +
+        '<div class="sub">' + esc([r.date || 'no date', r.supplier, r.pos && ('PO ' + r.pos), r.ticketCount + ' ticket' + (r.ticketCount === 1 ? '' : 's'), r.link ? 'linked to its file' : 'no file link'].filter(Boolean).join(' · ')) + '</div>' +
+        (r.notes ? '<div class="sub">' + esc(r.notes) + '</div>' : '') + '</div>';
+    }).join('') : '<div class="card empty">' + (term ? 'No receivers match.' : 'No receivers yet. Tap <b>+ New receiver</b> to add the first one.') + '</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-rcvopen]'), function (c) {
+      c.onclick = function () { rcvSel = c.getAttribute('data-rcvopen'); rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
+    });
+  }
+
+  function renderReceiverDetail() {
+    var box = document.getElementById('rcvBox');
+    var isNew = rcvSel === 'new';
+    var r = isNew ? { id: '', date: '', supplier: '', pos: '', link: '', notes: '', ticketCount: 0 } : rcvById(rcvSel);
+    if (!r) { rcvSel = null; renderReceivers(); return; }
+    var sups = (rcvData.suppliers || []).map(function (s) { return '<option value="' + esc(s) + '">'; }).join('');
+    box.innerHTML =
+      '<button class="btn secondary" id="rcvBackList" style="margin-bottom:10px">&larr; All receivers</button>' +
+      '<div class="card">' +
+        '<h3 style="margin-top:0">' + (isNew ? 'New receiver' : esc(r.id)) + '</h3>' +
+        '<div class="row" style="gap:10px;flex-wrap:wrap">' +
+          '<div class="field" style="flex:1;min-width:150px"><label>Date received</label><input id="rcvDate" type="date" value="' + esc(r.date) + '"></div>' +
+          '<div class="field" style="flex:1;min-width:150px"><label>Supplier</label><input id="rcvSupplier" list="rcvSupList" autocomplete="off" placeholder="e.g. TCC" value="' + esc(r.supplier) + '"><datalist id="rcvSupList">' + sups + '</datalist></div>' +
+        '</div>' +
+        '<div class="field"><label>POs on it</label><input id="rcvPos" autocomplete="off" placeholder="e.g. 7974-DC, 7976-DC" value="' + esc(r.pos) + '"></div>' +
+        '<div class="field"><label>Drive link (optional)</label><input id="rcvLink" autocomplete="off" placeholder="paste the file&rsquo;s share link" value="' + esc(r.link) + '"></div>' +
+        '<div class="field"><label>Notes</label><input id="rcvNotes" autocomplete="off" placeholder="e.g. 3 bills in one file" value="' + esc(r.notes) + '"></div>' +
+        '<div class="sub" style="margin:6px 0">Name the Drive file:</div>' +
+        '<div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
+          '<code id="rcvName" style="font-size:15px;font-weight:700;padding:6px 10px;background:var(--bg);border-radius:6px">' + esc(rcvFileName(r.id, r.date, r.supplier)) + '</code>' +
+          '<button class="btn secondary" id="rcvCopy" style="padding:6px 10px;font-size:13px">Copy</button>' +
+          (isNew ? '' : rcvFileBtn(r.id, r.link)) +
+        '</div>' +
+        '<div class="row" style="gap:8px">' +
+          '<button class="btn success" id="rcvSave" style="flex:1">' + (isNew ? 'Create receiver' : 'Save details') + '</button>' +
+          (!isNew && !r.ticketCount ? '<button class="btn danger" id="rcvDelete">Delete</button>' : '') +
+        '</div>' +
+        (isNew ? '<div class="sub" style="margin-top:8px">The number (R-00001, R-00002, …) is given when you create it. Then you can add its tickets.</div>' : '') +
+      '</div>' +
+      (isNew ? '' : '<div id="rcvTickets"></div><div id="rcvFindBox"></div>' +
+        '<div id="rcvBar" class="card" style="position:sticky;bottom:8px;z-index:5;display:none;border:2px solid var(--accent)">' +
+          '<div class="row" style="align-items:center;gap:8px"><div style="flex:1;font-weight:600" id="rcvBarText"></div>' +
+          '<button class="btn secondary" id="rcvDiscard">Discard</button><button class="btn success" id="rcvSaveTickets">Save</button></div></div>');
+    var nameEl = document.getElementById('rcvName');
+    var live = function () { nameEl.textContent = rcvFileName(r.id, document.getElementById('rcvDate').value, document.getElementById('rcvSupplier').value); };
+    document.getElementById('rcvDate').oninput = live;
+    document.getElementById('rcvSupplier').oninput = live;
+    document.getElementById('rcvBackList').onclick = function () {
+      var leave = function () { rcvSel = null; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
+      if (rcvMarkCount()) showConfirm('Leave without saving?', 'The tickets you marked to add or take off are not saved yet.', leave, 'Leave', 'danger'); else leave();
+    };
+    document.getElementById('rcvCopy').onclick = function () {
+      var t = nameEl.textContent;
+      try { navigator.clipboard.writeText(t).then(function () { toast('Copied ' + t); }, function () { toast(t); }); } catch (e) { toast(t); }
+    };
+    document.getElementById('rcvSave').onclick = rcvSaveDetails;
+    var del = document.getElementById('rcvDelete');
+    if (del) del.onclick = function () {
+      showConfirm('Delete ' + r.id + '?', 'Only for a receiver made by mistake. It has no tickets. Its number is not reused.', function () {
+        runMutation('deleteReceiver', [r.id, '', newOpId()], function () { toast(r.id + ' deleted'); rcvSel = null; rcvData = null; renderReceivers(); },
+          function (err) { showInfo('Could not delete', err.message); });
+      }, 'Delete', 'danger');
+    };
+    if (isNew) return;
+    document.getElementById('rcvDiscard').onclick = function () { rcvAdd = {}; rcvDrop = {}; renderRcvTickets(); renderRcvFind(); };
+    document.getElementById('rcvSaveTickets').onclick = rcvSaveTickets;
+    renderRcvTickets();
+    renderRcvFind();
+  }
+
+  function rcvSaveDetails() {
+    var isNew = rcvSel === 'new';
+    var rec = { date: document.getElementById('rcvDate').value, supplier: document.getElementById('rcvSupplier').value,
+      pos: document.getElementById('rcvPos').value, link: document.getElementById('rcvLink').value, notes: document.getElementById('rcvNotes').value };
+    if (!isNew) rec.id = rcvSel;
+    if (!rcvCleanSupplier(rec.supplier)) { toast('Enter the supplier'); return; }
+    var btn = document.getElementById('rcvSave');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    runMutation('saveReceiver', [rec, '', newOpId()], function (res) {
+      toast((isNew ? 'Created ' : 'Saved ') + res.name);
+      rcvLoad(function () { rcvSel = res.id; renderReceivers(); });
+    }, function (err) {
+      if (btn) { btn.disabled = false; btn.textContent = isNew ? 'Create receiver' : 'Save details'; }
+      showInfo('Could not save', err.message);
+    });
+  }
+
+  function rcvTicketLine(t, btn, note, struck) {
+    return '<div class="queue-item" style="padding:6px 0"><div style="min-width:0' + (struck ? ';text-decoration:line-through;opacity:.6' : '') + '">' +
+      histTicketLink({ skidId: t.skidId, ticket: t.ticket }) + ' <span class="sub">' +
+      esc([t.status, t.mill && ('Mill ' + t.mill), t.po && ('PO ' + t.po), (t.qty !== '' && t.qty != null) ? t.qty + ' sheets' : '', note].filter(Boolean).join(' · ')) + '</span></div>' + (btn || '') + '</div>';
+  }
+  function rcvToggleBtn(attr, id, on, onText, offText) {
+    return '<button class="btn ' + (on ? 'secondary' : (attr === 'data-rcvdrop' ? 'warn' : 'success')) + '" style="padding:6px 10px;font-size:13px" ' + attr + '="' + esc(id) + '">' + (on ? 'Undo' : offText) + '</button>';
+  }
+  function renderRcvTickets() {
+    var box = document.getElementById('rcvTickets');
+    if (!box) return;
+    var id = rcvSel, all = rcvData.tickets;
+    var on = all.filter(function (t) { return t.receiver === id; });
+    var adding = all.filter(function (t) { return rcvAdd[t.skidId]; });
+    var pieces = all.filter(function (t) { return !t.receiver && t.via === id; });
+    box.innerHTML = '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this receiver <span class="sub" style="font-weight:400">&middot; ' + on.length + '</span></h3>' +
+      (adding.length ? '<div class="sub" style="color:var(--good);font-weight:600;margin-top:4px">Adding (not saved yet):</div>' + adding.map(function (t) {
+        return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, true), t.receiver ? 'moves off ' + t.receiver : '');
+      }).join('') : '') +
+      (on.length ? on.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvdrop', t.skidId, !!rcvDrop[t.skidId], '', 'Take off'), rcvDrop[t.skidId] ? 'comes off at Save' : '', !!rcvDrop[t.skidId]); }).join('')
+        : (adding.length ? '' : '<div class="sub">None yet. Find them below.</div>')) +
+      (pieces.length ? '<div class="sub" style="margin-top:8px">Pieces that take it from the ticket they were cut from:</div>' + pieces.map(function (t) { return rcvTicketLine(t, '', 'from ' + t.viaFrom); }).join('') : '') +
+      '</div>';
+    rcvWireToggles(box);
+    rcvUpdateBar();
+  }
+  // Ticket numbers are MMDDYY-### (print date + sequence); split pieces add -LR1 / -MR1. Sort key
+  // YYMMDD + 4-digit sequence so a range can span days.
+  function rcvTicketKey(t) {
+    var m = /^(\d\d)(\d\d)(\d\d)-(\d+)/.exec(String(t || '').trim());
+    return m ? m[3] + m[1] + m[2] + ('0000' + m[4]).slice(-4) : null;
+  }
+  function rcvCandidates() {
+    var f = rcvFind, from = String(f.from || '').trim(), to = String(f.to || '').trim();
+    var po = String(f.po || '').trim().toLowerCase(), text = String(f.text || '').trim().toLowerCase();
+    if (!from && !to && !po && !text) return null;
+    var kf = rcvTicketKey(from), kt = rcvTicketKey(to || from);
+    return rcvData.tickets.filter(function (t) {
+      if (t.receiver === rcvSel) return false;
+      if (f.onlyNone && t.receiver) return false;
+      if (from || to) {
+        var k = rcvTicketKey(t.ticket);
+        if (kf && kt) { if (!k || k < kf || k > kt) return false; }
+        else if (String(t.ticket).toLowerCase().indexOf((from || to).toLowerCase()) === -1) return false;
+      }
+      if (po && String(t.po || '').toLowerCase().indexOf(po) === -1) return false;
+      if (text && ![t.ticket, t.skidId, t.mill, t.supplier].some(function (v) { return String(v || '').toLowerCase().indexOf(text) !== -1; })) return false;
+      return true;
+    }).sort(function (a, b) { var x = rcvTicketKey(a.ticket) || a.ticket, y = rcvTicketKey(b.ticket) || b.ticket; return x < y ? -1 : x > y ? 1 : 0; });
+  }
+  function renderRcvFind() {
+    var box = document.getElementById('rcvFindBox');
+    if (!box) return;
+    var f = rcvFind;
+    box.innerHTML = '<div class="card"><h3 style="margin-top:0;font-size:15px">Add tickets</h3>' +
+      '<div class="sub" style="margin-bottom:6px">Type the first and last ticket printed for this load, or a PO or mill. Pick the ones that came on this receiver.</div>' +
+      '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+        '<div class="field" style="flex:1;min-width:130px;margin:0"><label>From ticket</label><input id="rcvFrom" autocomplete="off" placeholder="100126-001" value="' + esc(f.from) + '"></div>' +
+        '<div class="field" style="flex:1;min-width:130px;margin:0"><label>To ticket</label><input id="rcvTo" autocomplete="off" placeholder="100126-012" value="' + esc(f.to) + '"></div>' +
+        '<div class="field" style="flex:1;min-width:130px;margin:0"><label>PO</label><input id="rcvPo" autocomplete="off" placeholder="7974" value="' + esc(f.po) + '"></div>' +
+        '<div class="field" style="flex:1;min-width:130px;margin:0"><label>Mill / other</label><input id="rcvText" autocomplete="off" placeholder="mill, skid…" value="' + esc(f.text) + '"></div>' +
+      '</div>' +
+      '<label class="sub" style="display:flex;align-items:center;gap:6px;margin:8px 0"><input type="checkbox" id="rcvOnlyNone"' + (f.onlyNone ? ' checked' : '') + ' style="width:auto"> Only tickets with no receiver yet</label>' +
+      '<div id="rcvCands"></div></div>';
+    ['From', 'To', 'Po', 'Text'].forEach(function (k) {
+      var el = document.getElementById('rcv' + k);
+      el.oninput = function () { rcvFind[k === 'Po' ? 'po' : k.toLowerCase()] = el.value; renderRcvCands(); };
+    });
+    document.getElementById('rcvOnlyNone').onchange = function (e) { rcvFind.onlyNone = e.target.checked; renderRcvCands(); };
+    renderRcvCands();
+  }
+  function renderRcvCands() {
+    var box = document.getElementById('rcvCands');
+    if (!box) return;
+    var list = rcvCandidates();
+    if (list === null) { box.innerHTML = '<div class="sub">Enter a ticket range, PO or mill to see tickets.</div>'; return; }
+    if (!list.length) { box.innerHTML = '<div class="sub">No tickets match' + (rcvFind.onlyNone ? ' (tickets already on a receiver are hidden)' : '') + '.</div>'; return; }
+    var shown = list.slice(0, RCV_CAP), notYet = shown.filter(function (t) { return !rcvAdd[t.skidId]; });
+    box.innerHTML = '<div class="row" style="align-items:center;gap:8px;margin-bottom:4px"><div class="sub" style="flex:1">' + list.length + ' ticket' + (list.length === 1 ? '' : 's') +
+        (list.length > RCV_CAP ? ' — showing the first ' + RCV_CAP + ', narrow it down' : '') + '</div>' +
+        (notYet.length ? '<button class="btn secondary" id="rcvAll" style="padding:6px 10px;font-size:13px">Add all ' + notYet.length + ' shown</button>' : '') + '</div>' +
+      shown.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, !!rcvAdd[t.skidId], '', 'Add'), t.receiver ? 'on ' + t.receiver : (t.via ? 'takes ' + t.via + ' from ' + t.viaFrom : '')); }).join('');
+    var all = document.getElementById('rcvAll');
+    if (all) all.onclick = function () { notYet.forEach(function (t) { rcvAdd[t.skidId] = true; }); renderRcvTickets(); renderRcvCands(); };
+    rcvWireToggles(box);
+  }
+  function rcvWireToggles(box) {
+    Array.prototype.forEach.call(box.querySelectorAll('[data-rcvadd]'), function (b) {
+      b.onclick = function () { var id = b.getAttribute('data-rcvadd'); if (rcvAdd[id]) delete rcvAdd[id]; else rcvAdd[id] = true; renderRcvTickets(); renderRcvCands(); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-rcvdrop]'), function (b) {
+      b.onclick = function () { var id = b.getAttribute('data-rcvdrop'); if (rcvDrop[id]) delete rcvDrop[id]; else rcvDrop[id] = true; renderRcvTickets(); };
+    });
+  }
+  function rcvUpdateBar() {
+    var bar = document.getElementById('rcvBar');
+    if (!bar) return;
+    var a = Object.keys(rcvAdd).length, d = Object.keys(rcvDrop).length;
+    bar.style.display = (a + d) ? '' : 'none';
+    document.getElementById('rcvBarText').textContent = [a && (a + ' to add'), d && (d + ' to take off')].filter(Boolean).join(', ') + ' — not saved yet';
+  }
+  function rcvSaveTickets() {
+    var id = rcvSel, byId = {};
+    rcvData.tickets.forEach(function (t) { byId[t.skidId] = t; });
+    var changes = Object.keys(rcvAdd).map(function (s) { return { skidId: s, receiver: id, from: (byId[s] || {}).status || '' }; })
+      .concat(Object.keys(rcvDrop).map(function (s) { return { skidId: s, receiver: '', from: (byId[s] || {}).status || '' }; }));
+    if (!changes.length) return;
+    if (changes.length > 300) { showInfo('Too many at once', 'Save at most 300 tickets at a time.'); return; }
+    var moving = Object.keys(rcvAdd).filter(function (s) { return byId[s] && byId[s].receiver; });
+    var r = rcvById(id);
+    showConfirm('Save ' + changes.length + ' ticket' + (changes.length === 1 ? '' : 's') + '?',
+      [Object.keys(rcvAdd).length && ('Add ' + Object.keys(rcvAdd).length + ' to ' + r.name + '.'),
+        moving.length && (moving.length + ' of them move off another receiver: ' + moving.slice(0, 8).map(function (s) { return byId[s].ticket + ' (' + byId[s].receiver + ')'; }).join(', ') + (moving.length > 8 ? '…' : '') + '.'),
+        Object.keys(rcvDrop).length && ('Take ' + Object.keys(rcvDrop).length + ' off.'), 'Each change is logged in the ticket’s history.'].filter(Boolean).join(' '),
+      function () {
+        var btn = document.getElementById('rcvSaveTickets');
+        if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+        runMutation('masterEdit', [changes, '', newOpId()], function (res) {
+          var saved = (res && res.saved) || [], skipped = (res && res.skipped) || [];
+          saved.forEach(function (x) { delete rcvAdd[x.skidId]; delete rcvDrop[x.skidId]; });
+          msData = null;   // the Master sheet shows receivers too
+          showInfo('Saved', saved.length + ' ticket' + (saved.length === 1 ? '' : 's') + ' updated.' +
+            (skipped.length ? ' ' + skipped.length + ' not changed: ' + skipped.map(function (x) { return (x.ticket || x.skidId) + ' (' + x.reason + ')'; }).join(', ') + '.' : ''));
+          rcvLoad();
+        }, function (err) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+          showModal({ title: 'Could not save', confirmText: 'OK', message: err.message + ' — Your marks are kept. Tap Save again: it finishes whatever didn\'t save and never applies a change twice.' });
+        });
+      }, 'Save');
   }
 
   // Manually save a snapshot on demand (same job the 3 PM scheduler runs) and report the result
@@ -2056,8 +2380,13 @@
     var went = [x.status && ('Now ' + esc(x.status)), x.usedOn && ('used ' + esc(x.usedOn) + (x.usedVia ? ' (' + esc(x.usedVia) + ')' : '')),
       x.runId && ('run ' + esc(x.runId)), x.splitOf && ('split from ' + esc(x.splitOf))].filter(Boolean).join(' &middot; ');
     var notes = [x.comments, x.lithoNotes].filter(Boolean).map(esc).join(' | ');
+    var rcv = x.receiver
+      ? '<a href="#" data-hist="rcv:' + esc(x.receiver) + '" style="font-weight:700;color:var(--accent);text-decoration:underline">' + esc(x.receiverName || x.receiver) + '</a>' +
+        (x.receiverFrom ? ' <span class="sub">(from ' + esc(x.receiverFrom) + ')</span>' : '') + ' ' + rcvFileBtn(x.receiver, x.receiverLink)
+      : '<span class="sub">none yet</span>';
     return '<div style="line-height:1.6">' +
       kv('Steel', steel || '—') +
+      kv('Receiver', (x.po ? 'PO ' + esc(x.po) + ' &middot; ' : '') + rcv) +
       kv('Coatings', coats) +
       kv('Job / Customer', (x.customer ? '<strong>' + esc(x.customer) + '</strong>' : '—') + (x.jobId ? ' <span class="sub">' + esc(x.jobId) + '</span>' : '') +
         (x.coatedOn ? ' &middot; coated ' + esc(x.coatedOn) + (x.coatedBy ? ' by ' + esc(x.coatedBy) : '') : '')) +
@@ -2120,7 +2449,7 @@
   // Every row the trace box is showing, with all its trace fields, as a CSV file.
   function downloadReportCsv() {
     if (!reportData) return;
-    var cols = ['Section', 'Date', 'Ticket', 'Skid ID', 'Job / Customer', 'Job ID', 'Mill', 'Supplier', 'End Use', 'BW', 'Tested BW', 'Type', 'Temper',
+    var cols = ['Section', 'Date', 'Ticket', 'Skid ID', 'Job / Customer', 'Job ID', 'Mill', 'Supplier', 'PO', 'Receiver', 'End Use', 'BW', 'Tested BW', 'Type', 'Temper',
       'Width', 'Length', 'Sheets', 'Weight', 'Coatings', 'Chem Codes', 'Coated On', 'Coated By', 'Litho', 'Cost', 'Status', 'Used On', 'Machine', 'By',
       'Load #', 'Output', 'Cut From'];
     var q = function (v) { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
@@ -2131,7 +2460,7 @@
         var srcs = x.sources || [];
         var coats = (x.coatings || []).concat.apply(x.coatings || [], srcs.map(function (t) { return t.coatings || []; }));
         var pick = function (k) { return x[k] != null && x[k] !== '' ? x[k] : srcs.map(function (t) { return t[k] || ''; }).filter(Boolean).join(' + '); };
-        lines.push([sec.label, x.date, x.ticket || '', x.skidId || '', pick('customer'), pick('jobId'), pick('mill'), pick('supplier'), pick('endUse'),
+        lines.push([sec.label, x.date, x.ticket || '', x.skidId || '', pick('customer'), pick('jobId'), pick('mill'), pick('supplier'), pick('po'), pick('receiverName'), pick('endUse'),
           pick('bw'), pick('testedBw'), pick('type'), pick('temper'), x.width, x.length, x.sheets != null ? x.sheets : x.qty, x.weight,
           coats.map(function (c) { return c.item + (c.date ? ' ' + c.date : '') + (c.by ? ' ' + c.by : ''); }).join('; '),
           coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),
@@ -2162,14 +2491,8 @@
   function openSkidHistory(skidId, fromBack) {
     if (!skidId) return;
     if (!fromBack) histStack.push(skidId);
-    var root = document.getElementById('histRoot');
-    if (!root) {
-      root = document.createElement('div');
-      root.id = 'histRoot';
-      root.style.cssText = 'position:fixed;inset:0;z-index:900;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 16px 40px';
-      document.body.appendChild(root);
-    }
-    document.body.style.overflow = 'hidden';
+    if (/^rcv:/.test(skidId)) { openReceiverView(skidId, skidId.slice(4)); return; }
+    var root = histRootEl();
     root.innerHTML = histHeaderHtml('Loading…') + '<div class="card"><div class="loading">Loading history&hellip;</div></div>';
     wireHistHeader();
     google.script.run.withSuccessHandler(function (h) {
@@ -2181,6 +2504,48 @@
       root.innerHTML = histHeaderHtml(skidId) + '<div class="card empty">Could not load the history: ' + esc(err.message) + '</div>';
       wireHistHeader();
     }).getSkidHistory(skidId);
+  }
+  // A receiver in the same panel: its details, a link to the scan and every ticket on it.
+  function histRootEl() {
+    var root = document.getElementById('histRoot');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'histRoot';
+      root.style.cssText = 'position:fixed;inset:0;z-index:900;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 16px 40px';
+      document.body.appendChild(root);
+    }
+    document.body.style.overflow = 'hidden';
+    return root;
+  }
+  function openReceiverView(key, id) {
+    var root = histRootEl();
+    histData = null;
+    root.innerHTML = histHeaderHtml('Receiver ' + id) + '<div class="card"><div class="loading">Loading receiver&hellip;</div></div>';
+    wireHistHeader();
+    google.script.run.withSuccessHandler(function (res) {
+      if (histStack[histStack.length - 1] !== key) return;
+      rcvData = res;
+      var r = (res.receivers || []).filter(function (x) { return x.id === id; })[0];
+      if (!r) { root.innerHTML = histHeaderHtml('Receiver ' + id) + '<div class="card empty">' + esc(id) + ' is not in the Receivers list.</div>'; wireHistHeader(); return; }
+      var on = res.tickets.filter(function (t) { return t.receiver === id; }), pieces = res.tickets.filter(function (t) { return !t.receiver && t.via === id; });
+      var table = function (list, extra) {
+        return '<div style="overflow-x:auto"><table><thead><tr><th>Ticket</th><th>Status</th><th>Mill</th><th>PO</th><th>Sheets</th>' + (extra ? '<th>From</th>' : '') + '</tr></thead><tbody>' + list.map(function (t) {
+          return '<tr><td>' + histTicketLink(t) + '</td><td>' + esc(t.status) + '</td><td>' + dash(t.mill) + '</td><td>' + dash(t.po) + '</td><td>' + dash(t.qty) + '</td>' + (extra ? '<td>' + esc(t.viaFrom) + '</td>' : '') + '</tr>';
+        }).join('') + '</tbody></table></div>';
+      };
+      root.innerHTML = histHeaderHtml('Receiver ' + r.name) +
+        '<div class="card"><div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><span class="ticket-id" style="font-size:20px">' + esc(r.name) + '</span>' + rcvFileBtn(r.id, r.link) + '</div>' +
+          '<div style="line-height:1.6">' + kv('Received', r.date ? esc(r.date) : '<span class="sub">no date</span>') + kv('Supplier', dash(r.supplier)) + kv('POs', dash(r.pos)) + (r.notes ? kv('Notes', esc(r.notes)) : '') + '</div></div>' +
+        '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on it <span class="sub" style="font-weight:400">&middot; ' + on.length + '</span></h3>' +
+          (on.length ? table(on) : '<div class="sub">No tickets on this receiver yet.</div>') + '</div>' +
+        (pieces.length ? '<div class="card"><h3 style="margin-top:0;font-size:15px">Pieces cut from those tickets <span class="sub" style="font-weight:400">&middot; ' + pieces.length + '</span></h3>' + table(pieces, true) + '</div>' : '');
+      root.scrollTop = 0;
+      wireHistHeader();
+    }).withFailureHandler(function (err) {
+      if (histStack[histStack.length - 1] !== key) return;
+      root.innerHTML = histHeaderHtml('Receiver ' + id) + '<div class="card empty">Could not load: ' + esc(err.message) + '</div>';
+      wireHistHeader();
+    }).getReceivers();
   }
   function closeSkidHistory() {
     histStack = []; histData = null;

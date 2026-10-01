@@ -764,6 +764,111 @@ const base = {
   await page.close();
 }
 
+// ---- 22. Receivers: create one, attach tickets by range / PO, take one off, see it from a ticket
+{ const db = { receivers: [], tickets: [
+    { skidId: 'SKD-1', ticket: '100126-001', status: 'Current', mill: '26HCE20004', po: '7974-DC', supplier: 'TCC', qty: 900, receiver: '', via: '', viaFrom: '' },
+    { skidId: 'SKD-2', ticket: '100126-002', status: 'Used', mill: '26HCE20005', po: '7974-DC', supplier: 'TCC', qty: 900, receiver: '', via: '', viaFrom: '' },
+    { skidId: 'SKD-3', ticket: '100126-003', status: 'WIP', mill: '26HCD20179', po: '7973-DC', supplier: 'TCC', qty: 900, receiver: 'R-00007', via: '', viaFrom: '' },
+    { skidId: 'SKD-4', ticket: '093026-010', status: 'Current', mill: 'M-9', po: '8780-DC', supplier: 'REY', qty: 500, receiver: '', via: '', viaFrom: '' },
+    { skidId: 'SKD-5', ticket: '100126-001-LR1', status: 'Current', mill: '26HCE20004', po: '7974-DC', supplier: 'TCC', qty: 100, receiver: '', via: '', viaFrom: '' }], suppliers: ['TCC', 'REY'] };
+  db.receivers.push({ id: 'R-00007', name: '26-09-30--REY--R-00007', date: '2026-09-30', supplier: 'REY', pos: '8780-DC', link: '', notes: '', ticketCount: 1 });
+  const out = () => { const c = {}; db.tickets.forEach((t) => { if (t.receiver) c[t.receiver] = (c[t.receiver] || 0) + 1; });
+    return JSON.parse(JSON.stringify({ receivers: db.receivers.map((r) => Object.assign({}, r, { ticketCount: c[r.id] || 0 })), suppliers: db.suppliers, tickets: db.tickets })); };
+  let saves = 0;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R(out()),
+    saveReceiver: (a) => {
+      const r = a[0];
+      if (r.id) { const x = db.receivers.filter((y) => y.id === r.id)[0]; Object.assign(x, r, { name: r.date.slice(2) + '--' + r.supplier.toUpperCase() + '--' + r.id }); return R(x); }
+      const id = 'R-0000' + (db.receivers.length + 7);
+      const x = { id, name: (r.date ? r.date.slice(2) : 'NO-DATE') + '--' + r.supplier.toUpperCase().trim() + '--' + id, date: r.date, supplier: r.supplier.toUpperCase().trim(), pos: r.pos, link: r.link, notes: r.notes };
+      db.receivers.push(x); return R(Object.assign({ created: true }, x));
+    },
+    masterEdit: (a) => {
+      if (saves++ === 0) return { ok: false, error: 'Sheets API 503' };
+      a[0].forEach((c) => { db.tickets.filter((t) => t.skidId === c.skidId)[0].receiver = c.receiver; });
+      return R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, receiver: c.receiver })), skipped: [] });
+    },
+    getSkidHistory: (a) => R({ skid: { skidId: a[0], ticket: '100126-001', status: 'Current', litho: 0, po: '7974-DC', receiver: 'R-00008', receiverName: '26-10-01--TCC--R-00008',
+      receiverLink: 'https://drive.google.com/file/d/xyz/view', receiverFrom: '', coatings: [] }, events: [{ when: '2026-10-01 09:00:00', kind: 'event', what: 'RECEIVER SET', notes: '26-10-01--TCC--R-00008', cost: 0 }],
+      parent: null, children: [], loads: [], family: { base: '100126-001', members: [] } }),
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  ok('Receivers tab lists receivers', (await page.textContent('#rcvList')).includes('26-09-30--REY--R-00007') && (await page.textContent('#rcvList')).includes('1 ticket'));
+  await page.click('#rcvNew'); await page.waitForTimeout(100);
+  await page.fill('#rcvDate', '2026-10-01');
+  await page.fill('#rcvSupplier', 'tcc');
+  ok('file name previews as you type', (await page.textContent('#rcvName')) === '26-10-01--TCC--R-?????', await page.textContent('#rcvName'));
+  await page.fill('#rcvPos', '7974-DC, 7976-DC');
+  await page.click('#rcvSave'); await page.waitForTimeout(400);
+  const sr = calls.filter((c) => c.fn === 'saveReceiver');
+  ok('create sends the details', sr.length === 1 && sr[0].args[0].supplier === 'tcc' && sr[0].args[0].date === '2026-10-01' && !sr[0].args[0].id, sr.map((c) => c.args[0]));
+  ok('opens the new receiver with its number', (await page.textContent('#rcvBox')).includes('R-00008') && (await page.textContent('#rcvName')) === '26-10-01--TCC--R-00008');
+  ok('no tickets yet', (await page.textContent('#rcvTickets')).includes('None yet'));
+  ok('asks for a range before listing tickets', (await page.textContent('#rcvCands')).includes('Enter a ticket range'));
+  await page.fill('#rcvFrom', '100126-001'); await page.fill('#rcvTo', '100126-003'); await page.waitForTimeout(100);
+  let cands = await page.textContent('#rcvCands');
+  ok('range finds tickets (and the -LR1 piece), hides ones already on a receiver', cands.includes('100126-001') && cands.includes('100126-002') && cands.includes('100126-001-LR1') && !cands.includes('100126-003') && !cands.includes('093026-010'), cands);
+  await page.click('#rcvOnlyNone'); await page.waitForTimeout(100);
+  ok('unticking shows tickets on other receivers too', (await page.textContent('#rcvCands')).includes('on R-00007'));
+  await page.click('#rcvOnlyNone'); await page.waitForTimeout(100);
+  await page.click('#rcvAll'); await page.waitForTimeout(100);
+  ok('add all marks them, nothing saved yet', (await page.textContent('#rcvBarText')).includes('3 to add') && !calls.some((c) => c.fn === 'masterEdit'));
+  await page.click('#rcvTickets [data-rcvadd="SKD-5"]'); await page.waitForTimeout(100);
+  ok('undo one', (await page.textContent('#rcvBarText')).includes('2 to add'));
+  await page.fill('#rcvFrom', ''); await page.fill('#rcvTo', ''); await page.fill('#rcvPo', '8780'); await page.waitForTimeout(100);
+  ok('PO search', (await page.textContent('#rcvCands')).includes('093026-010') && !(await page.textContent('#rcvCands')).includes('100126-002'));
+  await page.click('#rcvSaveTickets'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('failure keeps the marks', ((await page.textContent('#modalRoot')) || '').includes('Your marks are kept') && (await page.textContent('#rcvBarText')).includes('2 to add'));
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  await page.click('#rcvSaveTickets'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const me = calls.filter((c) => c.fn === 'masterEdit');
+  ok('one request, receiver on each change, retry reuses the opId', me.length === 2 && me[1].args[0].length === 2 && me[1].args[0].every((c) => c.receiver === 'R-00008') && me[0].args[2] === me[1].args[2], me.map((c) => c.args));
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  let tk = await page.textContent('#rcvTickets');
+  ok('tickets now listed on it', tk.includes('100126-001') && tk.includes('100126-002') && tk.includes('· 2'), tk);
+  await page.click('#rcvTickets [data-rcvdrop="SKD-2"]'); await page.waitForTimeout(100);
+  await page.click('#rcvSaveTickets'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  ok('take off sends receiver ""', calls.filter((c) => c.fn === 'masterEdit').slice(-1)[0].args[0][0].receiver === '' && db.tickets[1].receiver === '');
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  // From a ticket's history: receiver line, Open file, receiver view with its tickets
+  await page.evaluate(() => openSkidHistory('SKD-1')); await page.waitForTimeout(300);
+  let h = await page.textContent('#histRoot');
+  ok('history shows PO and receiver', h.includes('PO 7974-DC') && h.includes('26-10-01--TCC--R-00008') && h.includes('RECEIVER SET'));
+  ok('Open file uses the saved link', await page.$eval('#histRoot a[href*="drive.google.com/file"]', (a) => a.target === '_blank'));
+  await page.click('#histRoot a[data-hist="rcv:R-00008"]'); await page.waitForTimeout(300);
+  h = await page.textContent('#histRoot');
+  ok('tapping the receiver lists its tickets', h.includes('Receiver 26-10-01--TCC--R-00008') && h.includes('100126-001') && h.includes('7974-DC, 7976-DC') && !!(await page.$('#histBack')));
+  ok('no link: Drive search for the number', await page.evaluate(() => rcvFileBtn('R-00007', '').includes('drive/search?q=%22R-00007%22')));
+  await page.click('#histClose'); await page.waitForTimeout(100);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 23. Master sheet: change one ticket's receiver
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [{ skidId: 'SKD-1', ticket: '501', status: 'Used', litho: 0, po: '7974-DC', receiver: 'R-00001', receiverOwn: 'R-00001', receiverName: '26-10-01--TCC--R-00001', coatings: [] },
+      { skidId: 'SKD-2', ticket: '501-LR1', status: 'Current', litho: 0, receiver: 'R-00001', receiverOwn: '', receiverName: '26-10-01--TCC--R-00001', receiverFrom: '501', coatings: [] }],
+      receivers: [{ id: 'R-00001', name: '26-10-01--TCC--R-00001' }, { id: 'R-00002', name: '26-10-02--CMD--R-00002' }] }),
+    masterEdit: (a) => R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, status: c.from, receiver: c.receiver })), skipped: [] }),
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  let txt = await page.textContent('#msList');
+  ok('rows show PO and receiver (and where an inherited one came from)', txt.includes('PO 7974-DC') && txt.includes('26-10-01--TCC--R-00001') && txt.includes('(from 501)'), txt);
+  await page.click('[data-msrcvedit="SKD-1"]'); await page.waitForTimeout(100);
+  await page.selectOption('[data-msrcv="SKD-1"]', 'R-00002'); await page.waitForTimeout(100);
+  ok('marked, not saved', (await page.textContent('#msBarText')).includes('1 ticket changed') && (await page.textContent('#msList')).includes('R-00001 → R-00002'));
+  await page.click('#msSaveBtn'); await page.waitForSelector('#modalOk');
+  ok('confirm names the new receiver', (await page.textContent('#modalRoot')).includes('501: receiver R-00002'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const me = calls.filter((c) => c.fn === 'masterEdit');
+  ok('saved with receiver only (no status change)', me.length === 1 && me[0].args[0][0].receiver === 'R-00002' && !me[0].args[0][0].status, me.map((c) => c.args[0]));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

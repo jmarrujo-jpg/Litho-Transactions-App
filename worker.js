@@ -36,6 +36,13 @@ const SLITTER_SESSION_HEADERS = ['Session ID', 'Slitter', 'Kind', 'Operator', 'C
 const SLITTER_PALLETS = 'Slitter Pallets';
 const SLITTER_PALLET_HEADERS = ['Pallet ID', 'Session ID', 'Created On', 'Output Count', 'Composition', 'Skid ID', 'Load #', 'Notes', 'Op ID'];
 
+// Receivers: the paperwork a load of steel arrived on (packing slip / bill of lading), scanned to
+// Google Drive. The app numbers them itself (R-00001, never reused) since the paper has no common
+// number. Steel Tickets gets a 'Receiver' column holding just that number; this tab holds the rest.
+// The file name shown to copy onto the Drive scan is YY-MM-DD--SUPPLIER--R-00001.
+const RECEIVERS = 'Receivers';
+const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Notes', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
   'VARNISH WET-STANDARD', 'VARNISH WET-PEBBLE', 'VARNISH DRY-STANDARD', 'VARNISH DRY-PEBBLE', 'WAX ONLY',
@@ -71,7 +78,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -121,7 +128,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'history-56', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receivers-57', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -261,8 +268,14 @@ async function handle(fn, args, env) {
       return getSkidHistory(sheets, args[0]);
     case 'getMasterSheet': // () every Current / WIP / Used / Pending ticket with its live coatings
       return getMasterSheet(sheets);
-    case 'masterEdit': // (changes[{skidId, status?, removePasses?[]}], operator, opId) Database Master sheet: save all at once
+    case 'masterEdit': // (changes[{skidId, status?, removePasses?[], receiver?}], operator, opId) Database Master sheet: save all at once
       return masterEdit(sheets, args[0], args[1], args[2]);
+    case 'getReceivers': // () every receiver, plus a light list of every ticket (to attach them)
+      return getReceivers(sheets);
+    case 'saveReceiver': // ({id?, date, supplier, pos, link, notes}, operator, opId) create (no id) or edit a receiver
+      return saveReceiver(sheets, args[0], args[1], args[2]);
+    case 'deleteReceiver': // (receiverId, operator, opId) only while no ticket is on it
+      return deleteReceiver(sheets, args[0], args[1], args[2]);
     case 'moveToWip': // (description, operator, coatings[], skidIds[], opId, removals{skidId:[pass]}) foreman batch: coat + straight to WIP
       return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
@@ -853,7 +866,7 @@ async function stampCells(sheets, tab, rowNum, map, fields) {
 // Each tab's unique key column: after an unclear append failure we look this value up to see
 // whether the row actually got saved before trying again (so a retry can't add it twice).
 const APPEND_KEYS = { [MASTER]: 'Skid ID', [TRANSACTIONS]: 'Op ID', [JOBS]: 'Job ID', [PRODUCTION]: 'Run ID',
-  [SLITTER_SESSIONS]: 'Session ID', [SLITTER_PALLETS]: 'Pallet ID', [COUNTS]: 'Session ID' };
+  [SLITTER_SESSIONS]: 'Session ID', [SLITTER_PALLETS]: 'Pallet ID', [COUNTS]: 'Session ID', [RECEIVERS]: 'Receiver ID' };
 
 // Is `value` already in column `name` of `tab`? (Reads just that one column.)
 async function columnHas(sheets, tab, headers, name, value) {
@@ -1670,10 +1683,11 @@ async function getMasterSheet(sheets) {
     if (MASTER_STATUSES.indexOf(st) === -1 && st !== STATUS.PENDING) return;
     const t = traceOf(o, ctx);
     out.push({ skidId: o['Skid ID'] || '', ticket: o['Ticket'] || '', status: st, litho: num(o['Litho']), mill: t.mill, customer: t.customer,
-      jobId: t.jobId, qty: t.qty, usedOn: t.usedOn,
+      jobId: t.jobId, qty: t.qty, usedOn: t.usedOn, po: t.po, receiver: t.receiver, receiverName: t.receiverName, receiverFrom: t.receiverFrom,
+      receiverOwn: String(o['Receiver'] || '').trim(),
       coatings: activeCoatings(skidHist(ctx, o)).map((c) => ({ passNumber: c.passNumber, item: c.item, group: c.group || '', sub: c.sub || '', chemCode: c.chemCode || '', cost: c.cost, date: c.date })) });
   });
-  return { rows: out };
+  return { rows: out, receivers: Object.keys(ctx.receivers).sort().map((id) => ({ id, name: receiverName(ctx.receivers[id]) })) };
 }
 
 // Save the Master sheet's marked changes in one go: move tickets between Current / WIP / Used and
@@ -1689,7 +1703,9 @@ async function masterEdit(sheets, changes, operator, opId) {
   const op = opId || autoOpId();
   let master = await withLastOpCol(sheets, await readTab(sheets, MASTER));
   let hdr = master.headers;
-  for (const col of ['Used At', 'Used Via']) hdr = (await ensureColumn(sheets, MASTER, hdr, col)).headers;
+  const cols = ['Used At', 'Used Via'];
+  if (list.some((c) => c.receiver !== undefined && c.receiver !== null)) cols.push('Receiver');
+  for (const col of cols) hdr = (await ensureColumn(sheets, MASTER, hdr, col)).headers;
   if (hdr !== master.headers) master = await readTab(sheets, MASTER);
   const ops = await opIdSet(sheets);
   const ctx = await traceContext(sheets, master.rows);
@@ -1706,18 +1722,27 @@ async function masterEdit(sheets, changes, operator, opId) {
     const resumed = stampedBy(o, step);
     const cur = o['Status'] || STATUS.CURRENT;
     const to = ch.status ? String(ch.status) : '';
+    // A receiver can be set on any ticket (old Used ones too); status and coating changes can't
+    // touch Pending / In Production / Missing tickets.
+    const wantRcv = ch.receiver !== undefined && ch.receiver !== null;
+    const rcv = wantRcv ? String(ch.receiver).trim().toUpperCase() : '';
+    const touchesStock = !!to || (ch.removePasses || []).length > 0;
     if (to && MASTER_STATUSES.indexOf(to) === -1) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'can only move to Current, WIP or Used' }); continue; }
-    if (!resumed && MASTER_STATUSES.indexOf(cur) === -1) { skipped.push({ skidId, ticket: o['Ticket'], reason: cur === STATUS.PENDING ? 'Pending on job ' + (o['Job ID'] || '') + ' — change it in Review Jobs' : cur }); continue; }
+    if (!resumed && touchesStock && MASTER_STATUSES.indexOf(cur) === -1) { skipped.push({ skidId, ticket: o['Ticket'], reason: cur === STATUS.PENDING ? 'Pending on job ' + (o['Job ID'] || '') + ' — change it in Review Jobs' : cur }); continue; }
+    if (rcv && !ctx.receivers[rcv]) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'no receiver ' + rcv }); continue; }
     const hist = skidHist(ctx, o);
     const v = voidPlan(o, hist, ch.removePasses, op, ops);
     const moving = to && to !== cur && !resumed;
     const from = resumed ? String(ch.from || '') : cur;
-    if (!resumed && !moving && !v.removed.length) { skipped.push({ skidId, ticket: o['Ticket'], reason: 'nothing to change' }); continue; }
+    const prevRcv = String(o['Receiver'] || '').trim();
+    const rcvChange = wantRcv && !resumed && prevRcv !== rcv;
+    if (!resumed && !moving && !v.removed.length && !rcvChange) { skipped.push({ skidId, ticket: o['Ticket'], reason: wantRcv && !touchesStock ? (rcv ? 'already on ' + rcv : 'has no receiver') : 'nothing to change' }); continue; }
     const before = resumed ? Math.round((num(o['Litho']) + v.cost) * 100) / 100 : num(o['Litho']);
     const after = Math.round((before - v.cost) * 100) / 100;
     if (!resumed) {
       const fields = { 'Last Updated At': ts, 'Last Updated By': operator, 'Last Op ID': step };
       if (v.removed.length) fields['Litho'] = after;
+      if (rcvChange) fields['Receiver'] = rcv;
       if (moving) {
         fields['Status'] = to;
         if (to === STATUS.USED) { fields['Used At'] = today; fields['Used Via'] = 'Database'; }
@@ -1747,12 +1772,152 @@ async function masterEdit(sheets, changes, operator, opId) {
         'Running Total After Pass': after, 'Notes': (from || '?') + ' → ' + to + ' (Database master sheet)' + (to === STATUS.CURRENT && leftJob ? '; left job ' + leftJob : ''), 'Job Name': '', 'Job ID': o['Job ID'] || '',
         'Skid ID': skidId, 'Op ID': sOp });
     }
-    done.push({ skidId, ticket: o['Ticket'], from: moving ? cur : (resumed ? from : ''), status: moving ? to : (resumed && to ? to : cur), litho: after, removed: v.removed.map((c) => c.item) });
+    const rOp = subOp(op, skidId + '#r');
+    if (wantRcv && (rcvChange || resumed) && !ops.has(rOp)) {
+      const name = rcv ? receiverName(ctx.receivers[rcv]) : '';
+      rows.push({ 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': 0, 'Operator': operator, 'Group': '', 'Sub-Variant': '',
+        'Item': rcv ? 'RECEIVER SET' : 'RECEIVER REMOVED', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0, 'Pass Total Cost': 0,
+        'Running Total After Pass': after,
+        'Notes': rcv ? name + (rcvChange && prevRcv ? ' (was ' + prevRcv + ')' : '') : (rcvChange && prevRcv ? 'took off ' + prevRcv : 'receiver taken off'),
+        'Job Name': '', 'Job ID': '', 'Skid ID': skidId, 'Op ID': rOp });
+    }
+    done.push({ skidId, ticket: o['Ticket'], from: moving ? cur : (resumed ? from : ''), status: moving ? to : (resumed && to ? to : cur), litho: after,
+      removed: v.removed.map((c) => c.item), receiver: wantRcv ? rcv : prevRcv });
   }
   if (!done.length) throw new Error('Nothing saved: ' + skipped.map((x) => (x.ticket || x.skidId) + ' (' + x.reason + ')').join(', '));
   if (data.length) await sheets.batchUpdate(data);
   await appendTxRows(sheets, rows, ops);
   return { ok: true, saved: done, skipped };
+}
+
+// ---- Receivers ----
+function receiverName(r) {
+  if (!r) return '';
+  const d = toYMD(r.date);
+  return (/^\d{4}-\d\d-\d\d$/.test(d) ? d.slice(2) : 'NO-DATE') + '--' + (r.supplier || 'UNKNOWN') + '--' + r.id;
+}
+// Supplier codes go into the file name, so keep them plain: upper case, single spaces, no slashes
+// and no "--" (the name's separator).
+function cleanSupplier(v) { return String(v || '').toUpperCase().replace(/[\/\\]+/g, ' ').replace(/-{2,}/g, '-').replace(/\s+/g, ' ').trim(); }
+function cleanPos(v) {
+  const seen = {}, out = [];
+  String(v || '').split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean).forEach((x) => { const k = x.toUpperCase(); if (!seen[k]) { seen[k] = 1; out.push(x); } });
+  return out.join(', ');
+}
+function receiverOut(o) {
+  return { id: String(o['Receiver ID'] || '').trim().toUpperCase(), date: toYMD(o['Date Received']), supplier: String(o['Supplier'] || '').trim(),
+    pos: String(o['POs'] || ''), link: String(o['Drive Link'] || '').trim(), notes: String(o['Notes'] || ''),
+    createdAt: String(o['Created At'] || ''), createdBy: String(o['Created By'] || ''), row: o.__row };
+}
+async function receiverMap(sheets) {
+  const map = {};
+  try {
+    (await readObjects(sheets, RECEIVERS)).rows.forEach((o) => { const r = receiverOut(o); if (r.id) map[r.id] = r; });
+  } catch (e) { /* no Receivers tab yet */ }
+  return map;
+}
+// A ticket's receiver: its own, else the skid it was split / cut from (and up the chain), else the
+// original ticket of a remainder (042426-207-LR1 -> 042426-207). `receiverFrom` names where it came from.
+function receiverTrace(o, ctx) {
+  let cur = o, from = '';
+  const seen = {};
+  for (let i = 0; i < 25 && cur; i++) {
+    const id = String(cur['Receiver'] || '').trim().toUpperCase();
+    if (id) { from = cur === o ? '' : (cur['Ticket'] || cur['Skid ID'] || ''); return receiverFields(id, from, ctx); }
+    const p = String(cur['Split Of'] || '').trim();
+    if (!p || seen[p]) break;
+    seen[p] = 1; cur = ctx.skids ? ctx.skids[p] : null;
+  }
+  const t = String(o['Ticket'] || '').trim(), base = baseTicketOf(t);
+  const orig = base && base !== t && ctx.tickets ? ctx.tickets[base] : null;
+  const id = orig ? String(orig['Receiver'] || '').trim().toUpperCase() : '';
+  return id ? receiverFields(id, base, ctx) : { receiver: '', receiverName: '', receiverLink: '', receiverFrom: '' };
+}
+function receiverFields(id, from, ctx) {
+  const r = ctx.receivers ? ctx.receivers[id] : null;
+  return { receiver: id, receiverName: r ? receiverName(r) : id + ' (not in Receivers)', receiverLink: r ? r.link : '', receiverFrom: from };
+}
+
+// Every receiver with its ticket count, the supplier codes in use, and a light list of every ticket
+// (to find and attach them by ticket range, PO or mill). One read of each tab.
+async function getReceivers(sheets) {
+  const master = await readTab(sheets, MASTER);
+  const receivers = await receiverMap(sheets);
+  const ctx = { skids: {}, tickets: {}, receivers };
+  master.rows.forEach((o) => {
+    if (o['Skid ID']) ctx.skids[String(o['Skid ID']).trim()] = o;
+    const t = String(o['Ticket'] || '').trim(); if (t && !ctx.tickets[t]) ctx.tickets[t] = o;
+  });
+  const count = {}, tickets = [], sup = {};
+  master.rows.forEach((o) => {
+    if (!(o['Ticket'] || o['Skid ID'])) return;
+    const own = String(o['Receiver'] || '').trim().toUpperCase();
+    const tr = receiverTrace(o, ctx);
+    if (own) count[own] = (count[own] || 0) + 1;
+    const s = cleanSupplier(o['Supplier']); if (s) sup[s] = 1;
+    tickets.push({ skidId: o['Skid ID'] || '', ticket: String(o['Ticket'] || ''), status: o['Status'] || '', mill: String(o['Mill'] || ''),
+      po: o['PO Number'] != null ? String(o['PO Number']) : '', supplier: String(o['Supplier'] || ''), qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '',
+      receiver: own, via: own ? '' : tr.receiver, viaFrom: own ? '' : tr.receiverFrom, splitOf: o['Split Of'] || '' });
+  });
+  const list = Object.keys(receivers).map((id) => Object.assign({}, receivers[id], { name: receiverName(receivers[id]), ticketCount: count[id] || 0 }));
+  list.sort((a, b) => (b.id < a.id ? -1 : b.id > a.id ? 1 : 0));   // newest number first
+  list.forEach((r) => { if (r.supplier) sup[r.supplier] = 1; });
+  return { receivers: list, suppliers: Object.keys(sup).sort(), tickets };
+}
+
+// Create (no rec.id) or edit a receiver's details. A new one gets the next R-number. Retry-safe: a
+// create is found again by its Op ID; an edit just writes the same cells again.
+async function saveReceiver(sheets, rec, operator, opId) {
+  rec = rec || {};
+  const supplier = cleanSupplier(rec.supplier);
+  if (!supplier) throw new Error('Enter the supplier.');
+  const date = rec.date ? toYMD(rec.date) : '';
+  if (rec.date && !/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Date received must be a date.');
+  const link = String(rec.link || '').trim();
+  if (link && !/^https?:\/\//i.test(link)) throw new Error('The Drive link should start with https://');
+  await ensureTab(sheets, RECEIVERS, RECEIVER_HEADERS);
+  let t = await readTab(sheets, RECEIVERS);
+  let hdr = t.headers;
+  for (const col of RECEIVER_HEADERS) hdr = (await ensureColumn(sheets, RECEIVERS, hdr, col)).headers;
+  if (hdr !== t.headers) t = await readTab(sheets, RECEIVERS);
+  const ts = nowStamp();
+  const fields = { 'Date Received': date, 'Supplier': supplier, 'POs': cleanPos(rec.pos), 'Drive Link': link, 'Notes': String(rec.notes || '').trim(), 'Last Updated At': ts };
+  const id = String(rec.id || '').trim().toUpperCase();
+  if (id) {
+    const o = t.rows.filter((r) => String(r['Receiver ID'] || '').trim().toUpperCase() === id)[0];
+    if (!o) throw new Error('Receiver ' + id + ' not found.');
+    fields['File Name'] = receiverName({ id, date, supplier });
+    await stampCells(sheets, RECEIVERS, o.__row, t.map, fields);
+    return Object.assign(receiverOut(Object.assign({}, o, fields)), { name: fields['File Name'] });
+  }
+  if (opId) {
+    const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
+    if (ex) { const r = receiverOut(ex); return Object.assign(r, { name: receiverName(r), duplicate: true }); }
+  }
+  const nid = 'R-' + ('00000' + (maxIdNumber(t.rows, 'Receiver ID', 'R-') + 1)).slice(-5);
+  const obj = Object.assign({ 'Receiver ID': nid, 'File Name': receiverName({ id: nid, date, supplier }), 'Created At': ts,
+    'Created By': String(operator || '').trim() || 'Database', 'Op ID': opId || '' }, fields);
+  await appendRowObj(sheets, RECEIVERS, hdr, obj);
+  return Object.assign(receiverOut(obj), { name: obj['File Name'], created: true });
+}
+
+// Delete a receiver made by mistake — only while no ticket is on it. Its number is not reused.
+async function deleteReceiver(sheets, receiverId, operator, opId) {
+  const id = String(receiverId || '').trim().toUpperCase();
+  let t;
+  try { t = await readTab(sheets, RECEIVERS); } catch (e) { return { ok: true, id, alreadyGone: true }; }
+  const o = t.rows.filter((r) => String(r['Receiver ID'] || '').trim().toUpperCase() === id)[0];
+  if (!o) return { ok: true, id, alreadyGone: true };
+  const master = await readTab(sheets, MASTER);
+  const on = master.rows.filter((r) => String(r['Receiver'] || '').trim().toUpperCase() === id);
+  if (on.length) throw new Error(id + ' still has ' + on.length + ' ticket(s) on it. Take them off first, then delete it.');
+  const grid = await sheetGrid(sheets, RECEIVERS);
+  if (!grid) throw new Error('Could not locate the Receivers tab.');
+  // Re-check the row still holds THIS receiver right before deleting by position.
+  const cell = await sheets.read("'" + RECEIVERS + "'!" + colLetter(t.map['Receiver ID']) + o.__row);
+  if (String((cell[0] && cell[0][0]) || '').trim().toUpperCase() !== id) throw new Error('The receiver list changed while deleting ' + id + ' — nothing was deleted. Refresh and try again.');
+  await sheets.deleteRows(grid.sheetId, o.__row - 1, o.__row);
+  return { ok: true, id };
 }
 
 // ---- moveToWip: the foreman's batch move (Litho Department -> Move To WIP) ----
@@ -3102,9 +3267,13 @@ async function traceContext(sheets, masterRows) {
   });
   const jobs = {};
   try { (await readObjects(sheets, JOBS, true)).rows.forEach((j) => { if (j['Job ID']) jobs[String(j['Job ID']).trim()] = j; }); } catch (e) { /* none */ }
-  const skids = {};
-  masterRows.forEach((o) => { if (o['Skid ID']) skids[String(o['Skid ID']).trim()] = o; });
-  return { bySkid, byTicket, jobs, skids };
+  const skids = {}, tickets = {};
+  masterRows.forEach((o) => {
+    if (o['Skid ID']) skids[String(o['Skid ID']).trim()] = o;
+    const t = String(o['Ticket'] || '').trim(); if (t && !tickets[t]) tickets[t] = o;
+  });
+  const receivers = await receiverMap(sheets);
+  return { bySkid, byTicket, jobs, skids, tickets, receivers };
 }
 function traceOf(o, ctx) {
   const sid = String(o['Skid ID'] || '').trim();
@@ -3123,6 +3292,7 @@ function traceOf(o, ctx) {
     coatedOn: toYMD(o['First Coated At']), coatedBy: o['First Coated By'] || '', approvedBy: o['Approved By'] || '',
     usedOn: toYMD(usedAt(o)), usedVia: o['Used Via'] || '', runId: o['Run ID'] || '', splitOf: o['Split Of'] || '',
     comments: o['Comments'] || '', lithoNotes: o['Litho Notes'] || '',
+    po: o['PO Number'] != null ? String(o['PO Number']) : '', ...receiverTrace(o, ctx),
   };
 }
 
