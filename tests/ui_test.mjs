@@ -996,6 +996,57 @@ const base = {
   await page.close();
 }
 
+// ---- 27. Find in Drive: Approve all — existing receivers first, a shared ticket goes on one file,
+//          files without a supplier / named for a missing receiver are left; a failure resumes with the same op
+{ const T = (n) => ({ skidId: 'SKD-' + n, ticket: 'T' + n, status: 'Current', mill: 'M' + n, po: '', supplier: 'RN', qty: 10 });
+  const G = (id, extra) => Object.assign({ fileId: id, name: id + '.pdf', link: 'https://drive.google.com/file/d/' + id + '/view', folderId: 'rey', folderName: '2025 Reynolds', date: '2025-10-28',
+    mills: ['M'], inFolder: false, receiver: '', namedReceiver: '', madeFrom: [], coveredBy: [], supplier: 'RN', pos: '' }, extra);
+  const all = [
+    G('src-1', { tickets: [T(1), T(2)] }),
+    G('src-2', { tickets: [T(2), T(3)], date: '2025-11-02' }),
+    G('dst-1', { tickets: [T(4)], inFolder: true, receiver: 'R-00001', namedReceiver: 'R-00001' }),
+    G('src-3', { tickets: [T(5)], coveredBy: ['R-00001'] }),
+    G('src-4', { tickets: [T(6)], supplier: '' }),
+    G('dst-9', { tickets: [T(7)], inFolder: true, namedReceiver: 'R-00009' })];
+  const done = {}; let n = 0, next = 2;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R({ receivers: [], suppliers: [], tickets: [] }),
+    getDriveMatches: () => R({ millCount: 7, unsearched: 0, noMill: 0, saEmail: '', folderId: 'DEST', suppliers: ['RN'], receivers: [{ id: 'R-00001', name: '25-10-14--RN--R-00001' }].concat(n >= 3 ? [{ id: 'R-00002', name: 'x--RN--R-00002' }] : []),
+      unassigned: [1, 2, 3, 4, 5, 6, 7].map(T), misses: [], groups: all.filter((g) => !done[g.fileId]).map((g) => n >= 3 && g.fileId === 'src-1' ? Object.assign({}, g, { madeFrom: ['R-00002'] }) : g) }),
+    approveDriveMatch: (a) => {
+      if (++n === 3) return { ok: false, error: 'Drive API 503: backend error' };
+      done[a[0].fileId] = 1;
+      const id = a[0].receiverId || ('R-0000' + next++);
+      return R({ ok: true, receiver: id, name: a[0].receiverId ? '' : 'x--RN--' + id, created: !a[0].receiverId, copy: a[0].receiverId ? null : { copied: true, copyName: id + '.pdf' },
+        saved: a[0].skidIds.map((x) => ({ skidId: x })), skipped: [] });
+    },
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  await page.click('#rcvDrive'); await page.waitForTimeout(300);
+  ok('approve all: button shows the file count', (await page.textContent('#drvApproveAll')).includes('Approve all 6 files'));
+  await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk');
+  let txt = await page.textContent('#modalRoot');
+  ok('approve all: confirm sums it up and names what is left', txt.includes('Approve all 4 files?') && txt.includes('2 new receivers') && txt.includes('2 files attached')
+    && txt.includes('src-4.pdf (no supplier') && txt.includes('dst-9.pdf (named R-00009'), txt);
+  await page.click('#modalOk'); await page.waitForTimeout(800);
+  txt = (await page.textContent('#modalRoot')) || '';
+  ok('approve all: a failure stops and says it resumes', txt.includes('Stopped after 2 of 4') && txt.includes('picks up where it stopped'), txt);
+  const a1 = calls.filter((c) => c.fn === 'approveDriveMatch');
+  ok('approve all: existing receivers first, then new ones', a1.map((c) => c.args[0].fileId + ':' + (c.args[0].receiverId || 'new')).join() === 'dst-1:R-00001,src-3:R-00001,src-1:new', a1.map((c) => c.args[0]));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(800);
+  const a2 = calls.filter((c) => c.fn === 'approveDriveMatch');
+  const s1 = a2.filter((c) => c.args[0].fileId === 'src-1'), s2 = a2.filter((c) => c.args[0].fileId === 'src-2')[0];
+  ok('approve all: the retry reuses the failed file\'s op, still as new (so its copy is finished)', s1.length === 2 && s1[0].args[2] === s1[1].args[2] && !s1[1].args[0].receiverId && s1[1].args[0].skidIds.join() === 'SKD-1,SKD-2', s1.map((c) => c.args));
+  ok('approve all: a ticket in two files goes on the first only', s2 && s2.args[0].skidIds.join() === 'SKD-3' && s2.args[0].supplier === 'RN' && s2.args[0].date === '2025-11-02', s2 && s2.args);
+  txt = (await page.textContent('#modalRoot')) || '';
+  ok('approve all: summary', txt.includes('All approved') && txt.includes('2 new receivers: R-00002, R-00003'), txt);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

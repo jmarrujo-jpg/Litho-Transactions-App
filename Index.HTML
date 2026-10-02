@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.55.0</span>
+      <span class="version" id="appVersion">v1.56.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1431,6 +1431,7 @@
       (d.noMill ? '<div class="sub">' + d.noMill + ' ticket' + (d.noMill === 1 ? ' has' : 's have') + ' no mill number (or one made of several), so ' + (d.noMill === 1 ? 'it' : 'they') + ' can’t be searched — add ' + (d.noMill === 1 ? 'it' : 'them') + ' by hand.</div>' : '') +
       '<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">' +
         (d.unsearched ? '<button class="btn success" id="drvSearch"' + (drvBusy ? ' disabled' : '') + '>Search Drive (' + d.unsearched + ')</button>' : '') +
+        (d.groups.length ? '<button class="btn success" id="drvApproveAll"' + (drvBusy ? ' disabled' : '') + '>Approve all ' + d.groups.length + ' file' + (d.groups.length === 1 ? '' : 's') + '</button>' : '') +
         (d.misses.length ? '<button class="btn secondary" id="drvAgain"' + (drvBusy ? ' disabled' : '') + '>Search again for the ' + d.misses.length + ' not found</button>' : '') +
         '<button class="btn secondary" id="drvReload"' + (drvBusy ? ' disabled' : '') + '>↻</button></div>' +
       '<div class="sub" id="drvProgress" style="margin-top:8px;font-weight:600">' + esc(drvProgress) + '</div>' +
@@ -1446,6 +1447,7 @@
     document.getElementById('drvBack').onclick = function () { rcvSel = null; rcvData = null; renderReceivers(); };
     var s1 = document.getElementById('drvSearch'); if (s1) s1.onclick = function () { drvRunSearch(false); };
     var s2 = document.getElementById('drvAgain'); if (s2) s2.onclick = function () { drvRunSearch(true); };
+    var s3 = document.getElementById('drvApproveAll'); if (s3) s3.onclick = drvApproveAll;
     document.getElementById('drvReload').onclick = function () { drvData = null; drvProgress = ''; renderDriveView(); };
     drvWire(box);
   }
@@ -1554,10 +1556,8 @@
       existingId ? 'They go on ' + existingId + '. Each change is logged in the ticket’s history.'
         : 'It gets the next R-number, the scan is copied into the receivers folder as ' + rcvFileName('R-?????', f.date, f.supplier) + ', and the tickets are put on it. Each change is logged in the ticket’s history.',
       function () {
-        var op = drvOps[fileId] = drvOps[fileId] || newOpId();
         drvProgress = 'Saving…'; var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
-        runMutation('approveDriveMatch', [{ fileId: fileId, receiverId: existingId || '', date: f.date, supplier: f.supplier, pos: f.pos, notes: f.notes, skidIds: ids }, '', op], function (res) {
-          delete drvOps[fileId]; delete drvOpen[fileId]; delete drvPick[fileId]; delete drvExtra[fileId]; delete drvForm[fileId]; delete drvQ[fileId];
+        drvSend(g, ids, existingId, function (res) {
           drvData = null; rcvData = null; msData = null; drvProgress = '';
           var c = res.copy, saved = res.saved || [], skipped = res.skipped || [];
           var msg = (res.created ? res.receiver + ' created (' + res.name + '). ' : 'Put on ' + res.receiver + '. ') +
@@ -1573,6 +1573,83 @@
           showModal({ title: 'Could not finish', confirmText: 'OK', message: err.message + ' — Tap Approve again: it picks up where it stopped and never makes a second receiver or copy.' });
         });
       }, existingId ? 'Attach' : 'Approve');
+  }
+  // One file's approve (a new receiver, or onto existingId). Its op sticks until it succeeds, so a
+  // retry picks up where it stopped and never makes a second receiver or copy.
+  function drvSend(g, ids, existingId, done, fail) {
+    var fileId = g.fileId, f = drvFormOf(g);
+    var op = drvOps[fileId] = drvOps[fileId] || newOpId();
+    runMutation('approveDriveMatch', [{ fileId: fileId, receiverId: existingId || '', date: f.date, supplier: f.supplier, pos: f.pos, notes: f.notes, skidIds: ids }, '', op], function (res) {
+      delete drvOps[fileId]; delete drvOpen[fileId]; delete drvPick[fileId]; delete drvExtra[fileId]; delete drvForm[fileId]; delete drvQ[fileId];
+      done(res);
+    }, fail);
+  }
+  // Approve all: every file as it stands (your unticks and added tickets count). A file that's
+  // already a receiver (in the receivers folder, copied, or one was made from it) gets its tickets
+  // attached there; any other file becomes a new receiver. A ticket found in two files goes on the
+  // first one only, so nothing is moved from one new receiver to another.
+  function drvPlanAll() {
+    var known = {}; (drvData.receivers || []).forEach(function (r) { known[r.id] = 1; });
+    var rid = function (v) { v = String(v || '').toUpperCase(); return known[v] ? v : ''; };
+    var groups = drvData.groups.map(function (g) {
+      // A file whose new receiver stopped partway is sent as new again with its op (it finishes that
+      // same receiver and its copy) rather than attached to the receiver made from it.
+      var to = rid(g.receiver) || ((g.coveredBy || []).map(rid).filter(Boolean)[0]) || (drvOps[g.fileId] ? '' : ((g.madeFrom || []).map(rid).filter(Boolean)[0])) || '';
+      return { g: g, to: to };
+    });
+    groups.sort(function (a, b) { return (a.to ? 0 : 1) - (b.to ? 0 : 1); });   // existing receivers first
+    var taken = {}, steps = [], skipped = [];
+    groups.forEach(function (x) {
+      var g = x.g;
+      if (!x.to && g.namedReceiver) { skipped.push({ g: g, why: 'named ' + g.namedReceiver + ', but that receiver isn’t in the app' }); return; }
+      if (!x.to && !rcvCleanSupplier(drvFormOf(g).supplier)) { skipped.push({ g: g, why: 'no supplier — open Review and enter it' }); return; }
+      var ids = drvChosen(g).filter(function (id) { return !taken[id]; });
+      if (!ids.length) { if (drvChosen(g).length) skipped.push({ g: g, why: 'its tickets went on another file' }); return; }
+      ids.forEach(function (id) { taken[id] = 1; });
+      steps.push({ g: g, ids: ids, to: x.to });
+    });
+    return { steps: steps, skipped: skipped };
+  }
+  function drvApproveAll() {
+    if (drvBusy || !drvData) return;
+    var plan = drvPlanAll(), steps = plan.steps;
+    var news = steps.filter(function (x) { return !x.to; }).length, tks = steps.reduce(function (n, x) { return n + x.ids.length; }, 0);
+    if (!steps.length) { showInfo('Nothing to approve', plan.skipped.map(function (x) { return x.g.name + ': ' + x.why; }).join('; ') || 'No files found.'); return; }
+    var skipTxt = plan.skipped.length ? ' Left for you to review: ' + plan.skipped.map(function (x) { return x.g.name + ' (' + x.why + ')'; }).join(', ') + '.' : '';
+    showConfirm('Approve all ' + steps.length + ' file' + (steps.length === 1 ? '' : 's') + '?',
+      tks + ' ticket' + (tks === 1 ? '' : 's') + ' go on receivers: ' + news + ' new receiver' + (news === 1 ? '' : 's') + ' (each scan copied into the receivers folder with its name), ' +
+      (steps.length - news) + ' file' + (steps.length - news === 1 ? '' : 's') + ' attached to the receiver ' + (steps.length - news === 1 ? 'it already is' : 'they already are') +
+      '. Each new receiver uses the date and supplier shown on its file (open Review to change one first). A ticket found in two files goes on the first one.' + skipTxt,
+      function () {
+        drvBusy = true;
+        var i = 0, made = [], attached = [], byHand = [], notChanged = 0;
+        var finish = function (err) {
+          drvBusy = false; drvData = null; rcvData = null; msData = null;
+          var msg = (made.length ? made.length + ' new receiver' + (made.length === 1 ? '' : 's') + ': ' + made.join(', ') + '. ' : '') +
+            (attached.length ? attached.length + ' file' + (attached.length === 1 ? '' : 's') + ' attached to ' + attached.join(', ') + '. ' : '') +
+            (notChanged ? notChanged + ' ticket' + (notChanged === 1 ? ' was' : 's were') + ' not changed (already on a receiver). ' : '') +
+            (byHand.length ? 'Google wouldn’t let the app copy ' + byHand.length + ' scan' + (byHand.length === 1 ? '' : 's') + ' into the receivers folder, so ' + (byHand.length === 1 ? 'it is' : 'they are') + ' linked to the original for now — copy and name ' + (byHand.length === 1 ? 'it' : 'them') + ': ' + byHand.join(', ') + '. ' : '') +
+            skipTxt;
+          drvProgress = '';
+          renderDriveView();
+          if (err) showModal({ title: 'Stopped after ' + i + ' of ' + steps.length, confirmText: 'OK', message: err.message + ' — ' + msg + ' Tap Approve all again: it picks up where it stopped and never makes a second receiver or copy.' });
+          else showInfo(byHand.length ? 'Approved — copy some by hand' : 'All approved', msg);
+        };
+        var next = function () {
+          if (i >= steps.length) { finish(null); return; }
+          var x = steps[i];
+          drvProgress = 'Approving ' + (i + 1) + ' of ' + steps.length + ': ' + x.g.name + '…';
+          var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
+          drvSend(x.g, x.ids, x.to, function (res) {
+            if (res.created) made.push(res.receiver); else if (attached.indexOf(res.receiver) === -1) attached.push(res.receiver);
+            if (res.copy && !res.copy.copied) byHand.push(res.copy.copyName);
+            notChanged += (res.skipped || []).length;
+            i++; next();
+          }, finish);
+        };
+        renderDriveView();
+        next();
+      }, 'Approve all');
   }
   function renderRcvList() {
     var box = document.getElementById('rcvList');
