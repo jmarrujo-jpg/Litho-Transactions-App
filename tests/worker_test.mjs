@@ -770,11 +770,15 @@ await concurrency(envBase, 'in-worker lock');
     { id: 'src-1', name: 'Container Supply_20251028_121716.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-28T16:58:38Z', text: 'P.O.#: 7730-DC 1 3045220 85 T-5 2 3045214/ 85' },
     { id: 'src-2', name: 'Container Supply_20251014.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], createdTime: '2025-10-14T10:00:00Z', text: '3044661 v' },
     { id: 'dst-1', name: '25-10-14--RN--R-00001.pdf', mimeType: 'application/pdf', parents: [DEST], createdTime: '2026-10-01T10:00:00Z', text: '3044661' },
+    { id: 'fold-prod', name: 'Production Slips', mimeType: FOLDER, parents: [ARCH] },
+    { id: 'prod-1', name: 'scan_0601.pdf', mimeType: 'application/pdf', parents: ['fold-prod'], text: '3045220 3044661' },
+    { id: 'prod-2', name: 'Production Slips 2025-10.pdf', mimeType: 'application/pdf', parents: ['fold-rey'], text: '3045220' },
     { id: 'xls-1', name: '26-09-30 Current.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', parents: ['mine'], text: '3045220 3044661' });
   await call('saveReceiver', [{ date: '2025-10-14', supplier: 'RN' }, '', 'op-26-r1']);
   // A search logged before the archive limit (no Scope) doesn't count.
   f.books[SID].tabs['Drive Search'] = { id: 990, rows: [['Mill', 'File ID', 'File Name', 'File Link', 'Folder ID', 'Folder Name', 'File Date', 'Searched At'],
-    ['3045220', 'out-1', 'Steel report.pdf', 'x', 'mine', '', '', '2026-01-01 00:00:00']], rowCount: 1000, colCount: 40 };
+    ['3045220', 'out-1', 'Steel report.pdf', 'x', 'mine', '', '', '2026-01-01 00:00:00'],
+    ['3044661', 'prod-1', 'scan_0601.pdf', 'x', 'fold-prod', 'Production Slips', '', '2026-01-02 00:00:00', ARCH]], rowCount: 1000, colCount: 40 };
   f.books[SID].order.push('Drive Search');
   const s1 = await call('driveSearchMills', [false]);
   ok('drive: searched every unassigned mill once', s1.ok && s1.result.searched === 5 && s1.result.remaining === 0 && s1.result.found === 3, s1);
@@ -788,6 +792,7 @@ await concurrency(envBase, 'in-worker lock');
     && gid('src-1').mills.join() === '3045214,3045220', gid('src-1'));
   ok('drive: an original already copied points to the copy', gid('src-2') && gid('src-2').coveredBy.join() === 'R-00001', gid('src-2'));
   ok('drive: spreadsheets are not searched', !gid('xls-1'));
+  ok('drive: nothing titled Production Slips (file or folder)', !gid('prod-1') && !gid('prod-2'), gr.map((x) => x.fileId));
   ok('drive: only scans inside the archive folder', !gid('out-1'), gr.map((x) => x.fileId));
   ok('drive: not found and not searchable listed', g.result.misses.map((x) => x.mill).join() === '9999999,M77' && g.result.noMill >= 1 && g.result.unsearched === 0, g.result);
   // Approve the scan: new receiver, copy, attach (first try loses the attach's log append).
@@ -832,6 +837,42 @@ await concurrency(envBase, 'in-worker lock');
   f.books[SID].tabs['Steel Tickets'].rows.push(skid('306', 'SKD-000076', 'Current', 10, 50, { 'Mill': '7770001' }));
   const ns = await call('driveSearchMills', [false], Object.assign({}, envBase, { RECEIVER_SOURCE_FOLDER: 'not-shared' }));
   ok('drive: archive folder not shared -> says to share it', !ns.ok && /Share it with the service account/.test(ns.error), ns);
+}
+
+// 27. Fresh Import with a "Used in Production" tab: every row comes in Used, Used At from its
+//     Date Used (YYMMDD-NNN); bad / future dates, repeats and tickets also still open are reported.
+{ const f = fresh();
+  const addTab = (name, rows) => { f.books[SID].tabs[name] = { id: 960 + f.books[SID].order.length, rows, rowCount: 1000, colCount: 40 }; f.books[SID].order.push(name); };
+  addTab('Current', [['Ticket', 'QTY/LOAD', 'Mill'], ['040226-004', 1568, '3060609'], ['500', 10, 'M5']]);
+  addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill']]);
+  const U = ['Date Used', 'Ticket', 'Row', 'Supplier', 'Weight', 'Cost', 'Litho', 'Mill', 'QTY/LOAD', 'PO Number'];
+  addTab('Used in Production', [U,
+    ['260601-001', '040226-004', 'W-045', 'RN', '3,835.00', '$67.31', '', '3060609', 1568, '8168-DC'],
+    ['260603-004', '040226-004', 'L-037', 'RN', '3,835.00', '$67.31', '', '3060609', 1568, '8168-DC'],
+    ['260605-001', '031626-100', 'M-001', 'KG', '5,435.00', '$84.63', '19.38', 'DOK0298C01', 1300, '7756-DC'],
+    ['290918-001', '091126-012', '', 'RN', '2,565.00', '$72.37', '0', '3082865', 1031, '8780-DC'],
+    ['261340-001', '091126-013', '', 'RN', '10', '$1', '', 'X1', 1, ''],
+    ['', '', '', '', '', '', '', '', '', '']]);
+  const imp = await call('importStaging', ['op-27-i']);
+  const st = f.rows(SID, 'Steel Tickets');
+  const used = st.filter((r) => r['Status'] === 'Used');
+  ok('used import: counts', imp.ok && imp.result.current === 2 && imp.result.used === 5 && imp.result.total === 7 && imp.result.usedTab === 'Used in Production', imp);
+  ok('used import: Used rows after Current / WIP with new Skid IDs', used.length === 5 && used[0]['Skid ID'] === 'SKD-000003', used.map((r) => r['Skid ID']));
+  const kg = used.filter((r) => r['Ticket'] === '031626-100')[0];
+  ok('used import: date used recorded, every column carried', kg['Used At'] === '2026-06-05' && kg['Used Via'] === 'Import' && kg['Date Used'] === '260605-001'
+    && kg['Row'] === 'M-001' && kg['Supplier'] === 'KG' && kg['Mill'] === 'DOK0298C01' && kg['PO Number'] === '7756-DC', kg);
+  ok('used import: a bad date is blank and reported', !used.filter((r) => r['Ticket'] === '091126-013')[0]['Used At'] && imp.result.usedBadDate.join() === '091126-013 (261340-001)', imp.result);
+  ok('used import: a future date is kept but reported', used.filter((r) => r['Ticket'] === '091126-012')[0]['Used At'] === '2029-09-18' && imp.result.usedFutureDate.join() === '091126-012 (290918-001)', imp.result);
+  ok('used import: repeats and still-open tickets reported', imp.result.usedRepeats.join() === '040226-004 ×2' && imp.result.usedAlsoOpen.join() === '040226-004', imp.result);
+  ok('used import: logged', /Used 5\)/.test(f.rows(SID, 'Transactions').filter((r) => r['Item'] === 'FRESH IMPORT')[0]['Notes'] || ''), f.rows(SID, 'Transactions'));
+  // "$84.63" reads as 84.63 (not 0) in the reports; imported used skids show in the used-in-production report.
+  const rp = await call('getDepartmentReport', ['2026-06-01', '2026-06-30', 'direct']);
+  const rows = rp.ok ? (rp.result.sections || []).filter((x) => x.key === 'direct')[0].rows : [];
+  ok('used import: in the used report with cost', rows.length === 3 && rows.filter((r) => r.ticket === '031626-100')[0].cost === 84.63, rp);
+  // No Used tab: Current / WIP only, as before.
+  delete f.books[SID].tabs['Used in Production']; f.books[SID].order = f.books[SID].order.filter((n) => n !== 'Used in Production');
+  const imp2 = await call('importStaging', ['op-27-j']);
+  ok('used import: no tab -> skipped', imp2.ok && imp2.result.used === 0 && imp2.result.usedTab === '' && imp2.result.total === 2, imp2);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

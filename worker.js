@@ -54,6 +54,11 @@ const DRIVE_SEARCH_HEADERS = ['Mill', 'File ID', 'File Name', 'File Link', 'Fold
 // Packing Slip Archive"; env RECEIVER_SOURCE_FOLDER overrides. A search logged under another
 // folder (Scope) doesn't count, so changing it means searching again.
 const DEFAULT_SOURCE_FOLDER = '1wFGdaTg9Rep-ac6DM3rC9x6FA3HLh--_';
+// Files and folders titled "Production Slips" aren't receivers: never searched (a folder by that
+// name is skipped with everything in it). Searches from before this rule carry the bare folder id
+// as their Scope, so they don't count and get searched again.
+const DRIVE_EXCLUDE = /production[\s_-]*slips?/i;
+const DRIVE_SCOPE_TAG = ' -production slips';
 const DRIVE_FOLDERS_PER_QUERY = 40;   // "in parents" terms per Drive query (keeps the query short)
 // Where approved receivers' copies go ("Raw Metal Packing Slips"); env RECEIVER_FOLDER_ID overrides.
 const DEFAULT_RECEIVER_FOLDER = '18PRmpTAcNgjmcjQ3_hELRHcsPkYGND98';
@@ -144,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'drive-61', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'used-62', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -634,9 +639,9 @@ function todayYMD() {
 }
 
 // ---------------- backend reads (ported from Code.gs) ----------------
-// Tolerates thousands-separator commas ("4,405" -> 4405) which appear in some weight cells;
-// plain Number() would read those as NaN and silently treat the weight as 0.
-function num(v) { return Number(String(v == null ? '' : v).replace(/,/g, '')) || 0; }
+// Tolerates thousands-separator commas ("4,405" -> 4405) which appear in some weight cells, and a
+// dollar sign ("$67.31", as Access pastes Cost); plain Number() would read those as NaN -> 0.
+function num(v) { return Number(String(v == null ? '' : v).replace(/[,$\s]/g, '')) || 0; }
 // For numbers a person typed: "1,234" and "$12.50" are fine; blank or junk is NaN (never 0).
 function typedNum(v) {
   const t = String(v == null ? '' : v).replace(/[,$\s]/g, '');
@@ -2030,6 +2035,7 @@ async function getReceivers(sheets) {
 // ---- Find in Drive ----
 function receiverFolderId(env) { return String((env && env.RECEIVER_FOLDER_ID) || DEFAULT_RECEIVER_FOLDER).trim(); }
 function sourceFolderId(env) { return String((env && env.RECEIVER_SOURCE_FOLDER) || DEFAULT_SOURCE_FOLDER).trim(); }
+function driveScope(env) { return sourceFolderId(env) + DRIVE_SCOPE_TAG; }
 // The source folder and every folder under it: {id: name}. One Drive call per level.
 async function driveFolderTree(sheets, rootId) {
   const FOLDER = 'application/vnd.google-apps.folder';
@@ -2046,7 +2052,7 @@ async function driveFolderTree(sheets, rootId) {
     for (let i = 0; i < level.length; i += DRIVE_FOLDERS_PER_QUERY) {
       const ins = level.slice(i, i + DRIVE_FOLDERS_PER_QUERY).map((id) => "'" + driveQ(id) + "' in parents").join(' or ');
       const found = await sheets.driveList('(' + ins + ") and mimeType = '" + FOLDER + "' and trashed = false", 'id,name', 1000);
-      found.forEach((f) => { if (!tree[f.id]) { tree[f.id] = f.name || ''; next.push(f.id); } });
+      found.forEach((f) => { if (!tree[f.id] && !DRIVE_EXCLUDE.test(f.name || '')) { tree[f.id] = f.name || ''; next.push(f.id); } });
     }
     level = next;
   }
@@ -2095,7 +2101,7 @@ async function driveSearchLog(sheets, scope) {
     const at = String(r['Searched At'] || '');
     if (!latest[m] || at > latest[m].at) latest[m] = { at, hits: {} };
     const fid = String(r['File ID'] || '').trim();
-    if (at === latest[m].at && fid) latest[m].hits[fid] = { fileId: fid, name: String(r['File Name'] || ''), link: String(r['File Link'] || ''),
+    if (at === latest[m].at && fid && !DRIVE_EXCLUDE.test(String(r['File Name'] || '') + ' ' + String(r['Folder Name'] || ''))) latest[m].hits[fid] = { fileId: fid, name: String(r['File Name'] || ''), link: String(r['File Link'] || ''),
       folderId: String(r['Folder ID'] || ''), date: toYMD(r['File Date']) };
     if (r['Folder ID'] && r['Folder Name']) folders[String(r['Folder ID'])] = String(r['Folder Name']);
   });
@@ -2113,7 +2119,7 @@ async function driveSearchMills(sheets, env, again) {
   await ensureTab(sheets, DRIVE_SEARCH, DRIVE_SEARCH_HEADERS);
   let hdr = (await readTab(sheets, DRIVE_SEARCH)).headers;
   for (const col of DRIVE_SEARCH_HEADERS) hdr = (await ensureColumn(sheets, DRIVE_SEARCH, hdr, col)).headers;
-  const scope = sourceFolderId(env);
+  const scope = driveScope(env);
   const log = await driveSearchLog(sheets, scope);
   const ts = nowStamp();
   const cutoff = again ? (again === true ? ts : String(again)) : '';
@@ -2124,7 +2130,7 @@ async function driveSearchMills(sheets, env, again) {
   if (!todo.length) return { ok: true, searched: 0, found: 0, remaining: 0, cutoff };
   // Only inside the archive folder: each search names its folders ("in parents" isn't recursive).
   let tree;
-  try { tree = await driveFolderTree(sheets, scope); } catch (e) { throw driveError(e); }
+  try { tree = await driveFolderTree(sheets, sourceFolderId(env)); } catch (e) { throw driveError(e); }
   const ids = Object.keys(tree), chunks = [];
   for (let i = 0; i < ids.length; i += DRIVE_FOLDERS_PER_QUERY) chunks.push(ids.slice(i, i + DRIVE_FOLDERS_PER_QUERY));
   const batch = todo.slice(0, Math.max(1, Math.floor(DRIVE_BATCH / chunks.length)));
@@ -2138,7 +2144,7 @@ async function driveSearchMills(sheets, env, again) {
         got = await sheets.driveList("fullText contains '\"" + driveQ(m) + "\"' and trashed = false and (mimeType = 'application/pdf' or mimeType contains 'image/') and (" +
           ch.map((id) => "'" + driveQ(id) + "' in parents").join(' or ') + ')', 'id,name,webViewLink,parents,createdTime,mimeType', 20);
       } catch (e) { throw driveError(e); }
-      got.forEach((f) => { if (!seen[f.id]) { seen[f.id] = 1; files.push(f); } });
+      got.forEach((f) => { if (!seen[f.id] && !DRIVE_EXCLUDE.test(f.name || '')) { seen[f.id] = 1; files.push(f); } });
     }
     if (files.length) found++;
     if (!files.length) out.push({ 'Mill': m, 'Searched At': ts, 'Scope': scope });
@@ -2163,7 +2169,7 @@ async function getDriveMatches(sheets, env) {
   const master = await readTab(sheets, MASTER);
   const receivers = await receiverMap(sheets);
   const tickets = driveTickets(master.rows, receivers);
-  const log = await driveSearchLog(sheets, sourceFolderId(env));
+  const log = await driveSearchLog(sheets, driveScope(env));
   const dest = receiverFolderId(env);
   const brief = (t) => ({ skidId: t.skidId, ticket: t.ticket, status: t.status, mill: t.mill, po: t.po, supplier: t.supplier, qty: t.qty });
   const byMill = {};
@@ -3000,7 +3006,7 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
   return { ok: true, updated: changes.length, changes };
 }
 
-// ================= FRESH-START IMPORT (convert 'Current' + 'WIP' tabs) ===============
+// ================= FRESH-START IMPORT (convert 'Current' + 'WIP' [+ 'Used in Production'] tabs) ===
 // The operator pastes their Access data into two staging tabs — 'Current' and 'WIP' — one per
 // state. This wipes Steel Tickets + Transactions and rebuilds Steel Tickets from those tabs:
 // every row becomes a CLEAN single-column Steel Tickets row (fresh SKD id, Status taken from which
@@ -3010,6 +3016,25 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
 // Access data is refreshed. Transactions is cleared too, so a reused SKD id can't inherit an
 // old skid's history. opId-deduped like the other mutations.
 const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
+// Optional third tab: Access's "Used in Production" list. Every row comes in as a Used skid with
+// Used At from its 'Date Used' (Access writes it YYMMDD-NNN: 260601-001 = 2026-06-01, the -NNN is
+// that day's count). The first of these names that exists is read; none = no used skids imported.
+const IMPORT_USED_TABS = ['Used in Production', 'Used'];
+const IMPORT_USED_VIA = 'Import';   // 'Used Via' on imported used skids (history shows "via Import")
+
+// 'Date Used' -> yyyy-MM-dd, or '' when it isn't a real date. YYMMDD[-NNN] first; a plain date
+// ("2026-06-01", "6/1/2026") or a Sheets date serial also works.
+function importUsedDate(v) {
+  if (typeof v === 'number' && v > 20000 && v < 80000) return serialToYMD(v, TZ);
+  const t = String(v == null ? '' : v).trim();
+  let y, mo, d, m;
+  if ((m = /^(\d{2})(\d{2})(\d{2})(?:\s*-\s*\d+)?$/.exec(t))) { y = 2000 + +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/.exec(t))) { y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; mo = +m[1]; d = +m[2]; }
+  else return '';
+  if (mo < 1 || mo > 12 || d < 1 || d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return '';
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
 
 // Lifecycle / bookkeeping columns the app writes over a skid's life. They aren't in the source tabs,
 // but we pre-create them (blank) so the fresh Steel Tickets header is complete — the app never has to
@@ -3054,6 +3079,14 @@ async function importStaging(sheets, opId) {
     }
     const rows = data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '');
     parts.push({ tabName, status, headers: data.headers, rows });
+  }
+  const titles = ((await sheets.meta()).sheets || []).map((x) => x.properties && x.properties.title);
+  const usedTab = IMPORT_USED_TABS.filter((name) => titles.indexOf(name) !== -1)[0] || '';
+  if (usedTab) {
+    const data = await readObjects(sheets, usedTab);
+    if (!data.headers.length || data.headers.indexOf('Ticket') === -1) throw new Error('The "' + usedTab + '" tab needs a header row with a "Ticket" column.');
+    if (data.headers.indexOf('Date Used') === -1) throw new Error('The "' + usedTab + '" tab needs a "Date Used" column (like 260601-001).');
+    parts.push({ tabName: 'Used', status: STATUS.USED, headers: data.headers, rows: data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '') });
   }
 
   // 2) Clean Steel Tickets header: Ticket, Skid ID, Status, then every source column (union across
@@ -3106,8 +3139,11 @@ async function importStaging(sheets, opId) {
   // single subrequest regardless of how many rows it carries.
   const allRows = [];
   let n = 0, restored = 0;
-  const counts = { Current: 0, WIP: 0 };
+  const counts = { Current: 0, WIP: 0, Used: 0 };
   const back = {}, conflicts = [];   // back: "R-x|mill" / "R-x|#ticket" that found its ticket again
+  const today = todayYMD();
+  const badDate = [], futureDate = [], usedTimes = {}, openTickets = {};
+  parts.forEach((p) => { if (p.status !== STATUS.USED) p.rows.forEach((o) => { openTickets[String(o['Ticket']).trim()] = 1; }); });
   for (const p of parts) {
     for (const o of p.rows) {
       n += 1;
@@ -3118,6 +3154,15 @@ async function importStaging(sheets, opId) {
       rec['Status'] = p.status;
       rec['Last Updated At'] = date;
       rec['Last Updated By'] = 'import';
+      if (p.status === STATUS.USED) {
+        const raw = String(o['Date Used'] == null ? '' : o['Date Used']).trim(), tk = String(o['Ticket']).trim();
+        const on = importUsedDate(o['Date Used']);
+        rec['Used At'] = on;
+        rec['Used Via'] = IMPORT_USED_VIA;
+        if (!on) badDate.push(tk + ' (' + (raw || 'blank') + ')');
+        else if (on > today) futureDate.push(tk + ' (' + raw + ')');
+        usedTimes[tk] = (usedTimes[tk] || 0) + 1;
+      }
       if (look && !String(rec['Receiver'] || '').trim()) {
         const mt = matchReceiver(look, o['Mill'], o['Ticket']);
         if (mt && mt.receiver) { rec['Receiver'] = mt.receiver; restored++; }
@@ -3136,12 +3181,17 @@ async function importStaging(sheets, opId) {
   // Log the import into the (freshly cleared) audit tab. This doubles as the opId dedup marker, so a
   // double-submit of the same import is caught instead of wiping and reloading twice.
   await eventTx(sheets, { skidId: '', ticket: '', itemText: 'FRESH IMPORT', operator: '',
-    note: 'Imported ' + n + ' skids from staging (Current ' + (counts['Current'] || 0) + ', WIP ' + (counts['WIP'] || 0) + ')' +
+    note: 'Imported ' + n + ' skids from staging (Current ' + (counts['Current'] || 0) + ', WIP ' + (counts['WIP'] || 0) +
+      (usedTab ? ', Used ' + (counts['Used'] || 0) : '') + ')' +
       (look ? '; receivers put back on ' + restored : ''),
     timestamp: date, runningTotal: 0 }, opId || '');
   const notBack = expected.filter((e) => !(e.mill && back[e.id + '|' + e.mill]) && !(e.tk && back[e.id + '|#' + e.tk]))
     .map((e) => e.ticket + ' (' + e.id + ')');
-  return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, total: n,
+  const repeats = Object.keys(usedTimes).filter((t) => usedTimes[t] > 1).map((t) => t + ' ×' + usedTimes[t]);
+  const alsoOpen = Object.keys(usedTimes).filter((t) => openTickets[t]);
+  return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, used: counts['Used'] || 0, usedTab, total: n,
+    usedBadDate: badDate.slice(0, 100), usedBadDateCount: badDate.length, usedFutureDate: futureDate.slice(0, 100), usedFutureDateCount: futureDate.length,
+    usedRepeats: repeats.slice(0, 100), usedRepeatCount: repeats.length, usedAlsoOpen: alsoOpen.slice(0, 100), usedAlsoOpenCount: alsoOpen.length,
     receiversRestored: restored, receiversNotBack: notBack.slice(0, 100), receiversNotBackCount: notBack.length, receiverConflicts: conflicts.slice(0, 100),
     firstSkid: n ? fmtId('SKD-', 1) : '', lastSkid: n ? fmtId('SKD-', n) : '', columns: header.length };
 }
@@ -3773,7 +3823,8 @@ async function getDepartmentReport(sheets, start, end, dept) {
     const rows = [];
     master.rows.forEach((o) => {
       if ((o['Status'] || '') !== STATUS.USED) return;
-      if (String(o['Used Via'] || '') !== 'Direct') return;   // only the quick-mark flow, not runs/slitter
+      const via = String(o['Used Via'] || '');
+      if (via !== 'Direct' && via !== IMPORT_USED_VIA) return;   // the quick-mark flow (and Access's list, imported), not runs/slitter
       if (!inRange(usedAt(o), start, end)) return;
       rows.push(Object.assign(tr(o), { date: toYMD(usedAt(o)), litho: num(o['Litho']), cost: num(o['Cost']) }));   // date only
     });

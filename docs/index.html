@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.53.0</span>
+      <span class="version" id="appVersion">v1.54.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1005,10 +1005,11 @@
         '<div class="sub" id="dbSnapshotMsg" style="margin-top:8px"></div>' +
       '</div>' +
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
-        '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP tabs</h3>' +
-        '<div class="sub" style="margin-bottom:10px">Paste your Access data into two tabs named <b>Current</b> and <b>WIP</b> in this spreadsheet. This rebuilds <b>Steel Tickets</b> from those tabs: each row becomes a clean skid (fresh Skid ID; Status from which tab it came from) in single, non-duplicated columns.</div>' +
+        '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP + Used in Production tabs</h3>' +
+        '<div class="sub" style="margin-bottom:10px">Paste your Access data into tabs named <b>Current</b>, <b>WIP</b> and <b>Used in Production</b> in this spreadsheet. This rebuilds <b>Steel Tickets</b> from those tabs: each row becomes a clean skid (fresh Skid ID; Status from which tab it came from) in single, non-duplicated columns.</div>' +
+        '<div class="sub" style="margin-bottom:10px">Every row on <b>Used in Production</b> comes in as <b>Used</b>, with the date it was used taken from its <b>Date Used</b> (260601-001 = June 1, 2026). No Used in Production tab = only Current and WIP are imported.</div>' +
         '<div class="sub" style="margin-bottom:10px;color:#b26a00"><b>This wipes the current Steel Tickets tab and the Transactions audit log</b> and replaces them. Make a backup copy of the sheet first (File → Make a copy). Re-run it any time you refresh the Access data.</div>' +
-        '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP</button>' +
+        '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP + Used</button>' +
       '</div>';
     Array.prototype.forEach.call(view.querySelectorAll('[data-dbt]'), function (b) {
       b.onclick = function () {
@@ -1424,7 +1425,7 @@
     var d = drvData, searched = d.millCount - d.unsearched;
     var html = '<button class="btn secondary" id="drvBack" style="margin-bottom:10px">&larr; All receivers</button>' +
       '<div class="card"><h3 style="margin-top:0">Find receivers in Drive</h3>' +
-      '<div class="sub" style="margin-bottom:8px">Searches the receiver scans in the ' + drvArchiveLink(d) + ' folder (and every folder inside it) for the mill number of every ticket that has no receiver yet. Drive reads the text in scanned PDFs, so most are found; handwritten or blurry ones, or a misread digit, may not be. Nothing is saved until you approve it.</div>' +
+      '<div class="sub" style="margin-bottom:8px">Searches the receiver scans in the ' + drvArchiveLink(d) + ' folder (and every folder inside it, except anything titled Production Slips) for the mill number of every ticket that has no receiver yet. Drive reads the text in scanned PDFs, so most are found; handwritten or blurry ones, or a misread digit, may not be. Nothing is saved until you approve it.</div>' +
       '<div style="font-weight:600">' + d.millCount + ' mill number' + (d.millCount === 1 ? '' : 's') + ' on tickets with no receiver &middot; ' + searched + ' searched &middot; ' +
         d.groups.length + ' file' + (d.groups.length === 1 ? '' : 's') + ' found &middot; ' + d.misses.length + ' not found' + (d.unsearched ? ' &middot; <span style="color:var(--warn)">' + d.unsearched + ' not searched yet</span>' : '') + '</div>' +
       (d.noMill ? '<div class="sub">' + d.noMill + ' ticket' + (d.noMill === 1 ? ' has' : 's have') + ' no mill number (or one made of several), so ' + (d.noMill === 1 ? 'it' : 'they') + ' can’t be searched — add ' + (d.noMill === 1 ? 'it' : 'them') + ' by hand.</div>' : '') +
@@ -1836,23 +1837,30 @@
       });
   }
 
-  // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP staging tabs.
+  // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP/Used in Production staging tabs.
   function dbFreshImport() {
-    showConfirm('Wipe and re-import from Current + WIP?',
-      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current and WIP tabs. Receivers are kept: each ticket goes back on the receiver that saved its mill (or ticket) number. Make sure you have a backup copy of the sheet. Continue?',
+    showConfirm('Wipe and re-import from Current + WIP + Used?',
+      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current, WIP and Used in Production tabs (everything on Used in Production comes in as Used, dated by its Date Used). Receivers are kept: each ticket goes back on the receiver that saved its mill (or ticket) number. Make sure you have a backup copy of the sheet. Continue?',
       function () {
         var btn = document.getElementById('dbImportBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
         runMutation('importStaging', [newOpId()],
           function (res) {
-            var cur = (res && res.current) || 0, wip = (res && res.wip) || 0, total = (res && res.total) || 0;
+            var cur = (res && res.current) || 0, wip = (res && res.wip) || 0, used = (res && res.used) || 0, total = (res && res.total) || 0;
+            var some = function (list, count) { return list.slice(0, 30).join(', ') + (count > 30 ? '…' : ''); };
             allCache = []; dbData.steel = null; dbData.tx = null; rcvData = null; msData = null;   // force a full reload
             ensureAllCache(function () {});
             showInfo('Import complete',
-              'Imported ' + total + ' skid' + (total === 1 ? '' : 's') + ' — ' + cur + ' Current, ' + wip + ' WIP.' +
+              'Imported ' + total + ' skid' + (total === 1 ? '' : 's') + ' — ' + cur + ' Current, ' + wip + ' WIP' +
+              (res && res.usedTab ? ', ' + used + ' Used (from ' + res.usedTab + ')' : '') + '.' +
+              (res && !res.usedTab ? ' No Used in Production tab was found, so no used skids came in.' : '') +
+              (res && res.usedBadDateCount ? ' ' + res.usedBadDateCount + ' used ticket' + (res.usedBadDateCount === 1 ? '' : 's') + ' had a Date Used that isn’t a real date, so no used date was saved: ' + some(res.usedBadDate, res.usedBadDateCount) + '.' : '') +
+              (res && res.usedFutureDateCount ? ' ' + res.usedFutureDateCount + ' used ticket' + (res.usedFutureDateCount === 1 ? '' : 's') + ' had a Date Used in the future (a typo?) — check: ' + some(res.usedFutureDate, res.usedFutureDateCount) + '.' : '') +
+              (res && res.usedRepeatCount ? ' ' + res.usedRepeatCount + ' ticket' + (res.usedRepeatCount === 1 ? ' is' : 's are') + ' on Used in Production more than once (each came in as its own Used row): ' + some(res.usedRepeats, res.usedRepeatCount) + '.' : '') +
+              (res && res.usedAlsoOpenCount ? ' ' + res.usedAlsoOpenCount + ' ticket' + (res.usedAlsoOpenCount === 1 ? ' is' : 's are') + ' on Used in Production and also on Current / WIP: ' + some(res.usedAlsoOpen, res.usedAlsoOpenCount) + '.' : '') +
               (res && res.firstSkid ? ' Skid IDs ' + res.firstSkid + '–' + res.lastSkid + '.' : '') +
               (res && res.receiversRestored != null ? ' Receivers put back on ' + res.receiversRestored + ' ticket' + (res.receiversRestored === 1 ? '' : 's') + '.' : '') +
-              (res && res.receiversNotBackCount ? ' ' + res.receiversNotBackCount + ' ticket' + (res.receiversNotBackCount === 1 ? '' : 's') + ' that had a receiver didn’t come back on it (not in Current / WIP, or the mill and ticket number changed): ' +
+              (res && res.receiversNotBackCount ? ' ' + res.receiversNotBackCount + ' ticket' + (res.receiversNotBackCount === 1 ? '' : 's') + ' that had a receiver didn’t come back on it (not in Current / WIP / Used, or the mill and ticket number changed): ' +
                 res.receiversNotBack.slice(0, 30).join(', ') + (res.receiversNotBackCount > 30 ? '…' : '') + '.' : '') +
               (res && res.receiverConflicts && res.receiverConflicts.length ? ' ' + res.receiverConflicts.length + ' matched two receivers and were left off: ' + res.receiverConflicts.slice(0, 30).join(', ') + '.' : ''),
               function () { renderDatabaseHome(); });
@@ -1860,7 +1868,7 @@
           function (err) {
             toast('Import failed: ' + (err && err.message ? err.message : 'unknown error'));
             var b2 = document.getElementById('dbImportBtn');
-            if (b2) { b2.disabled = false; b2.textContent = 'Wipe & import from Current + WIP'; }
+            if (b2) { b2.disabled = false; b2.textContent = 'Wipe & import from Current + WIP + Used'; }
           });
       }, 'Wipe & import', 'danger');
   }
