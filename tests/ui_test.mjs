@@ -979,18 +979,18 @@ const base = {
 // ---- 26. Fresh Import with Used in Production: the result names the used count and what to check
 { const { page, calls } = await boot(Object.assign({}, base, {
     getMasterSheet: () => R({ rows: [], receivers: [] }),
-    importStaging: () => R({ ok: true, current: 2, wip: 1, used: 5, usedTab: 'Used in Production', total: 8, firstSkid: 'SKD-000001', lastSkid: 'SKD-000008',
+    importStaging: () => R({ ok: true, current: 2, wip: 1, used: 5, usedLines: 7, usedTab: 'Used In Production', total: 8, firstSkid: 'SKD-000001', lastSkid: 'SKD-000008',
       usedBadDate: ['091126-013 (261340-001)'], usedBadDateCount: 1, usedFutureDate: ['091126-012 (290918-001)'], usedFutureDateCount: 1,
-      usedRepeats: ['040226-004 ×2'], usedRepeatCount: 1, usedAlsoOpen: ['040226-004'], usedAlsoOpenCount: 1, receiversRestored: 0, receiversNotBack: [], receiversNotBackCount: 0, receiverConflicts: [] }),
+      usedMultiDay: ['081826-007 (3 days)'], usedMultiDayCount: 1, usedAlsoOpen: ['040226-004'], usedAlsoOpenCount: 1, receiversRestored: 0, receiversNotBack: [], receiversNotBackCount: 0, receiverConflicts: [] }),
   }));
   await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
   ok('import card names the Used in Production tab', (await page.textContent('#dbImportBtn')).includes('Used') && (await page.textContent('#view')).includes('Date Used'));
   await page.click('#dbImportBtn'); await page.waitForSelector('#modalOk');
-  ok('confirm says used rows come in as Used', (await page.textContent('#modalRoot')).includes('comes in as Used'));
+  ok('confirm says used tickets come in once as Used', (await page.textContent('#modalRoot')).includes('comes in once as Used'));
   await page.click('#modalOk'); await page.waitForTimeout(500);
   const txt = (await page.textContent('#modalRoot')) || '';
-  ok('result: used count, bad / future dates, repeats', txt.includes('5 Used (from Used in Production)') && txt.includes('091126-013 (261340-001)') && txt.includes('290918-001')
-    && txt.includes('040226-004 ×2') && txt.includes('also on Current / WIP'), txt);
+  ok('result: used count, bad / future dates, multi-day, still open', txt.includes('5 Used (from 7 lines on Used In Production)') && txt.includes('091126-013 (261340-001)') && txt.includes('290918-001')
+    && txt.includes('dated the last day') && txt.includes('081826-007 (3 days)') && txt.includes('still on Current / WIP (partly used), so it stays open') && txt.includes('040226-004'), txt);
   ok('import called once', calls.filter((c) => c.fn === 'importStaging').length === 1);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();

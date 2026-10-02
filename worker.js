@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'used-62', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'used-63', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3016,14 +3016,43 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
 // Access data is refreshed. Transactions is cleared too, so a reused SKD id can't inherit an
 // old skid's history. opId-deduped like the other mutations.
 const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
-// Optional third tab: Access's "Used in Production" list. Every row comes in as a Used skid with
-// Used At from its 'Date Used' (Access writes it YYMMDD-NNN: 260601-001 = 2026-06-01; only the
-// date is used, the -NNN means nothing). The first of these names that exists is read; none = no used skids imported.
+// Optional third tab: Access's "Used in Production" list (one line per day a ticket was used).
+// Each ticket comes in ONCE as a Used skid, dated the last day it was used; the other days are
+// listed in its System Notes. 'Date Used' is YYMMDD-NNN (260601-001 = 2026-06-01; only the date
+// counts, the -NNN means nothing). A ticket still on Current / WIP was only partly used: it stays
+// that one open skid, with the days it was used in its System Notes (no Used row, so its steel
+// isn't counted twice). The first of these tab names that exists is read (any capitals); none = no used skids.
 const IMPORT_USED_TABS = ['Used in Production', 'Used'];
 const IMPORT_USED_VIA = 'Import';   // 'Used Via' on imported used skids (history shows "via Import")
 
 // 'Date Used' -> yyyy-MM-dd, or '' when it isn't a real date. YYMMDD[-NNN] first; a plain date
 // ("2026-06-01", "6/1/2026") or a Sheets date serial also works.
+// One row per ticket from the Used in Production lines. open: {ticket: 1} for Current / WIP tickets.
+function collapseUsed(lines, open, today) {
+  const by = {}, order = [], bad = [], future = [];
+  lines.forEach((o, i) => {
+    const tk = String(o['Ticket']).trim(), raw = String(o['Date Used'] == null ? '' : o['Date Used']).trim();
+    const on = importUsedDate(o['Date Used']);
+    if (!on) bad.push(tk + ' (' + (raw || 'blank') + ')');
+    else if (on > today) future.push(tk + ' (' + raw + ')');
+    if (!by[tk]) { by[tk] = []; order.push(tk); }
+    by[tk].push({ o, on, raw, i });
+  });
+  const rows = [], openNotes = {}, multi = [], alsoOpen = [];
+  order.forEach((tk) => {
+    const L = by[tk].slice().sort((a, b) => (a.on || '9') < (b.on || '9') ? -1 : (a.on || '9') > (b.on || '9') ? 1 : a.i - b.i);
+    const days = L.map((x) => (x.on || x.raw || '?') + (x.o['QTY/LOAD'] != null && String(x.o['QTY/LOAD']).trim() !== '' ? ' (QTY ' + x.o['QTY/LOAD'] + ')' : '')).join(', ');
+    if (open[tk]) { alsoOpen.push(tk); openNotes[tk] = 'Used in production ' + days + ' (from Access)'; return; }
+    const dated = L.filter((x) => x.on), last = dated.length ? dated[dated.length - 1] : L[L.length - 1];
+    const o = Object.assign({}, last.o);
+    o['Date Used'] = L.map((x) => x.raw).filter(Boolean).join(', ');
+    o.__usedOn = last.on || '';
+    if (L.length > 1) { multi.push(tk + ' (' + L.length + ' days)'); o.__note = 'Used in production on ' + L.length + ' days: ' + days; }
+    rows.push(o);
+  });
+  return { rows, openNotes, multi, alsoOpen, bad, future };
+}
+
 function importUsedDate(v) {
   if (typeof v === 'number' && v > 20000 && v < 80000) return serialToYMD(v, TZ);
   const t = String(v == null ? '' : v).trim();
@@ -3080,13 +3109,20 @@ async function importStaging(sheets, opId) {
     const rows = data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '');
     parts.push({ tabName, status, headers: data.headers, rows });
   }
-  const titles = ((await sheets.meta()).sheets || []).map((x) => x.properties && x.properties.title);
-  const usedTab = IMPORT_USED_TABS.filter((name) => titles.indexOf(name) !== -1)[0] || '';
+  const titles = ((await sheets.meta()).sheets || []).map((x) => String((x.properties && x.properties.title) || ''));
+  let usedTab = '';
+  for (const name of IMPORT_USED_TABS) { usedTab = titles.filter((t) => t.trim().toLowerCase() === name.toLowerCase())[0] || ''; if (usedTab) break; }
+  let used = { rows: [], openNotes: {}, multi: [], alsoOpen: [], bad: [], future: [] }, usedLines = 0;
   if (usedTab) {
     const data = await readObjects(sheets, usedTab);
     if (!data.headers.length || data.headers.indexOf('Ticket') === -1) throw new Error('The "' + usedTab + '" tab needs a header row with a "Ticket" column.');
     if (data.headers.indexOf('Date Used') === -1) throw new Error('The "' + usedTab + '" tab needs a "Date Used" column (like 260601-001).');
-    parts.push({ tabName: 'Used', status: STATUS.USED, headers: data.headers, rows: data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '') });
+    const lines = data.rows.filter((o) => String(o['Ticket'] || '').trim() !== '');
+    const open = {};
+    parts.forEach((p) => p.rows.forEach((o) => { open[String(o['Ticket']).trim()] = 1; }));
+    used = collapseUsed(lines, open, todayYMD());
+    usedLines = lines.length;
+    parts.push({ tabName: 'Used', status: STATUS.USED, headers: data.headers, rows: used.rows });
   }
 
   // 2) Clean Steel Tickets header: Ticket, Skid ID, Status, then every source column (union across
@@ -3141,9 +3177,6 @@ async function importStaging(sheets, opId) {
   let n = 0, restored = 0;
   const counts = { Current: 0, WIP: 0, Used: 0 };
   const back = {}, conflicts = [];   // back: "R-x|mill" / "R-x|#ticket" that found its ticket again
-  const today = todayYMD();
-  const badDate = [], futureDate = [], usedTimes = {}, openTickets = {};
-  parts.forEach((p) => { if (p.status !== STATUS.USED) p.rows.forEach((o) => { openTickets[String(o['Ticket']).trim()] = 1; }); });
   for (const p of parts) {
     for (const o of p.rows) {
       n += 1;
@@ -3154,14 +3187,11 @@ async function importStaging(sheets, opId) {
       rec['Status'] = p.status;
       rec['Last Updated At'] = date;
       rec['Last Updated By'] = 'import';
+      const sysNote = p.status === STATUS.USED ? o.__note : used.openNotes[String(o['Ticket']).trim()];
+      if (sysNote) rec['System Notes'] = String(rec['System Notes'] || '').trim() ? rec['System Notes'] + ' | ' + sysNote : sysNote;
       if (p.status === STATUS.USED) {
-        const raw = String(o['Date Used'] == null ? '' : o['Date Used']).trim(), tk = String(o['Ticket']).trim();
-        const on = importUsedDate(o['Date Used']);
-        rec['Used At'] = on;
+        rec['Used At'] = o.__usedOn;
         rec['Used Via'] = IMPORT_USED_VIA;
-        if (!on) badDate.push(tk + ' (' + (raw || 'blank') + ')');
-        else if (on > today) futureDate.push(tk + ' (' + raw + ')');
-        usedTimes[tk] = (usedTimes[tk] || 0) + 1;
       }
       if (look && !String(rec['Receiver'] || '').trim()) {
         const mt = matchReceiver(look, o['Mill'], o['Ticket']);
@@ -3187,11 +3217,9 @@ async function importStaging(sheets, opId) {
     timestamp: date, runningTotal: 0 }, opId || '');
   const notBack = expected.filter((e) => !(e.mill && back[e.id + '|' + e.mill]) && !(e.tk && back[e.id + '|#' + e.tk]))
     .map((e) => e.ticket + ' (' + e.id + ')');
-  const repeats = Object.keys(usedTimes).filter((t) => usedTimes[t] > 1).map((t) => t + ' ×' + usedTimes[t]);
-  const alsoOpen = Object.keys(usedTimes).filter((t) => openTickets[t]);
-  return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, used: counts['Used'] || 0, usedTab, total: n,
-    usedBadDate: badDate.slice(0, 100), usedBadDateCount: badDate.length, usedFutureDate: futureDate.slice(0, 100), usedFutureDateCount: futureDate.length,
-    usedRepeats: repeats.slice(0, 100), usedRepeatCount: repeats.length, usedAlsoOpen: alsoOpen.slice(0, 100), usedAlsoOpenCount: alsoOpen.length,
+  return { ok: true, current: counts['Current'] || 0, wip: counts['WIP'] || 0, used: counts['Used'] || 0, usedTab, usedLines, total: n,
+    usedBadDate: used.bad.slice(0, 100), usedBadDateCount: used.bad.length, usedFutureDate: used.future.slice(0, 100), usedFutureDateCount: used.future.length,
+    usedMultiDay: used.multi.slice(0, 100), usedMultiDayCount: used.multi.length, usedAlsoOpen: used.alsoOpen.slice(0, 100), usedAlsoOpenCount: used.alsoOpen.length,
     receiversRestored: restored, receiversNotBack: notBack.slice(0, 100), receiversNotBackCount: notBack.length, receiverConflicts: conflicts.slice(0, 100),
     firstSkid: n ? fmtId('SKD-', 1) : '', lastSkid: n ? fmtId('SKD-', n) : '', columns: header.length };
 }

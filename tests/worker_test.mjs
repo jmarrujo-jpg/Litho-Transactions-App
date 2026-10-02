@@ -839,40 +839,53 @@ await concurrency(envBase, 'in-worker lock');
   ok('drive: archive folder not shared -> says to share it', !ns.ok && /Share it with the service account/.test(ns.error), ns);
 }
 
-// 27. Fresh Import with a "Used in Production" tab: every row comes in Used, Used At from its
-//     Date Used (YYMMDD-NNN); bad / future dates, repeats and tickets also still open are reported.
+// 27. Fresh Import with a "Used In Production" tab (any capitals): each ticket comes in once as Used,
+//     dated the last day it was used, the other days in System Notes; a ticket still on Current / WIP
+//     stays open with its used days noted; bad / future dates are reported.
 { const f = fresh();
   const addTab = (name, rows) => { f.books[SID].tabs[name] = { id: 960 + f.books[SID].order.length, rows, rowCount: 1000, colCount: 40 }; f.books[SID].order.push(name); };
-  addTab('Current', [['Ticket', 'QTY/LOAD', 'Mill'], ['040226-004', 1568, '3060609'], ['500', 10, 'M5']]);
-  addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill']]);
+  addTab('Current', [['Ticket', 'QTY/LOAD', 'Mill'], ['500', 10, 'M5']]);
+  addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill'], ['101425-005', 975, '467268']]);
   const U = ['Date Used', 'Ticket', 'Row', 'Supplier', 'Weight', 'Cost', 'Litho', 'Mill', 'QTY/LOAD', 'PO Number'];
-  addTab('Used in Production', [U,
-    ['260601-001', '040226-004', 'W-045', 'RN', '3,835.00', '$67.31', '', '3060609', 1568, '8168-DC'],
-    ['260603-004', '040226-004', 'L-037', 'RN', '3,835.00', '$67.31', '', '3060609', 1568, '8168-DC'],
+  addTab('Used In Production', [U,
+    ['260918-002', '081826-007', 'M-001', 'RN', '4,570.00', '$71.62', '', '3076992', 1568, '8474-DC'],
+    ['260916-005', '081826-007', 'M-001', 'RN', '4,570.00', '$71.62', '', '3076992', 1568, '8474-DC'],
+    ['260924-004', '081826-007', 'M-001', 'RN', '4,570.00', '$71.62', '', '3076992', 368, '8474-DC'],
     ['260605-001', '031626-100', 'M-001', 'KG', '5,435.00', '$84.63', '19.38', 'DOK0298C01', 1300, '7756-DC'],
     ['290918-001', '091126-012', '', 'RN', '2,565.00', '$72.37', '0', '3082865', 1031, '8780-DC'],
     ['261340-001', '091126-013', '', 'RN', '10', '$1', '', 'X1', 1, ''],
+    ['260720-005', '101425-005', 'W-013', 'LS', '3,897.00', '$78.85', '9.69', '467268', 527, '7323-DC'],
     ['', '', '', '', '', '', '', '', '', '']]);
   const imp = await call('importStaging', ['op-27-i']);
   const st = f.rows(SID, 'Steel Tickets');
   const used = st.filter((r) => r['Status'] === 'Used');
-  ok('used import: counts', imp.ok && imp.result.current === 2 && imp.result.used === 5 && imp.result.total === 7 && imp.result.usedTab === 'Used in Production', imp);
-  ok('used import: Used rows after Current / WIP with new Skid IDs', used.length === 5 && used[0]['Skid ID'] === 'SKD-000003', used.map((r) => r['Skid ID']));
-  const kg = used.filter((r) => r['Ticket'] === '031626-100')[0];
+  const row = (t) => st.filter((r) => r['Ticket'] === t);
+  ok('used import: counts (one Used row per ticket)', imp.ok && imp.result.current === 1 && imp.result.wip === 1 && imp.result.used === 4 && imp.result.usedLines === 7
+    && imp.result.total === 6 && imp.result.usedTab === 'Used In Production', imp);
+  ok('used import: Used rows after Current / WIP with new Skid IDs', used.length === 4 && used[0]['Skid ID'] === 'SKD-000003', used.map((r) => r['Skid ID']));
+  const kg = row('031626-100')[0];
   ok('used import: date used recorded, every column carried', kg['Used At'] === '2026-06-05' && kg['Used Via'] === 'Import' && kg['Date Used'] === '260605-001'
-    && kg['Row'] === 'M-001' && kg['Supplier'] === 'KG' && kg['Mill'] === 'DOK0298C01' && kg['PO Number'] === '7756-DC', kg);
-  ok('used import: a bad date is blank and reported', !used.filter((r) => r['Ticket'] === '091126-013')[0]['Used At'] && imp.result.usedBadDate.join() === '091126-013 (261340-001)', imp.result);
-  ok('used import: a future date is kept but reported', used.filter((r) => r['Ticket'] === '091126-012')[0]['Used At'] === '2029-09-18' && imp.result.usedFutureDate.join() === '091126-012 (290918-001)', imp.result);
-  ok('used import: repeats and still-open tickets reported', imp.result.usedRepeats.join() === '040226-004 ×2' && imp.result.usedAlsoOpen.join() === '040226-004', imp.result);
-  ok('used import: logged', /Used 5\)/.test(f.rows(SID, 'Transactions').filter((r) => r['Item'] === 'FRESH IMPORT')[0]['Notes'] || ''), f.rows(SID, 'Transactions'));
-  // "$84.63" reads as 84.63 (not 0) in the reports; imported used skids show in the used-in-production report.
-  const rp = await call('getDepartmentReport', ['2026-06-01', '2026-06-30', 'direct']);
+    && kg['Row'] === 'M-001' && kg['Supplier'] === 'KG' && kg['Mill'] === 'DOK0298C01' && kg['PO Number'] === '7756-DC' && !kg['System Notes'], kg);
+  const md = row('081826-007');
+  ok('used import: used on several days -> one row, the last day, every day noted', md.length === 1 && md[0]['Used At'] === '2026-09-24' && md[0]['QTY/LOAD'] === '368'
+    && md[0]['Date Used'] === '260916-005, 260918-002, 260924-004'
+    && md[0]['System Notes'] === 'Used in production on 3 days: 2026-09-16 (QTY 1568), 2026-09-18 (QTY 1568), 2026-09-24 (QTY 368)'
+    && imp.result.usedMultiDay.join() === '081826-007 (3 days)', [md, imp.result.usedMultiDay]);
+  const op = row('101425-005');
+  ok('used import: still on WIP -> stays one WIP skid, the used day noted', op.length === 1 && op[0]['Status'] === 'WIP' && !op[0]['Used At']
+    && op[0]['System Notes'] === 'Used in production 2026-07-20 (QTY 527) (from Access)' && imp.result.usedAlsoOpen.join() === '101425-005', [op, imp.result.usedAlsoOpen]);
+  ok('used import: a bad date is blank and reported', !row('091126-013')[0]['Used At'] && imp.result.usedBadDate.join() === '091126-013 (261340-001)', imp.result);
+  ok('used import: a future date is kept but reported', row('091126-012')[0]['Used At'] === '2029-09-18' && imp.result.usedFutureDate.join() === '091126-012 (290918-001)', imp.result);
+  ok('used import: logged', /Used 4\)/.test(f.rows(SID, 'Transactions').filter((r) => r['Item'] === 'FRESH IMPORT')[0]['Notes'] || ''), f.rows(SID, 'Transactions'));
+  // "$84.63" reads as 84.63 (not 0) in the reports; a multi-day ticket is counted once.
+  const rp = await call('getDepartmentReport', ['2026-06-01', '2026-09-30', 'direct']);
   const rows = rp.ok ? (rp.result.sections || []).filter((x) => x.key === 'direct')[0].rows : [];
-  ok('used import: in the used report with cost', rows.length === 3 && rows.filter((r) => r.ticket === '031626-100')[0].cost === 84.63, rp);
+  ok('used import: in the used report once each, with cost', rows.length === 2 && rows.filter((r) => r.ticket === '031626-100')[0].cost === 84.63
+    && rows.filter((r) => r.ticket === '081826-007').length === 1, rows);
   // No Used tab: Current / WIP only, as before.
-  delete f.books[SID].tabs['Used in Production']; f.books[SID].order = f.books[SID].order.filter((n) => n !== 'Used in Production');
+  delete f.books[SID].tabs['Used In Production']; f.books[SID].order = f.books[SID].order.filter((n) => n !== 'Used In Production');
   const imp2 = await call('importStaging', ['op-27-j']);
-  ok('used import: no tab -> skipped', imp2.ok && imp2.result.used === 0 && imp2.result.usedTab === '' && imp2.result.total === 2, imp2);
+  ok('used import: no tab -> skipped', imp2.ok && imp2.result.used === 0 && imp2.result.usedTab === '' && imp2.result.total === 2 && !f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === '101425-005')[0]['System Notes'], imp2);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.54.0</span>
+      <span class="version" id="appVersion">v1.55.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1007,7 +1007,7 @@
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
         '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP + Used in Production tabs</h3>' +
         '<div class="sub" style="margin-bottom:10px">Paste your Access data into tabs named <b>Current</b>, <b>WIP</b> and <b>Used in Production</b> in this spreadsheet. This rebuilds <b>Steel Tickets</b> from those tabs: each row becomes a clean skid (fresh Skid ID; Status from which tab it came from) in single, non-duplicated columns.</div>' +
-        '<div class="sub" style="margin-bottom:10px">Every row on <b>Used in Production</b> comes in as <b>Used</b>, with the date it was used taken from its <b>Date Used</b> (260601-001 → June 1, 2026; the number after the dash is ignored). No Used in Production tab = only Current and WIP are imported.</div>' +
+        '<div class="sub" style="margin-bottom:10px">Each ticket on <b>Used in Production</b> comes in once as <b>Used</b>, dated by its <b>Date Used</b> (260601-001 → June 1, 2026; the number after the dash is ignored). A ticket used on several days is dated the last day, with every day in its System Notes. A ticket still on Current / WIP stays open, with the days it was used noted. No Used in Production tab = only Current and WIP are imported.</div>' +
         '<div class="sub" style="margin-bottom:10px;color:#b26a00"><b>This wipes the current Steel Tickets tab and the Transactions audit log</b> and replaces them. Make a backup copy of the sheet first (File → Make a copy). Re-run it any time you refresh the Access data.</div>' +
         '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP + Used</button>' +
       '</div>';
@@ -1840,7 +1840,7 @@
   // Fresh-start import: wipe Steel Tickets + audit log and rebuild from the Current/WIP/Used in Production staging tabs.
   function dbFreshImport() {
     showConfirm('Wipe and re-import from Current + WIP + Used?',
-      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current, WIP and Used in Production tabs (everything on Used in Production comes in as Used, dated by its Date Used). Receivers are kept: each ticket goes back on the receiver that saved its mill (or ticket) number. Make sure you have a backup copy of the sheet. Continue?',
+      'This DELETES everything in Steel Tickets and Transactions, then rebuilds Steel Tickets from the Current, WIP and Used in Production tabs (each ticket on Used in Production comes in once as Used, dated the last day it was used). Receivers are kept: each ticket goes back on the receiver that saved its mill (or ticket) number. Make sure you have a backup copy of the sheet. Continue?',
       function () {
         var btn = document.getElementById('dbImportBtn');
         if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
@@ -1852,12 +1852,12 @@
             ensureAllCache(function () {});
             showInfo('Import complete',
               'Imported ' + total + ' skid' + (total === 1 ? '' : 's') + ' — ' + cur + ' Current, ' + wip + ' WIP' +
-              (res && res.usedTab ? ', ' + used + ' Used (from ' + res.usedTab + ')' : '') + '.' +
+              (res && res.usedTab ? ', ' + used + ' Used (from ' + (res.usedLines || used) + ' line' + ((res.usedLines || used) === 1 ? '' : 's') + ' on ' + res.usedTab + ')' : '') + '.' +
               (res && !res.usedTab ? ' No Used in Production tab was found, so no used skids came in.' : '') +
               (res && res.usedBadDateCount ? ' ' + res.usedBadDateCount + ' used ticket' + (res.usedBadDateCount === 1 ? '' : 's') + ' had a Date Used that isn’t a real date, so no used date was saved: ' + some(res.usedBadDate, res.usedBadDateCount) + '.' : '') +
               (res && res.usedFutureDateCount ? ' ' + res.usedFutureDateCount + ' used ticket' + (res.usedFutureDateCount === 1 ? '' : 's') + ' had a Date Used in the future (a typo?) — check: ' + some(res.usedFutureDate, res.usedFutureDateCount) + '.' : '') +
-              (res && res.usedRepeatCount ? ' ' + res.usedRepeatCount + ' ticket' + (res.usedRepeatCount === 1 ? ' is' : 's are') + ' on Used in Production more than once (each came in as its own Used row): ' + some(res.usedRepeats, res.usedRepeatCount) + '.' : '') +
-              (res && res.usedAlsoOpenCount ? ' ' + res.usedAlsoOpenCount + ' ticket' + (res.usedAlsoOpenCount === 1 ? ' is' : 's are') + ' on Used in Production and also on Current / WIP: ' + some(res.usedAlsoOpen, res.usedAlsoOpenCount) + '.' : '') +
+              (res && res.usedMultiDayCount ? ' ' + res.usedMultiDayCount + ' ticket' + (res.usedMultiDayCount === 1 ? ' was' : 's were') + ' used on more than one day — each came in once, dated the last day, with every day in its System Notes: ' + some(res.usedMultiDay, res.usedMultiDayCount) + '.' : '') +
+              (res && res.usedAlsoOpenCount ? ' ' + res.usedAlsoOpenCount + ' ticket' + (res.usedAlsoOpenCount === 1 ? ' is' : 's are') + ' on Used in Production but still on Current / WIP (partly used), so ' + (res.usedAlsoOpenCount === 1 ? 'it stays' : 'they stay') + ' open with the days used in System Notes: ' + some(res.usedAlsoOpen, res.usedAlsoOpenCount) + '.' : '') +
               (res && res.firstSkid ? ' Skid IDs ' + res.firstSkid + '–' + res.lastSkid + '.' : '') +
               (res && res.receiversRestored != null ? ' Receivers put back on ' + res.receiversRestored + ' ticket' + (res.receiversRestored === 1 ? '' : 's') + '.' : '') +
               (res && res.receiversNotBackCount ? ' ' + res.receiversNotBackCount + ' ticket' + (res.receiversNotBackCount === 1 ? '' : 's') + ' that had a receiver didn’t come back on it (not in Current / WIP / Used, or the mill and ticket number changed): ' +
