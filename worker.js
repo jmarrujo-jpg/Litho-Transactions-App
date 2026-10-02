@@ -3017,8 +3017,8 @@ async function updateRawRow(sheets, tableKey, rowNum, fields, opId) {
 // old skid's history. opId-deduped like the other mutations.
 const IMPORT_TABS = [['Current', STATUS.CURRENT], ['WIP', STATUS.WIP]];
 // Optional third tab: Access's "Used in Production" list. Every row comes in as a Used skid with
-// Used At from its 'Date Used' (Access writes it YYMMDD-NNN: 260601-001 = 2026-06-01, the -NNN is
-// that day's count). The first of these names that exists is read; none = no used skids imported.
+// Used At from its 'Date Used' (Access writes it YYMMDD-NNN: 260601-001 = 2026-06-01; only the
+// date is used, the -NNN means nothing). The first of these names that exists is read; none = no used skids imported.
 const IMPORT_USED_TABS = ['Used in Production', 'Used'];
 const IMPORT_USED_VIA = 'Import';   // 'Used Via' on imported used skids (history shows "via Import")
 

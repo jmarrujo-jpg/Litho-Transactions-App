@@ -1007,7 +1007,7 @@
       '<div class="card" style="margin-top:16px;border:1px solid #b26a00">' +
         '<h3 style="margin-top:0;font-size:15px">Fresh start — import from Current + WIP + Used in Production tabs</h3>' +
         '<div class="sub" style="margin-bottom:10px">Paste your Access data into tabs named <b>Current</b>, <b>WIP</b> and <b>Used in Production</b> in this spreadsheet. This rebuilds <b>Steel Tickets</b> from those tabs: each row becomes a clean skid (fresh Skid ID; Status from which tab it came from) in single, non-duplicated columns.</div>' +
-        '<div class="sub" style="margin-bottom:10px">Every row on <b>Used in Production</b> comes in as <b>Used</b>, with the date it was used taken from its <b>Date Used</b> (260601-001 = June 1, 2026). No Used in Production tab = only Current and WIP are imported.</div>' +
+        '<div class="sub" style="margin-bottom:10px">Every row on <b>Used in Production</b> comes in as <b>Used</b>, with the date it was used taken from its <b>Date Used</b> (260601-001 → June 1, 2026; the number after the dash is ignored). No Used in Production tab = only Current and WIP are imported.</div>' +
         '<div class="sub" style="margin-bottom:10px;color:#b26a00"><b>This wipes the current Steel Tickets tab and the Transactions audit log</b> and replaces them. Make a backup copy of the sheet first (File → Make a copy). Re-run it any time you refresh the Access data.</div>' +
         '<button class="btn warn" id="dbImportBtn" style="width:100%">Wipe &amp; import from Current + WIP + Used</button>' +
       '</div>';
