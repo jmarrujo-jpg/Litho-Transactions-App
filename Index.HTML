@@ -213,7 +213,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.56.0</span>
+      <span class="version" id="appVersion">v1.57.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1610,6 +1610,14 @@
     });
     return { steps: steps, skipped: skipped };
   }
+  // Google lets the app's account make about 60 Sheets reads a minute — shared with everyone using
+  // the app — and one approve takes about 8. So Approve all starts one file every DRV_PACE_MS, and
+  // if Google still says the limit is reached it waits a minute and carries on with the same file.
+  var DRV_PACE_MS = 12000, DRV_QUOTA_WAIT_S = 65, DRV_QUOTA_TRIES = 5;
+  function drvIsQuota(err) {
+    var m = String((err && err.message) || err || '');
+    return !/storage/i.test(m) && /\b429\b|quota|rate ?limit|too many requests|resource.?exhausted/i.test(m);
+  }
   function drvApproveAll() {
     if (drvBusy || !drvData) return;
     var plan = drvPlanAll(), steps = plan.steps;
@@ -1619,10 +1627,13 @@
     showConfirm('Approve all ' + steps.length + ' file' + (steps.length === 1 ? '' : 's') + '?',
       tks + ' ticket' + (tks === 1 ? '' : 's') + ' go on receivers: ' + news + ' new receiver' + (news === 1 ? '' : 's') + ' (each scan copied into the receivers folder with its name), ' +
       (steps.length - news) + ' file' + (steps.length - news === 1 ? '' : 's') + ' attached to the receiver ' + (steps.length - news === 1 ? 'it already is' : 'they already are') +
-      '. Each new receiver uses the date and supplier shown on its file (open Review to change one first). A ticket found in two files goes on the first one.' + skipTxt,
+      '. Each new receiver uses the date and supplier shown on its file (open Review to change one first). A ticket found in two files goes on the first one.' +
+      (steps.length > 1 ? ' To stay under Google’s per-minute limit (shared with the floor) it does about ' + Math.round(60000 / DRV_PACE_MS) + ' a minute, so this takes about ' + Math.max(1, Math.ceil(steps.length * DRV_PACE_MS / 60000)) + ' minute' + (Math.ceil(steps.length * DRV_PACE_MS / 60000) > 1 ? 's' : '') + ' — keep this page open.' : '') + skipTxt,
       function () {
         drvBusy = true;
-        var i = 0, made = [], attached = [], byHand = [], notChanged = 0;
+        var i = 0, made = [], attached = [], byHand = [], notChanged = 0, lastStart = 0, waits = 0;
+        var say = function (t) { drvProgress = t; var el = document.getElementById('drvProgress'); if (el) el.textContent = t; };
+        var later = function (ms, fn) { setTimeout(fn, ms); };
         var finish = function (err) {
           drvBusy = false; drvData = null; rcvData = null; msData = null;
           var msg = (made.length ? made.length + ' new receiver' + (made.length === 1 ? '' : 's') + ': ' + made.join(', ') + '. ' : '') +
@@ -1637,15 +1648,26 @@
         };
         var next = function () {
           if (i >= steps.length) { finish(null); return; }
+          var gap = lastStart ? DRV_PACE_MS - (Date.now() - lastStart) : 0;
+          if (gap > 0) { later(gap, next); return; }
+          lastStart = Date.now();
           var x = steps[i];
-          drvProgress = 'Approving ' + (i + 1) + ' of ' + steps.length + ': ' + x.g.name + '…';
-          var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
+          say('Approving ' + (i + 1) + ' of ' + steps.length + ': ' + x.g.name + '…' + (steps.length - i > 1 ? ' (about ' + Math.max(1, Math.ceil((steps.length - i) * DRV_PACE_MS / 60000)) + ' min left — keep this page open)' : ''));
           drvSend(x.g, x.ids, x.to, function (res) {
             if (res.created) made.push(res.receiver); else if (attached.indexOf(res.receiver) === -1) attached.push(res.receiver);
             if (res.copy && !res.copy.copied) byHand.push(res.copy.copyName);
             notChanged += (res.skipped || []).length;
-            i++; next();
-          }, finish);
+            waits = 0; i++; next();
+          }, function (err) {
+            if (!drvIsQuota(err) || ++waits > DRV_QUOTA_TRIES) { finish(err); return; }
+            var left = DRV_QUOTA_WAIT_S;
+            var tick = function () {
+              if (left <= 0) { lastStart = 0; next(); return; }
+              say('Google’s per-minute limit was reached — waiting ' + left + 's, then carrying on with ' + (i + 1) + ' of ' + steps.length + ' (nothing is lost).');
+              left--; later(1000, tick);
+            };
+            tick();
+          });
         };
         renderDriveView();
         next();

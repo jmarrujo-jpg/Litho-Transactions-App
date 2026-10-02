@@ -1016,6 +1016,7 @@ const base = {
       unassigned: [1, 2, 3, 4, 5, 6, 7].map(T), misses: [], groups: all.filter((g) => !done[g.fileId]).map((g) => n >= 3 && g.fileId === 'src-1' ? Object.assign({}, g, { madeFrom: ['R-00002'] }) : g) }),
     approveDriveMatch: (a) => {
       if (++n === 3) return { ok: false, error: 'Drive API 503: backend error' };
+      if (n === 5) return { ok: false, error: "Sheets API 429: Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute per user'" };
       done[a[0].fileId] = 1;
       const id = a[0].receiverId || ('R-0000' + next++);
       return R({ ok: true, receiver: id, name: a[0].receiverId ? '' : 'x--RN--' + id, created: !a[0].receiverId, copy: a[0].receiverId ? null : { copied: true, copyName: id + '.pdf' },
@@ -1026,20 +1027,28 @@ const base = {
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   await page.click('#rcvDrive'); await page.waitForTimeout(300);
   ok('approve all: button shows the file count', (await page.textContent('#drvApproveAll')).includes('Approve all 6 files'));
+  await page.evaluate(() => { DRV_PACE_MS = 150; DRV_QUOTA_WAIT_S = 1; });
   await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk');
   let txt = await page.textContent('#modalRoot');
   ok('approve all: confirm sums it up and names what is left', txt.includes('Approve all 4 files?') && txt.includes('2 new receivers') && txt.includes('2 files attached')
-    && txt.includes('src-4.pdf (no supplier') && txt.includes('dst-9.pdf (named R-00009'), txt);
-  await page.click('#modalOk'); await page.waitForTimeout(800);
+    && txt.includes('src-4.pdf (no supplier') && txt.includes('dst-9.pdf (named R-00009') && txt.includes('keep this page open'), txt);
+  const t0 = Date.now();
+  await page.click('#modalOk'); await page.waitForSelector('#modalRoot >> text=Stopped after');
   txt = (await page.textContent('#modalRoot')) || '';
   ok('approve all: a failure stops and says it resumes', txt.includes('Stopped after 2 of 4') && txt.includes('picks up where it stopped'), txt);
   const a1 = calls.filter((c) => c.fn === 'approveDriveMatch');
+  ok('approve all: paced, not all at once', Date.now() - t0 >= 300);
   ok('approve all: existing receivers first, then new ones', a1.map((c) => c.args[0].fileId + ':' + (c.args[0].receiverId || 'new')).join() === 'dst-1:R-00001,src-3:R-00001,src-1:new', a1.map((c) => c.args[0]));
   await page.click('#modalOk'); await page.waitForTimeout(300);
-  await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(800);
+  await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk'); await page.click('#modalOk');
+  await page.waitForTimeout(400);
+  ok('approve all: Google\'s per-minute limit -> waits and says so', (await page.textContent('#drvProgress')).includes('per-minute limit was reached'), await page.textContent('#drvProgress'));
+  await page.waitForSelector('#modalRoot >> text=All approved', { timeout: 6000 });
   const a2 = calls.filter((c) => c.fn === 'approveDriveMatch');
   const s1 = a2.filter((c) => c.args[0].fileId === 'src-1'), s2 = a2.filter((c) => c.args[0].fileId === 'src-2')[0];
   ok('approve all: the retry reuses the failed file\'s op, still as new (so its copy is finished)', s1.length === 2 && s1[0].args[2] === s1[1].args[2] && !s1[1].args[0].receiverId && s1[1].args[0].skidIds.join() === 'SKD-1,SKD-2', s1.map((c) => c.args));
+  const s2s = a2.filter((c) => c.args[0].fileId === 'src-2');
+  ok('approve all: after the wait the same file is sent again with the same op', s2s.length === 2 && s2s[0].args[2] === s2s[1].args[2], s2s.map((c) => c.args));
   ok('approve all: a ticket in two files goes on the first only', s2 && s2.args[0].skidIds.join() === 'SKD-3' && s2.args[0].supplier === 'RN' && s2.args[0].date === '2025-11-02', s2 && s2.args);
   txt = (await page.textContent('#modalRoot')) || '';
   ok('approve all: summary', txt.includes('All approved') && txt.includes('2 new receivers: R-00002, R-00003'), txt);
