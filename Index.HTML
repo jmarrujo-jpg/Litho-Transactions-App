@@ -140,7 +140,9 @@
   .modal {
     background: var(--card); border-radius: 16px; max-width: 440px; width: 100%;
     padding: 24px; box-shadow: 0 16px 48px rgba(10, 24, 54, .35);
+    max-height: calc(100vh - 40px); display: flex; flex-direction: column;
   }
+  .modal p { overflow-y: auto; min-height: 0; overflow-wrap: anywhere; }
   .modal .modal-icon {
     width: 46px; height: 46px; border-radius: 50%; background: #eafaf0; color: var(--good);
     display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 12px;
@@ -213,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.57.0</span>
+      <span class="version" id="appVersion">v1.57.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1623,12 +1625,15 @@
     var plan = drvPlanAll(), steps = plan.steps;
     var news = steps.filter(function (x) { return !x.to; }).length, tks = steps.reduce(function (n, x) { return n + x.ids.length; }, 0);
     if (!steps.length) { showInfo('Nothing to approve', plan.skipped.map(function (x) { return x.g.name + ': ' + x.why; }).join('; ') || 'No files found.'); return; }
-    var skipTxt = plan.skipped.length ? ' Left for you to review: ' + plan.skipped.map(function (x) { return x.g.name + ' (' + x.why + ')'; }).join(', ') + '.' : '';
+    // Kept short: a long run lists only the first few names ("…and 37 more").
+    var few = function (list, k) { return list.slice(0, k).join(', ') + (list.length > k ? ' and ' + (list.length - k) + ' more' : ''); };
+    var sk = plan.skipped, noSup = sk.filter(function (x) { return /supplier/.test(x.why); }).length;
+    var skipTxt = sk.length ? ' ' + sk.length + ' file' + (sk.length === 1 ? '' : 's') + ' left for you to review' +
+      (noSup ? ' (' + (noSup === sk.length ? 'no supplier' : noSup + ' with no supplier') + ')' : '') + ': ' + few(sk.map(function (x) { return x.g.name; }), 3) + '.' : '';
+    var mins = Math.max(1, Math.ceil(steps.length * DRV_PACE_MS / 60000));
     showConfirm('Approve all ' + steps.length + ' file' + (steps.length === 1 ? '' : 's') + '?',
-      tks + ' ticket' + (tks === 1 ? '' : 's') + ' go on receivers: ' + news + ' new receiver' + (news === 1 ? '' : 's') + ' (each scan copied into the receivers folder with its name), ' +
-      (steps.length - news) + ' file' + (steps.length - news === 1 ? '' : 's') + ' attached to the receiver ' + (steps.length - news === 1 ? 'it already is' : 'they already are') +
-      '. Each new receiver uses the date and supplier shown on its file (open Review to change one first). A ticket found in two files goes on the first one.' +
-      (steps.length > 1 ? ' To stay under Google’s per-minute limit (shared with the floor) it does about ' + Math.round(60000 / DRV_PACE_MS) + ' a minute, so this takes about ' + Math.max(1, Math.ceil(steps.length * DRV_PACE_MS / 60000)) + ' minute' + (Math.ceil(steps.length * DRV_PACE_MS / 60000) > 1 ? 's' : '') + ' — keep this page open.' : '') + skipTxt,
+      tks + ' ticket' + (tks === 1 ? '' : 's') + ': ' + news + ' new receiver' + (news === 1 ? '' : 's') + ', ' + (steps.length - news) + ' added to existing ones.' +
+      (steps.length > 1 ? ' Takes about ' + mins + ' minute' + (mins === 1 ? '' : 's') + ' — keep this page open.' : '') + skipTxt,
       function () {
         drvBusy = true;
         var i = 0, made = [], attached = [], byHand = [], notChanged = 0, lastStart = 0, waits = 0;
@@ -1636,14 +1641,14 @@
         var later = function (ms, fn) { setTimeout(fn, ms); };
         var finish = function (err) {
           drvBusy = false; drvData = null; rcvData = null; msData = null;
-          var msg = (made.length ? made.length + ' new receiver' + (made.length === 1 ? '' : 's') + ': ' + made.join(', ') + '. ' : '') +
-            (attached.length ? attached.length + ' file' + (attached.length === 1 ? '' : 's') + ' attached to ' + attached.join(', ') + '. ' : '') +
-            (notChanged ? notChanged + ' ticket' + (notChanged === 1 ? ' was' : 's were') + ' not changed (already on a receiver). ' : '') +
-            (byHand.length ? 'Google wouldn’t let the app copy ' + byHand.length + ' scan' + (byHand.length === 1 ? '' : 's') + ' into the receivers folder, so ' + (byHand.length === 1 ? 'it is' : 'they are') + ' linked to the original for now — copy and name ' + (byHand.length === 1 ? 'it' : 'them') + ': ' + byHand.join(', ') + '. ' : '') +
+          var msg = (made.length ? made.length + ' new receiver' + (made.length === 1 ? '' : 's') + ': ' + few(made, 5) + '. ' : '') +
+            (attached.length ? 'Added to ' + few(attached, 5) + '. ' : '') +
+            (notChanged ? notChanged + ' ticket' + (notChanged === 1 ? ' was' : 's were') + ' already on a receiver. ' : '') +
+            (byHand.length ? byHand.length + ' scan' + (byHand.length === 1 ? '' : 's') + ' couldn’t be copied (linked to the original) — copy by hand: ' + few(byHand, 3) + '. ' : '') +
             skipTxt;
           drvProgress = '';
           renderDriveView();
-          if (err) showModal({ title: 'Stopped after ' + i + ' of ' + steps.length, confirmText: 'OK', message: err.message + ' — ' + msg + ' Tap Approve all again: it picks up where it stopped and never makes a second receiver or copy.' });
+          if (err) showModal({ title: 'Stopped after ' + i + ' of ' + steps.length, confirmText: 'OK', message: err.message + ' — ' + msg + ' Tap Approve all again to carry on (nothing is made twice).' });
           else showInfo(byHand.length ? 'Approved — copy some by hand' : 'All approved', msg);
         };
         var next = function () {

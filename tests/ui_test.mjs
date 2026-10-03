@@ -1030,12 +1030,12 @@ const base = {
   await page.evaluate(() => { DRV_PACE_MS = 150; DRV_QUOTA_WAIT_S = 1; });
   await page.click('#drvApproveAll'); await page.waitForSelector('#modalOk');
   let txt = await page.textContent('#modalRoot');
-  ok('approve all: confirm sums it up and names what is left', txt.includes('Approve all 4 files?') && txt.includes('2 new receivers') && txt.includes('2 files attached')
-    && txt.includes('src-4.pdf (no supplier') && txt.includes('dst-9.pdf (named R-00009') && txt.includes('keep this page open'), txt);
+  ok('approve all: confirm sums it up and names what is left', txt.includes('Approve all 4 files?') && txt.includes('2 new receivers, 2 added to existing ones')
+    && txt.includes('2 files left for you to review (1 with no supplier): src-4.pdf, dst-9.pdf') && txt.includes('keep this page open') && txt.length < 400, txt);
   const t0 = Date.now();
   await page.click('#modalOk'); await page.waitForSelector('#modalRoot >> text=Stopped after');
   txt = (await page.textContent('#modalRoot')) || '';
-  ok('approve all: a failure stops and says it resumes', txt.includes('Stopped after 2 of 4') && txt.includes('picks up where it stopped'), txt);
+  ok('approve all: a failure stops and says it resumes', txt.includes('Stopped after 2 of 4') && txt.includes('Tap Approve all again to carry on'), txt);
   const a1 = calls.filter((c) => c.fn === 'approveDriveMatch');
   ok('approve all: paced, not all at once', Date.now() - t0 >= 300);
   ok('approve all: existing receivers first, then new ones', a1.map((c) => c.args[0].fileId + ':' + (c.args[0].receiverId || 'new')).join() === 'dst-1:R-00001,src-3:R-00001,src-1:new', a1.map((c) => c.args[0]));
@@ -1052,6 +1052,13 @@ const base = {
   ok('approve all: a ticket in two files goes on the first only', s2 && s2.args[0].skidIds.join() === 'SKD-3' && s2.args[0].supplier === 'RN' && s2.args[0].date === '2025-11-02', s2 && s2.args);
   txt = (await page.textContent('#modalRoot')) || '';
   ok('approve all: summary', txt.includes('All approved') && txt.includes('2 new receivers: R-00002, R-00003'), txt);
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  // Any pop-up, however long its message, fits on the screen with its buttons showing.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await page.evaluate(() => showConfirm('Long', new Array(400).join('R-00001.pdf, '), function () {}, 'OK'));
+  const fit = await page.evaluate(() => { const m = document.querySelector('.modal').getBoundingClientRect(), b = document.getElementById('modalOk').getBoundingClientRect();
+    return m.height <= window.innerHeight && b.bottom <= window.innerHeight && document.documentElement.scrollWidth <= window.innerWidth; });
+  ok('a long pop-up fits on screen, buttons visible', fit);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
