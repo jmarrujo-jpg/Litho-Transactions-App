@@ -1063,6 +1063,49 @@ const base = {
   await page.close();
 }
 
+// ---- 28. Receiver details: typing POs recommends tickets with no receiver and that PO
+{ const T = (id, t, po, extra) => Object.assign({ skidId: id, ticket: t, status: 'Current', mill: 'M' + id, po, receiver: '', via: '', viaFrom: '', match: '' }, extra || {});
+  const db = { receivers: [{ id: 'R-00001', name: '26-10-01--TCC--R-00001', date: '2026-10-01', supplier: 'TCC', pos: '7974-DC', link: '', notes: '', mills: [], keptTickets: [], unkept: 0, ticketCount: 1 }],
+    suppliers: ['TCC'], tickets: [
+      T('SKD-1', '072126-002', '7974-DC'), T('SKD-2', '072126-001', '7974-dc '), T('SKD-3', '072126-003', '7976-DC'),
+      T('SKD-4', '072126-004', '7974-DC', { receiver: 'R-00009' }), T('SKD-5', '072126-005', '7974-DC', { receiver: 'R-00001' }),
+      T('SKD-6', '072126-006', '7974-DC-LR1'), T('SKD-7', '072126-007', '0'), T('SKD-8', '072126-008', '7974-GZ'),
+      T('SKD-9', '072126-009', '7974-DC', { via: 'R-00001', viaFrom: '072126-002' })] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R(JSON.parse(JSON.stringify(db))),
+    masterEdit: (a) => R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, receiver: c.receiver })), skipped: [] }),
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  await page.click('[data-rcvopen="R-00001"]'); await page.waitForTimeout(200);
+  let txt = await page.textContent('#rcvTickets');
+  txt = txt.slice(txt.indexOf('Recommended'));
+  ok('po: the saved PO recommends its tickets with no receiver (any case), in ticket order', txt.includes('Recommended — same PO, no receiver yet (2)') && txt.indexOf('072126-001') < txt.indexOf('072126-002')
+    && !txt.includes('072126-003') && !txt.includes('072126-004') && !txt.includes('072126-008') && !txt.includes('072126-009'), txt);
+  await page.fill('#rcvPos', '7974-DC, 7976-DC'); await page.waitForTimeout(400);
+  txt = await page.textContent('#rcvTickets');
+  ok('po: typing another PO adds its tickets right away', txt.includes('(3)') && txt.includes('072126-003'), txt);
+  await page.fill('#rcvPos', '7974'); await page.waitForTimeout(400);
+  txt = await page.textContent('#rcvTickets');
+  ok('po: just the number matches every suffix', txt.includes('(4)') && txt.includes('072126-008') && !txt.includes('072126-003'), txt);
+  await page.click('#rcvAddByPo'); await page.waitForTimeout(150);
+  ok('po: Add all marks them (not saved yet)', (await page.textContent('#rcvBarText')).includes('4 to add'), await page.textContent('#rcvBarText'));
+  await page.click('#rcvSaveTickets'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(400);
+  const me = calls.filter((c) => c.fn === 'masterEdit')[0];
+  ok('po: saved onto this receiver', me && me.args[0].map((c) => c.skidId + ':' + c.receiver).sort().join() === 'SKD-1:R-00001,SKD-2:R-00001,SKD-6:R-00001,SKD-8:R-00001', me && me.args[0]);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(200);
+  await page.fill('#rcvPos', '9999'); await page.waitForTimeout(400);
+  ok('po: nothing matches -> says so', (await page.textContent('#rcvTickets')).includes('No tickets without a receiver have PO 9999'));
+  // New receiver: a count under the POs box.
+  await page.click('#rcvBackList'); await page.waitForTimeout(200);
+  await page.click('#rcvNew'); await page.waitForTimeout(200);
+  await page.fill('#rcvPos', '7976-DC'); await page.waitForTimeout(400);
+  ok('po: new receiver says how many match', (await page.textContent('#rcvPoHint')).includes('1 ticket with no receiver has this PO'), await page.textContent('#rcvPoHint'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

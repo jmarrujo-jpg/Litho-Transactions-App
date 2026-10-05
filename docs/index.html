@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.57.1</span>
+      <span class="version" id="appVersion">v1.58.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1712,7 +1712,7 @@
           '<div class="field" style="flex:1;min-width:150px"><label>Date received</label><input id="rcvDate" type="date" value="' + esc(r.date) + '"></div>' +
           '<div class="field" style="flex:1;min-width:150px"><label>Supplier</label><input id="rcvSupplier" list="rcvSupList" autocomplete="off" placeholder="e.g. TCC" value="' + esc(r.supplier) + '"><datalist id="rcvSupList">' + sups + '</datalist></div>' +
         '</div>' +
-        '<div class="field"><label>POs on it</label><input id="rcvPos" autocomplete="off" placeholder="e.g. 7974-DC, 7976-DC" value="' + esc(r.pos) + '"></div>' +
+        '<div class="field"><label>POs on it</label><input id="rcvPos" autocomplete="off" placeholder="e.g. 7974-DC, 7976-DC" value="' + esc(r.pos) + '"><div class="sub" id="rcvPoHint" style="margin-top:4px"></div></div>' +
         '<div class="field"><label>Drive link (optional)</label><input id="rcvLink" autocomplete="off" placeholder="paste the file&rsquo;s share link" value="' + esc(r.link) + '"></div>' +
         '<div class="field"><label>Notes</label><input id="rcvNotes" autocomplete="off" placeholder="e.g. 3 bills in one file" value="' + esc(r.notes) + '"></div>' +
         '<div class="sub" style="margin:6px 0">Name the Drive file:</div>' +
@@ -1735,6 +1735,16 @@
     var live = function () { nameEl.textContent = rcvFileName(r.id, document.getElementById('rcvDate').value, document.getElementById('rcvSupplier').value); };
     document.getElementById('rcvDate').oninput = live;
     document.getElementById('rcvSupplier').oninput = live;
+    // Typing POs shows the matching tickets right away (on a new receiver: how many, to add after Create).
+    var poHint = function () {
+      var h = document.getElementById('rcvPoHint');
+      if (!isNew) { renderRcvTickets(); if (h) h.textContent = ''; return; }
+      var n = rcvPoRecommended().length;
+      if (h) h.textContent = n ? n + ' ticket' + (n === 1 ? '' : 's') + ' with no receiver ' + (n === 1 ? 'has' : 'have') + ' ' + (rcvPoList().length === 1 ? 'this PO' : 'these POs') + ' — after you create it they show as Recommended so you can add them.' : '';
+    };
+    var poTimer = null;
+    document.getElementById('rcvPos').oninput = function () { clearTimeout(poTimer); poTimer = setTimeout(poHint, 250); };
+    if (isNew) poHint();
     document.getElementById('rcvBackList').onclick = function () {
       var leave = function () { rcvSel = null; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
       if (rcvMarkCount()) showConfirm('Leave without saving?', 'The tickets you marked to add or take off are not saved yet.', leave, 'Leave', 'danger'); else leave();
@@ -1783,6 +1793,25 @@
   function rcvToggleBtn(attr, id, on, onText, offText) {
     return '<button class="btn ' + (on ? 'secondary' : (attr === 'data-rcvdrop' ? 'warn' : 'success')) + '" style="padding:6px 10px;font-size:13px" ' + attr + '="' + esc(id) + '">' + (on ? 'Undo' : offText) + '</button>';
   }
+  // Recommended by PO: tickets with no receiver whose PO is one of the POs typed on the receiver.
+  // "7974-DC" matches 7974-DC (any case/spaces); just "7974" also matches 7974-DC / 7974-GZ.
+  function rcvPoKey(v) { return String(v || '').toUpperCase().replace(/\s+/g, ''); }
+  function rcvPoList() {
+    var el = document.getElementById('rcvPos'), r = rcvById(rcvSel) || {};
+    return String(el ? el.value : (r.pos || '')).split(/[,;\n]+/).map(rcvPoKey).filter(function (p) { return p && p !== '0'; });
+  }
+  function rcvPoMatch(t, pos) {
+    var k = rcvPoKey(t.po);
+    if (!k || k === '0') return '';
+    var lead = (/^\d+/.exec(k) || [''])[0];
+    return pos.filter(function (p) { return p === k || (/^\d+$/.test(p) && p === lead); })[0] || '';
+  }
+  function rcvPoRecommended() {
+    var pos = rcvPoList();
+    if (!pos.length) return [];
+    return rcvData.tickets.filter(function (t) { return !t.receiver && !t.via && t.match !== rcvSel && rcvPoMatch(t, pos); })
+      .sort(function (a, b) { var x = rcvTicketKey(a.ticket) || a.ticket, y = rcvTicketKey(b.ticket) || b.ticket; return x < y ? -1 : x > y ? 1 : 0; });
+  }
   function renderRcvTickets() {
     var box = document.getElementById('rcvTickets');
     if (!box) return;
@@ -1792,6 +1821,7 @@
     var pieces = all.filter(function (t) { return !t.receiver && t.via === id; });
     var found = all.filter(function (t) { return t.match === id; }), foundNotYet = found.filter(function (t) { return !rcvAdd[t.skidId]; });
     var r = rcvById(id) || {}, km = r.mills || [], kt = r.keptTickets || [];
+    var byPo = rcvPoRecommended(), byPoNotYet = byPo.filter(function (t) { return !rcvAdd[t.skidId]; }), PO_CAP = 60, poList = rcvPoList();
     box.innerHTML = '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets on this receiver <span class="sub" style="font-weight:400">&middot; ' + on.length + '</span></h3>' +
       (adding.length ? '<div class="sub" style="color:var(--good);font-weight:600;margin-top:4px">Adding (not saved yet):</div>' + adding.map(function (t) {
         return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, true), t.receiver ? 'moves off ' + t.receiver : '');
@@ -1802,6 +1832,12 @@
       (found.length ? '<div class="row" style="align-items:center;gap:8px;margin-top:10px"><div class="sub" style="flex:1;color:var(--accent);font-weight:600">Found by a saved number (not on it yet):</div>' +
         (foundNotYet.length ? '<button class="btn secondary" id="rcvAddFound" style="padding:6px 10px;font-size:13px">Add all ' + foundNotYet.length + '</button>' : '') + '</div>' +
         found.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, !!rcvAdd[t.skidId], '', 'Add'), 'same ' + (t.matchBy === 'mill' ? 'mill' : 'ticket number')); }).join('') : '') +
+      (byPo.length ? '<div class="row" style="align-items:center;gap:8px;margin-top:10px"><div class="sub" style="flex:1;color:var(--accent);font-weight:600">Recommended — same PO, no receiver yet (' + byPo.length + '):</div>' +
+        (byPoNotYet.length ? '<button class="btn secondary" id="rcvAddByPo" style="padding:6px 10px;font-size:13px">Add all ' + byPoNotYet.length + '</button>' : '') + '</div>' +
+        '<div class="sub">Check them against the slip — a PO can cover more than one load.</div>' +
+        byPo.slice(0, PO_CAP).map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, !!rcvAdd[t.skidId], '', 'Add'), 'PO matches'); }).join('') +
+        (byPo.length > PO_CAP ? '<div class="sub">…and ' + (byPo.length - PO_CAP) + ' more (Add all includes them).</div>' : '')
+        : (poList.length ? '<div class="sub" style="margin-top:10px">No tickets without a receiver have PO ' + esc(poList.join(', ')) + '.</div>' : '')) +
       '<details style="margin-top:10px"><summary class="sub" style="cursor:pointer">Saved on this receiver: ' + km.length + ' mill number' + (km.length === 1 ? '' : 's') + ', ' + kt.length + ' ticket number' + (kt.length === 1 ? '' : 's') +
         (r.unkept ? ' &middot; <b>' + r.unkept + ' not saved yet</b>' : '') + '</summary>' +
         '<div class="sub" style="margin-top:6px">These stay on the Receivers tab even if Current and WIP are wiped, and the Fresh Import puts this receiver back on tickets with these numbers.' + (r.unkept ? ' Save on the receiver list to bring them up to date (it also happens on your next Save here).' : '') + '</div>' +
@@ -1810,6 +1846,8 @@
       '</div>';
     var af = document.getElementById('rcvAddFound');
     if (af) af.onclick = function () { foundNotYet.forEach(function (t) { rcvAdd[t.skidId] = true; }); renderRcvTickets(); renderRcvCands(); };
+    var ap = document.getElementById('rcvAddByPo');
+    if (ap) ap.onclick = function () { byPoNotYet.forEach(function (t) { rcvAdd[t.skidId] = true; }); renderRcvTickets(); renderRcvCands(); };
     rcvWireToggles(box);
     rcvUpdateBar();
   }
