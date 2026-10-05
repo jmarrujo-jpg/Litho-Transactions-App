@@ -1106,6 +1106,39 @@ const base = {
   await page.close();
 }
 
+// ---- 29. Tickets with no receiver: one list, filter by ticket or mill, largest first
+{ const T = (id, t, mill, status, extra) => Object.assign({ skidId: id, ticket: t, status, mill, po: '0', supplier: 'RN', receiver: '', via: '', viaFrom: '', match: '' }, extra || {});
+  const db = { receivers: [{ id: 'R-00001', name: '26-10-01--RN--R-00001', date: '2026-10-01', supplier: 'RN', pos: '', link: '', notes: '', mills: [], keptTickets: [], unkept: 0, ticketCount: 1 }],
+    suppliers: ['RN'], tickets: [
+      T('SKD-1', '052225-001', '3025452', 'Current'), T('SKD-2', '121318-001', '1561222', 'Current'), T('SKD-3', '120224-002', '454498', 'Current', { supplier: 'LS' }),
+      T('SKD-4', '052225-012', '3025617', 'Used'), T('SKD-5', '042126-202', 'P6G211C307', 'WIP', { supplier: 'PST' }),
+      T('SKD-6', '090525-013', '3037634', 'Current', { receiver: 'R-00001' }), T('SKD-7', '090525-013-LR1', '3037634', 'Current', { via: 'R-00001', viaFrom: '090525-013' })] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [], receivers: [] }),
+    getReceivers: () => R(JSON.parse(JSON.stringify(db))),
+  }));
+  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  ok('none: button shows the count (cut pieces with an inherited receiver don\'t count)', (await page.textContent('#rcvNoneBtn')).includes('No receiver (5)'));
+  await page.click('#rcvNoneBtn'); await page.waitForTimeout(200);
+  const order = async () => page.$$eval('#rcvNoneList .queue-item', (els) => els.map((e) => e.textContent.trim().split(' ')[0]));
+  ok('none: ticket number, largest (newest) first', (await order()).join() === '042126-202,052225-012,052225-001,120224-002,121318-001', await order());
+  await page.selectOption('#rcvNoneSort', 'mill-desc'); await page.waitForTimeout(100);
+  ok('none: mill number, largest first (numbers as numbers, letters after)', (await order()).join() === '042126-202,052225-012,052225-001,121318-001,120224-002', await order());
+  await page.fill('#rcvNoneQ', '0522'); await page.waitForTimeout(100);
+  ok('none: filter by ticket number', (await order()).join() === '052225-012,052225-001' && (await page.textContent('#rcvNoneCount')).includes('2 shown'), await order());
+  await page.fill('#rcvNoneQ', '4544'); await page.waitForTimeout(100);
+  ok('none: filter by mill number', (await order()).join() === '120224-002', await order());
+  await page.fill('#rcvNoneQ', ''); await page.click('[data-rcvnonest="used"]'); await page.waitForTimeout(100);
+  ok('none: Used only', (await order()).join() === '052225-012', await order());
+  await page.click('[data-rcvnonest="open"]'); await page.waitForTimeout(100);
+  ok('none: Current / WIP only', (await order()).length === 4 && (await page.textContent('#rcvBox')).includes('Current / WIP 4'));
+  await page.click('#rcvNoneBack'); await page.waitForTimeout(150);
+  ok('none: back to the receiver list', !!(await page.$('#rcvList')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

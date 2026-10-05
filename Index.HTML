@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.58.0</span>
+      <span class="version" id="appVersion">v1.59.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1270,6 +1270,7 @@
   // and edit receivers, and attach tickets to them (by ticket range, PO or mill). Like the Master
   // sheet, ticket changes are only marked until Save, then go in one request (masterEdit).
   var rcvData = null, rcvSearch = '', rcvSel = null, rcvAdd = {}, rcvDrop = {};
+  var rcvNoneQ = '', rcvNoneSort = 'ticket-desc', rcvNoneStatus = 'all';   // the "No receiver" list
   var rcvFind = { from: '', to: '', po: '', text: '', onlyNone: true };
   var RCV_CAP = 150;
 
@@ -1297,7 +1298,7 @@
       var byId = {}; rcvData.tickets.forEach(function (t) { byId[t.skidId] = t; });
       Object.keys(rcvAdd).forEach(function (id) { if (!byId[id] || byId[id].receiver === rcvSel) delete rcvAdd[id]; });
       Object.keys(rcvDrop).forEach(function (id) { if (!byId[id] || byId[id].receiver !== rcvSel) delete rcvDrop[id]; });
-      if (rcvSel && rcvSel !== 'new' && rcvSel !== 'drive' && !rcvById(rcvSel)) rcvSel = null;
+      if (rcvSel && rcvSel !== 'new' && rcvSel !== 'drive' && rcvSel !== 'none' && !rcvById(rcvSel)) rcvSel = null;
       if (then) then(); else renderReceivers();
     }).withFailureHandler(function (err) {
       var box = document.getElementById('rcvBox');
@@ -1311,13 +1312,16 @@
     if (!box) return;
     if (rcvSel === 'drive') { renderDriveView(); return; }
     if (!rcvData) { box.innerHTML = '<div class="loading">Loading receivers&hellip;</div>'; rcvLoad(); return; }
+    if (rcvSel === 'none') { renderRcvNone(); return; }
     if (rcvSel) { renderReceiverDetail(); return; }
+    var noneCount = rcvNoneTickets().length;
     box.innerHTML =
       '<div class="sub" style="margin:4px 0 8px">Each receiver is the paperwork a load came in on. Tickets point to it by its number, and the file name to give the Drive scan is shown on each one.</div>' +
       '<div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">' +
         '<div class="field" style="flex:1;min-width:200px;margin:0"><label>Find a receiver</label><input id="rcvSearch" placeholder="number, supplier, PO, date…" autocomplete="off" value="' + esc(rcvSearch) + '"></div>' +
         '<button class="btn secondary" id="rcvReload" style="margin:0">↻</button>' +
         '<button class="btn secondary" id="rcvDrive" style="margin:0">🔎 Find in Drive</button>' +
+        '<button class="btn secondary" id="rcvNoneBtn" style="margin:0">No receiver (' + noneCount + ')</button>' +
         '<button class="btn success" id="rcvNew" style="margin:0">+ New receiver</button>' +
       '</div><div id="rcvKeep"></div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
     renderRcvKeep();
@@ -1326,7 +1330,67 @@
     document.getElementById('rcvReload').onclick = function () { rcvData = null; renderReceivers(); };
     document.getElementById('rcvNew').onclick = function () { rcvSel = 'new'; rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
     document.getElementById('rcvDrive').onclick = function () { rcvSel = 'drive'; renderReceivers(); };
+    document.getElementById('rcvNoneBtn').onclick = function () { rcvSel = 'none'; renderReceivers(); };
     renderRcvList();
+  }
+  // ---- Tickets with no receiver: one list, filtered by ticket or mill number, largest first ----
+  // (a cut piece that takes its receiver from the ticket it was cut from counts as having one)
+  function rcvNoneTickets() { return ((rcvData && rcvData.tickets) || []).filter(function (t) { return !t.receiver && !t.via; }); }
+  function rcvNoneSorted() {
+    var q = String(rcvNoneQ || '').trim().toLowerCase(), st = rcvNoneStatus;
+    var list = rcvNoneTickets().filter(function (t) {
+      if (st === 'open' && t.status === 'Used') return false;
+      if (st === 'used' && t.status !== 'Used') return false;
+      return !q || [t.ticket, t.mill].some(function (v) { return String(v || '').toLowerCase().indexOf(q) !== -1; });
+    });
+    var by = rcvNoneSort.split('-'), dir = by[1] === 'asc' ? 1 : -1;
+    // Ticket numbers compare by print date then sequence (MMDDYY-### -> YYMMDD####); mills compare
+    // as numbers when they are numbers ("3060609" > "466995"), else letter by letter. Blanks go last.
+    var cmp = function (a, b) { return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }); };
+    return list.sort(function (a, b) {
+      var x = by[0] === 'mill' ? String(a.mill || '') : (rcvTicketKey(a.ticket) || String(a.ticket || ''));
+      var y = by[0] === 'mill' ? String(b.mill || '') : (rcvTicketKey(b.ticket) || String(b.ticket || ''));
+      if (!x || !y) return x ? -1 : y ? 1 : 0;
+      return dir * cmp(x, y) || cmp(a.ticket, b.ticket);
+    });
+  }
+  function renderRcvNone() {
+    var box = document.getElementById('rcvBox');
+    var all = rcvNoneTickets(), used = all.filter(function (t) { return t.status === 'Used'; }).length;
+    var mills = {}; all.forEach(function (t) { if (t.mill) mills[String(t.mill).toUpperCase()] = 1; });
+    var chips = [['all', 'All ' + all.length], ['open', 'Current / WIP ' + (all.length - used)], ['used', 'Used ' + used]].map(function (c) {
+      return '<button data-rcvnonest="' + c[0] + '"' + (rcvNoneStatus === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+    box.innerHTML = '<button class="btn secondary" id="rcvNoneBack" style="margin-bottom:10px">&larr; All receivers</button>' +
+      '<div class="card"><h3 style="margin-top:0">Tickets with no receiver</h3>' +
+        '<div class="sub" style="margin-bottom:8px">' + all.length + ' ticket' + (all.length === 1 ? '' : 's') + ', ' + Object.keys(mills).length + ' mill number' + (Object.keys(mills).length === 1 ? '' : 's') + '. Tap a ticket for its history; open a receiver to add it.</div>' +
+        '<div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">' +
+          '<div class="field" style="flex:1;min-width:180px;margin:0"><label>Ticket or mill number</label><input id="rcvNoneQ" autocomplete="off" placeholder="e.g. 052225 or 3025" value="' + esc(rcvNoneQ) + '"></div>' +
+          '<div class="field" style="min-width:180px;margin:0"><label>Sort</label><select id="rcvNoneSort">' +
+            [['ticket-desc', 'Ticket number, largest first'], ['ticket-asc', 'Ticket number, smallest first'], ['mill-desc', 'Mill number, largest first'], ['mill-asc', 'Mill number, smallest first']].map(function (o) {
+              return '<option value="' + o[0] + '"' + (rcvNoneSort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>' +
+        '</div>' +
+        '<div class="tabbar" style="margin-top:10px">' + chips + '</div>' +
+        '<div class="sub" id="rcvNoneCount" style="margin:8px 0 2px"></div><div id="rcvNoneList"></div>' +
+      '</div>';
+    document.getElementById('rcvNoneBack').onclick = function () { rcvSel = null; renderReceivers(); };
+    var qi = document.getElementById('rcvNoneQ');
+    qi.oninput = function () { rcvNoneQ = qi.value; renderRcvNoneList(); };
+    document.getElementById('rcvNoneSort').onchange = function () { rcvNoneSort = this.value; renderRcvNoneList(); };
+    Array.prototype.forEach.call(box.querySelectorAll('[data-rcvnonest]'), function (b) {
+      b.onclick = function () { rcvNoneStatus = b.getAttribute('data-rcvnonest'); renderRcvNone(); };
+    });
+    renderRcvNoneList();
+  }
+  function renderRcvNoneList() {
+    var box = document.getElementById('rcvNoneList');
+    if (!box) return;
+    var list = rcvNoneSorted(), CAP = 300;
+    var cnt = document.getElementById('rcvNoneCount');
+    if (cnt) cnt.textContent = list.length + ' shown' + (list.length > CAP ? ' (first ' + CAP + ')' : '') + '.';
+    box.innerHTML = list.length ? list.slice(0, CAP).map(function (t) {
+      return rcvTicketLine(t, '', [t.supplier, t.match ? 'saved on ' + t.match : '', t.matchConflict ? 'matches two receivers' : ''].filter(Boolean).join(' · '));
+    }).join('') : '<div class="sub">' + (rcvNoneTickets().length ? 'No ticket matches.' : 'Every ticket has a receiver.') + '</div>';
   }
   // Kept numbers: each receiver remembers its tickets' mill / ticket numbers, so a wipe of Steel
   // Tickets (Fresh Import) doesn't lose the work. Two notices: tickets whose numbers aren't kept yet
