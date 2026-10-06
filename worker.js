@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-67', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-68', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3829,9 +3829,9 @@ function usedDays(o) {
   return Object.keys(out).sort();
 }
 // date: the day the product was made. diameter: an End Use exactly ('603 ENDS', '603X700') or a
-// whole diameter ('603' = every 603 end use); '' = just list the sizes. days: how
-// many production days to show on each side (1-5) — the nearest days that used steel of that
-// size, so weekends and idle days are skipped.
+// whole diameter ('603' = every 603 end use); '' = just list the sizes. days: how many calendar
+// days to show on each side (1-5): with 1, the day before, the day itself and the day after —
+// a day nothing was used on is still listed (empty), so the trace reads in date order.
 async function getUseTrace(sheets, date, diameter, days) {
   date = toYMD(date || '');
   if (!/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Pick the date the product was made.');
@@ -3863,12 +3863,15 @@ async function getUseTrace(sheets, date, diameter, days) {
   const byDay = {};
   rows.forEach((r) => r.ud.forEach((d) => { (byDay[d] = byDay[d] || []).push(r); }));
   const all = Object.keys(byDay).sort();
-  const before = all.filter((d) => d < date).slice(-days), after = all.filter((d) => d > date).slice(0, days);
+  const shift = (n) => { const p = date.split('-').map(Number), t = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n)); return t.toISOString().slice(0, 10); };
+  const before = [], after = [];
+  for (let n = days; n >= 1; n--) before.push(shift(-n));
+  for (let n = 1; n <= days; n++) after.push(shift(n));
   const key = (t) => { const m = /^(\d\d)(\d\d)(\d\d)-(\d+)/.exec(String(t || '')); return m ? m[3] + m[1] + m[2] + ('0000' + m[4]).slice(-4) : String(t || ''); };
-  const dayOut = (d, rel) => ({ date: d, rel, tickets: (byDay[d] || []).map((r) => Object.assign(traceOf(r.o, ctx), {
+  const dayOut = (d, rel, off) => ({ date: d, rel, offset: off, tickets: (byDay[d] || []).map((r) => Object.assign(traceOf(r.o, ctx), {
       ticket: r.o['Ticket'] || '', skidId: r.o['Skid ID'] || '', usedDays: r.ud, stillOpen: String(r.o['Status'] || '') !== STATUS.USED,
       daysCount: r.ud.length })).sort((a, b) => (key(a.ticket) < key(b.ticket) ? -1 : key(a.ticket) > key(b.ticket) ? 1 : 0)) });
-  const dayList = before.map((d) => dayOut(d, 'before')).concat([dayOut(date, 'on')], after.map((d) => dayOut(d, 'after')));
+  const dayList = before.map((d, i) => dayOut(d, 'before', days - i)).concat([dayOut(date, 'on', 0)], after.map((d, i) => dayOut(d, 'after', i + 1)));
   return Object.assign({ date, diameter, byEndUse, days, sizes: sizeList, dayList, firstDay: all[0] || '', lastDay: all[all.length - 1] || '' }, near);
 }
 

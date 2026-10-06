@@ -1145,11 +1145,11 @@ const base = {
   const sizes = [{ diameter: '401', count: 5, endUses: [{ endUse: '401 ENDS', count: 2 }, { endUse: '401X400', count: 3 }] }, { diameter: '603', count: 1, endUses: [{ endUse: '603X700', count: 1 }] }];
   const { page, calls } = await boot(Object.assign({}, base, {
     getUseTrace: (a) => R(a[0] === '2026-07-12' ? { date: a[0], diameter: '', days: 1, sizes: [], dayList: [], prevDay: '2026-07-10', nextDay: '2026-07-14' } : !a[1] ? { date: a[0], diameter: '', days: 1, sizes, dayList: [] } : { date: a[0], diameter: a[1], days: a[2], sizes, firstDay: '2026-06-01', lastDay: '2026-10-01', dayList: [
-      { date: '2026-07-10', rel: 'before', tickets: [tk('040626-013', 'RN', '3059113', '401 ENDS')] },
-      { date: a[0], rel: 'on', tickets: [tk('101425-005', 'LS', '467268', '401X400', { status: 'WIP', stillOpen: true }),
+      { date: '2026-07-13', rel: 'before', offset: 1, tickets: [tk('040626-013', 'RN', '3059113', '401 ENDS')] },
+      { date: a[0], rel: 'on', offset: 0, tickets: [tk('101425-005', 'LS', '467268', '401X400', { status: 'WIP', stillOpen: true }),
         tk('061226-007', 'RN', '3069132', '401X400', { receiver: 'R-00001', receiverName: '26-06-12--RN--R-00001', receiverLink: 'https://drive.google.com/file/d/r1/view' }),
         tk('061226-006', 'RN', '3069131', '401 ENDS', { daysCount: 2, usedDays: ['2026-07-14', '2026-07-24'] })] },
-      { date: '2026-07-24', rel: 'after', tickets: [] }] }),
+      { date: '2026-07-15', rel: 'after', offset: 1, tickets: [] }] }),
   }));
   await page.evaluate(() => openReports()); await page.waitForTimeout(200);
   await page.click('[data-rtab="trace"]'); await page.waitForTimeout(300);
@@ -1165,7 +1165,7 @@ const base = {
   const tc = calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0];
   ok('trace: asks the worker for that day and size', tc.args.join() === '2026-07-14,401,1', tc.args);
   let txt = await page.textContent('#trcResults');
-  ok('trace: day before / of / after', txt.includes('Day before — Fri, Jul 10, 2026') && txt.includes('Day of — Tue, Jul 14, 2026') && txt.includes('Day after — Fri, Jul 24, 2026'), txt);
+  ok('trace: day before, trace day, day after — in date order, empty day says so', /Day before — Mon, Jul 13, 2026.*Trace day — Tue, Jul 14, 2026.*Day after — Wed, Jul 15, 2026 · 0 tickets\s*Nothing for this day\./.test(txt), txt);
   ok('trace: ticket, supplier, mill and receiver columns', txt.includes('Ticket #') && txt.includes('Supplier') && txt.includes('Mill #') && txt.includes('Receiver')
     && txt.includes('3069132') && txt.includes('26-06-12--RN--R-00001') && txt.includes('partly used — still WIP') && txt.includes('used on 2 days'), txt);
   ok('trace: receiver name opens the file', await page.$eval('#trcResults a[href*="r1"]', (a) => a.target === '_blank'));
