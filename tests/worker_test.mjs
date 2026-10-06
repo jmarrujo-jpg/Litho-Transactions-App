@@ -902,8 +902,10 @@ await concurrency(envBase, 'in-worker lock');
     row({ 'Ticket': '100000-001', 'Skid ID': 'SKD-7', 'Status': 'Current', 'Supplier': 'RN', 'Mill': 'X', 'End Use': '401X400' })];
   await call('saveReceiver', [{ date: '2026-06-12', supplier: 'RN' }, '', 'op-28-r']);
   const sz = await call('getUseTrace', ['2026-07-14', '', 1]);
-  ok('trace: sizes from End Use, only steel that was used', sz.ok && sz.result.sizes.map((z) => z.diameter + ':' + z.count).join() === '401:5,603:1'
-    && sz.result.sizes[0].endUses.map((e) => e.endUse).join() === '401 ENDS,401X400,401X411', sz.result && sz.result.sizes);
+  ok('trace: the End Uses used ON that day, with that day\'s counts', sz.ok && sz.result.sizes.map((z) => z.diameter + ':' + z.count).join() === '401:3,603:1'
+    && sz.result.sizes[0].endUses.map((e) => e.endUse + ':' + e.count).join() === '401 ENDS:1,401X400:1,401X411:1', sz.result && sz.result.sizes);
+  const sz0 = await call('getUseTrace', ['2026-07-12', '', 1]);
+  ok('trace: a day with nothing used offers the nearest production days', sz0.ok && !sz0.result.sizes.length && sz0.result.prevDay === '2026-07-10' && sz0.result.nextDay === '2026-07-14', sz0.result);
   const t = await call('getUseTrace', ['2026-07-14', '401', 1]);
   const dl = t.ok ? t.result.dayList : [];
   ok('trace: the day before / of / after (nearest production days)', dl.map((x) => x.rel + ' ' + x.date).join() === 'before 2026-07-10,on 2026-07-14,after 2026-07-24', dl.map((x) => x.date));

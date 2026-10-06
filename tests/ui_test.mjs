@@ -1144,7 +1144,7 @@ const base = {
     usedDays: [], daysCount: 1, stillOpen: false, coatings: [] }, extra || {});
   const sizes = [{ diameter: '401', count: 5, endUses: [{ endUse: '401 ENDS', count: 2 }, { endUse: '401X400', count: 3 }] }, { diameter: '603', count: 1, endUses: [{ endUse: '603X700', count: 1 }] }];
   const { page, calls } = await boot(Object.assign({}, base, {
-    getUseTrace: (a) => R(!a[1] ? { date: a[0], diameter: '', days: 1, sizes, dayList: [] } : { date: a[0], diameter: a[1], days: a[2], sizes, firstDay: '2026-06-01', lastDay: '2026-10-01', dayList: [
+    getUseTrace: (a) => R(a[0] === '2026-07-12' ? { date: a[0], diameter: '', days: 1, sizes: [], dayList: [], prevDay: '2026-07-10', nextDay: '2026-07-14' } : !a[1] ? { date: a[0], diameter: '', days: 1, sizes, dayList: [] } : { date: a[0], diameter: a[1], days: a[2], sizes, firstDay: '2026-06-01', lastDay: '2026-10-01', dayList: [
       { date: '2026-07-10', rel: 'before', tickets: [tk('040626-013', 'RN', '3059113', '401 ENDS')] },
       { date: a[0], rel: 'on', tickets: [tk('101425-005', 'LS', '467268', '401X400', { status: 'WIP', stillOpen: true }),
         tk('061226-007', 'RN', '3069132', '401X400', { receiver: 'R-00001', receiverName: '26-06-12--RN--R-00001', receiverLink: 'https://drive.google.com/file/d/r1/view' }),
@@ -1156,7 +1156,11 @@ const base = {
   ok('trace tab: asks for the date and lists each end use, plus All per size', !!(await page.$('#trcDate')) && (await page.textContent('[data-trcdia="401 ENDS"]')).includes('401 ENDS')
     && (await page.textContent('[data-trcdia="401X400"]')).includes('401X400') && (await page.textContent('[data-trcdia="401"]')).includes('All 401')
     && !!(await page.$('[data-trcdia="603X700"]')) && !(await page.$('[data-trcdia="603"]')));
-  await page.fill('#trcDate', '2026-07-14'); await page.dispatchEvent('#trcDate', 'change');
+  await page.fill('#trcDate', '2026-07-12'); await page.dispatchEvent('#trcDate', 'change'); await page.waitForTimeout(300);
+  ok('trace: a new date reloads its End Uses; nothing used -> nearest days offered', calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0].args.join() === '2026-07-12,,1'
+    && (await page.textContent('#view')).includes('No steel was recorded as used on Sun, Jul 12, 2026') && !(await page.$('[data-trcdia]')), await page.textContent('#view'));
+  await page.click('[data-trcjump="2026-07-14"]'); await page.waitForTimeout(300);
+  ok('trace: jump to the next production day', (await page.inputValue('#trcDate')) === '2026-07-14' && !!(await page.$('[data-trcdia="401X400"]')));
   await page.click('[data-trcdia="401"]'); await page.waitForTimeout(300);
   const tc = calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0];
   ok('trace: asks the worker for that day and size', tc.args.join() === '2026-07-14,401,1', tc.args);
@@ -1172,6 +1176,9 @@ const base = {
   ok('trace: a row opens its full trace', (await page.textContent('#trcResults')).includes('Used on: 2026-07-14, 2026-07-24'));
   await page.selectOption('#trcDays', '2'); await page.waitForTimeout(300);
   ok('trace: days each side re-asks', calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0].args[2] === 2);
+  await page.fill('#trcDate', '2026-07-15'); await page.dispatchEvent('#trcDate', 'change'); await page.waitForTimeout(400);
+  const last2 = calls.filter((c) => c.fn === 'getUseTrace').slice(-2).map((c) => c.args.join());
+  ok('trace: changing the date keeps the End Use when it was used that day too', last2.join('|') === '2026-07-15,,1|2026-07-15,401 ENDS,2', last2);
   await page.click('[data-rtab="reports"]'); await page.waitForTimeout(150);
   ok('trace: back to the reports tab', !!(await page.$('#runReportBtn')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));

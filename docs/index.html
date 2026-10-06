@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.61.1</span>
+      <span class="version" id="appVersion">v1.62.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2802,15 +2802,17 @@
   // Step 1 the date the product was made, step 2 its size (diameter, from the tickets' End Use),
   // then the production days before / of / after with every ticket used: ticket #, supplier, mill,
   // receiver. Tap a row for its full trace (coatings, job, PO …).
-  var trc = { date: '', dia: '', days: 1, sizes: null, data: null, open: {}, busy: false };
+  var trc = { date: '', dia: '', near: null, days: 1, sizes: null, data: null, open: {}, busy: false };
   function trcFmtDay(d) {
     var p = String(d).split('-'), dt = new Date(+p[0], +p[1] - 1, +p[2]);
     return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
   }
   function renderTrace(view) {
     if (!trc.date) trc.date = todayStr();
-    var sizesHtml = !trc.sizes ? '<div class="loading">Loading sizes&hellip;</div>'
-      : !trc.sizes.length ? '<div class="sub">No steel has been used in production yet.</div>'
+    var jump = function (d, label) { return d ? '<button class="btn secondary" data-trcjump="' + esc(d) + '" style="padding:6px 10px;font-size:13px;margin:0">' + label + ' ' + esc(trcFmtDay(d)) + '</button>' : ''; };
+    var sizesHtml = !trc.sizes ? '<div class="loading">Loading what was used that day&hellip;</div>'
+      : !trc.sizes.length ? '<div class="sub" style="margin-bottom:6px">No steel was recorded as used on ' + esc(trcFmtDay(trc.date)) + '.' + (trc.near && (trc.near.prevDay || trc.near.nextDay) ? ' Nearest production days:' : '') + '</div>' +
+          (trc.near ? '<div class="row" style="gap:6px;flex-wrap:wrap">' + jump(trc.near.prevDay, '← ') + jump(trc.near.nextDay, '→ ') + '</div>' : '')
       : trc.sizes.filter(function (z) { return z.endUses.length; }).map(function (z) {
           // One row per diameter: its end uses (603 ENDS, 603X700 …), plus "All 603" when there are several.
           var btn = function (val, label, n) {
@@ -2825,7 +2827,7 @@
       '<div class="card"><h3 style="margin-top:0">Begin trace — used in production</h3>' +
         '<div class="sub" style="margin-bottom:10px">Pick the day the product was made, then its size. You get the steel of that size used that day and the production day before and after, with each ticket’s supplier, mill # and receiver.</div>' +
         '<div class="field"><label>1. Date the product was made</label><input type="date" id="trcDate" value="' + esc(trc.date) + '"></div>' +
-        '<div class="field" style="margin-bottom:4px"><label>2. End use (or All for every end use of that size)</label></div>' + sizesHtml +
+        '<div class="field" style="margin-bottom:4px"><label>2. End use — the ones used that day (or All for every end use of that size)</label></div>' + sizesHtml +
         '<div class="row" style="gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">' +
           '<div class="field" style="margin:0;min-width:170px"><label>Production days each side</label><select id="trcDays">' + [1, 2, 3, 5].map(function (n) {
             return '<option value="' + n + '"' + (trc.days === n ? ' selected' : '') + '>' + n + ' day' + (n === 1 ? '' : 's') + ' before and after</option>'; }).join('') + '</select></div>' +
@@ -2833,17 +2835,33 @@
       '</div><div id="trcResults"></div>';
     wireReportTabs(view);
     var di = document.getElementById('trcDate');
-    di.onchange = function () { trc.date = di.value; if (trc.dia !== null && trc.data) trcRun(); };
+    di.onchange = function () { if (!di.value || di.value === trc.date) return; trcSetDate(di.value); };
     document.getElementById('trcDays').onchange = function () { trc.days = +this.value || 1; if (trc.data) trcRun(); };
     Array.prototype.forEach.call(view.querySelectorAll('[data-trcdia]'), function (b) {
       b.onclick = function () { trc.dia = b.getAttribute('data-trcdia'); trcRun(); };
     });
+    Array.prototype.forEach.call(view.querySelectorAll('[data-trcjump]'), function (b) {
+      b.onclick = function () { trcSetDate(b.getAttribute('data-trcjump')); };
+    });
     if (!trc.sizes) {
-      google.script.run.withSuccessHandler(function (r) { trc.sizes = (r && r.sizes) || []; if (reportTab === 'trace' && state.view === 'reports') renderTrace(document.getElementById('view')); })
-        .withFailureHandler(function (err) { var el = document.getElementById('trcResults'); if (el) el.innerHTML = '<div class="card empty">Could not load sizes: ' + esc(err.message) + '</div>'; })
+      var forDate = trc.date;
+      google.script.run.withSuccessHandler(function (r) {
+        if (forDate !== trc.date) return;   // the date was changed again meanwhile
+        trc.sizes = (r && r.sizes) || []; trc.near = { prevDay: r && r.prevDay, nextDay: r && r.nextDay };
+        // Keep the End Use picked before if it was also used on this day.
+        var still = trc.dia && trc.sizes.some(function (z) { return z.diameter === trc.dia || z.endUses.some(function (e) { return e.endUse === trc.dia; }); });
+        if (still) { trcRun(); return; }
+        trc.dia = '';
+        if (reportTab === 'trace' && state.view === 'reports') renderTrace(document.getElementById('view'));
+      }).withFailureHandler(function (err) { var el = document.getElementById('trcResults'); if (el) el.innerHTML = '<div class="card empty">Could not load: ' + esc(err.message) + '</div>'; })
         .getUseTrace(trc.date, '', 1);
     }
     renderTraceResults();
+  }
+  // A new day: its own End Uses, and the old results go.
+  function trcSetDate(d) {
+    trc.date = d; trc.sizes = null; trc.near = null; trc.data = null; trc.open = {};
+    renderTrace(document.getElementById('view'));
   }
   function trcRun() {
     if (!trc.date) { toast('Pick the date the product was made'); return; }
@@ -2853,7 +2871,7 @@
     var want = trc.date + '|' + trc.dia + '|' + trc.days;
     google.script.run.withSuccessHandler(function (r) {
       if (want !== trc.date + '|' + trc.dia + '|' + trc.days) return;   // a newer pick is on its way
-      trc.data = r; trc.sizes = r.sizes || trc.sizes;
+      trc.data = r; trc.sizes = r.sizes || trc.sizes; trc.near = { prevDay: r.prevDay, nextDay: r.nextDay };
       if (reportTab === 'trace' && state.view === 'reports') renderTrace(document.getElementById('view'));
     }).withFailureHandler(function (err) {
       var e2 = document.getElementById('trcResults'); if (e2) e2.innerHTML = '<div class="card empty">Error: ' + esc(err.message) + '</div>';
