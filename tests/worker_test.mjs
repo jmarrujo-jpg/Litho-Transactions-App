@@ -913,6 +913,8 @@ await concurrency(envBase, 'in-worker lock');
   ok('trace: each ticket has supplier, mill and receiver', t7 && t7.supplier === 'RN' && t7.mill === '3069132' && t7.receiver === 'R-00001' && /R-00001/.test(t7.receiverName), t7);
   ok('trace: multi-day and partly used tickets flagged', t6 && t6.daysCount === 2 && t6.usedDays.join() === '2026-07-14,2026-07-24' && t4 && t4.stillOpen && t4.status === 'WIP', [t6, t4]);
   ok('trace: other sizes left out', !on.some((x) => x.ticket === '020926-102'));
+  const te = await call('getUseTrace', ['2026-07-14', '401 ends', 1]);
+  ok('trace: by one end use — its own nearest days and tickets', te.ok && te.result.byEndUse && te.result.dayList.map((x) => x.date + ':' + x.tickets.map((y) => y.ticket).join('+')).join() === '2026-07-10:040626-013,2026-07-14:061226-006,2026-07-24:061226-006', te.result && te.result.dayList.map((x) => [x.date, x.tickets.map((y) => y.ticket)]));
   const t2 = await call('getUseTrace', ['2026-07-14', '401', 2]);
   ok('trace: 2 days each side', t2.ok && t2.result.dayList.map((x) => x.date).join() === '2026-07-10,2026-07-14,2026-07-24,2026-07-31', t2.result && t2.result.dayList.map((x) => x.date));
   const t3 = await call('getUseTrace', ['2026-07-12', '401', 1]);

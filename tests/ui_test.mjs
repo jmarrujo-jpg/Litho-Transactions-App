@@ -1153,7 +1153,9 @@ const base = {
   }));
   await page.evaluate(() => openReports()); await page.waitForTimeout(200);
   await page.click('[data-rtab="trace"]'); await page.waitForTimeout(300);
-  ok('trace tab: asks for the date and shows the sizes', !!(await page.$('#trcDate')) && (await page.textContent('[data-trcdia="401"]')).includes('401'));
+  ok('trace tab: asks for the date and lists each end use, plus All per size', !!(await page.$('#trcDate')) && (await page.textContent('[data-trcdia="401 ENDS"]')).includes('401 ENDS')
+    && (await page.textContent('[data-trcdia="401X400"]')).includes('401X400') && (await page.textContent('[data-trcdia="401"]')).includes('All 401')
+    && !!(await page.$('[data-trcdia="603X700"]')) && !(await page.$('[data-trcdia="603"]')));
   await page.fill('#trcDate', '2026-07-14'); await page.dispatchEvent('#trcDate', 'change');
   await page.click('[data-trcdia="401"]'); await page.waitForTimeout(300);
   const tc = calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0];
@@ -1163,10 +1165,10 @@ const base = {
   ok('trace: ticket, supplier, mill and receiver columns', txt.includes('Ticket #') && txt.includes('Supplier') && txt.includes('Mill #') && txt.includes('Receiver')
     && txt.includes('3069132') && txt.includes('26-06-12--RN--R-00001') && txt.includes('partly used — still WIP') && txt.includes('used on 2 days'), txt);
   ok('trace: receiver name opens the file', await page.$eval('#trcResults a[href*="r1"]', (a) => a.target === '_blank'));
-  await page.click('[data-trceu="401 ENDS"]'); await page.waitForTimeout(150);
-  txt = await page.textContent('#trcResults');
-  ok('trace: narrow to one end use', txt.includes('061226-006') && !txt.includes('061226-007') && !txt.includes('101425-005'), txt);
-  await page.click('[data-trcrow="1-0"]'); await page.waitForTimeout(150);
+  ok('trace: says which size', txt.includes('All 401 · made'), txt);
+  await page.click('[data-trcdia="401 ENDS"]'); await page.waitForTimeout(300);
+  ok('trace: one end use asks the worker for just that', calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0].args[1] === '401 ENDS');
+  await page.click('[data-trcrow="1-2"]'); await page.waitForTimeout(150);
   ok('trace: a row opens its full trace', (await page.textContent('#trcResults')).includes('Used on: 2026-07-14, 2026-07-24'));
   await page.selectOption('#trcDays', '2'); await page.waitForTimeout(300);
   ok('trace: days each side re-asks', calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0].args[2] === 2);
