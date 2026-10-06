@@ -99,7 +99,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getDriveMatches', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getDriveMatches', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getUseTrace', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'rcvlog-64', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-65', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -372,6 +372,8 @@ async function handle(fn, args, env) {
       return getMetalsReport(sheets, args[0], args[1]);
     case 'getDepartmentReport': // (startYMD, endYMD, dept)
       return getDepartmentReport(sheets, args[0], args[1], args[2]);
+    case 'getUseTrace': // (dateYMD, diameter, daysEachSide)
+      return getUseTrace(sheets, args[0], args[1], args[2]);
     // ---- steel count ----
     case 'setSkidCounted': // (skidId, counted, operator, opId)
       return setSkidCounted(sheets, args[0], args[1], args[2], args[3]);
@@ -3810,6 +3812,55 @@ function traceOf(o, ctx) {
     comments: o['Comments'] || '', lithoNotes: o['Litho Notes'] || '',
     po: o['PO Number'] != null ? String(o['PO Number']) : '', ...receiverTrace(o, ctx),
   };
+}
+
+// ---- Begin trace: product made on a day -> the steel of its size used around that day ----
+// The size is the can diameter: the first three digits of the ticket's End Use (603X700, 603 ENDS
+// -> 603). '' = no size on the ticket.
+function endUseDiameter(v) { const m = /^\s*(\d{3})(?!\d)/.exec(String(v || '')); return m ? m[1] : ''; }
+// Every day a ticket was used in production: its Used At (once Used), each day on its Access
+// 'Date Used' (260916-005, 260918-002 -> 2026-09-16, 2026-09-18), and the days the import noted in
+// System Notes for a ticket used partly and still on Current / WIP.
+function usedDays(o) {
+  const out = {};
+  if (String(o['Status'] || '') === STATUS.USED) { const d = toYMD(usedAt(o)); if (/^\d{4}-\d\d-\d\d$/.test(d)) out[d] = 1; }
+  String(o['Date Used'] || '').replace(/\b(\d{6})\s*-\s*\d+/g, (m, code) => { const d = importUsedDate(code); if (d) out[d] = 1; return m; });
+  (String(o['System Notes'] || '').match(/Used in production[^|]*/gi) || []).forEach((seg) => (seg.match(/\d{4}-\d\d-\d\d/g) || []).forEach((d) => { out[d] = 1; }));
+  return Object.keys(out).sort();
+}
+// date: the day the product was made. diameter: '603' etc ('' = just list the sizes). days: how
+// many production days to show on each side (1-5) — the nearest days that used steel of that
+// size, so weekends and idle days are skipped.
+async function getUseTrace(sheets, date, diameter, days) {
+  date = toYMD(date || '');
+  if (!/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Pick the date the product was made.');
+  diameter = String(diameter || '').trim();
+  days = Math.min(5, Math.max(1, parseInt(days, 10) || 1));
+  const master = await readObjects(sheets, MASTER);
+  const sizes = {}, rows = [];
+  master.rows.forEach((o) => {
+    if (!(o['Ticket'] || o['Skid ID'])) return;
+    const ud = usedDays(o);
+    if (!ud.length) return;
+    const dia = endUseDiameter(o['End Use']), eu = String(o['End Use'] || '').trim().toUpperCase();
+    const z = sizes[dia] = sizes[dia] || { diameter: dia, count: 0, endUses: {} };
+    z.count++; if (eu) z.endUses[eu] = (z.endUses[eu] || 0) + 1;
+    if (diameter && dia === diameter) rows.push({ o, ud });
+  });
+  const sizeList = Object.keys(sizes).sort((a, b) => (a === '' ? 1 : b === '' ? -1 : a < b ? -1 : a > b ? 1 : 0))
+    .map((k) => ({ diameter: k, count: sizes[k].count, endUses: Object.keys(sizes[k].endUses).sort().map((e) => ({ endUse: e, count: sizes[k].endUses[e] })) }));
+  if (!diameter) return { date, diameter, days, sizes: sizeList, dayList: [] };
+  const ctx = await traceContext(sheets, master.rows);
+  const byDay = {};
+  rows.forEach((r) => r.ud.forEach((d) => { (byDay[d] = byDay[d] || []).push(r); }));
+  const all = Object.keys(byDay).sort();
+  const before = all.filter((d) => d < date).slice(-days), after = all.filter((d) => d > date).slice(0, days);
+  const key = (t) => { const m = /^(\d\d)(\d\d)(\d\d)-(\d+)/.exec(String(t || '')); return m ? m[3] + m[1] + m[2] + ('0000' + m[4]).slice(-4) : String(t || ''); };
+  const dayOut = (d, rel) => ({ date: d, rel, tickets: (byDay[d] || []).map((r) => Object.assign(traceOf(r.o, ctx), {
+      ticket: r.o['Ticket'] || '', skidId: r.o['Skid ID'] || '', usedDays: r.ud, stillOpen: String(r.o['Status'] || '') !== STATUS.USED,
+      daysCount: r.ud.length })).sort((a, b) => (key(a.ticket) < key(b.ticket) ? -1 : key(a.ticket) > key(b.ticket) ? 1 : 0)) });
+  const dayList = before.map((d) => dayOut(d, 'before')).concat([dayOut(date, 'on')], after.map((d) => dayOut(d, 'after')));
+  return { date, diameter, days, sizes: sizeList, dayList, firstDay: all[0] || '', lastDay: all[all.length - 1] || '' };
 }
 
 // Completed-work activity by department for a date range. dept: 'all' | 'litho' | 'lines' |

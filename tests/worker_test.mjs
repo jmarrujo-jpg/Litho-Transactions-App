@@ -888,5 +888,38 @@ await concurrency(envBase, 'in-worker lock');
   ok('used import: no tab -> skipped', imp2.ok && imp2.result.used === 0 && imp2.result.usedTab === '' && imp2.result.total === 2 && !f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === '101425-005')[0]['System Notes'], imp2);
 }
 
+// 28. Begin trace: steel of a size (End Use diameter) used on the production days around a date.
+{ const f = fresh();
+  const H = ['Ticket', 'Skid ID', 'Status', 'Supplier', 'Mill', 'End Use', 'PO Number', 'QTY/LOAD', 'Used At', 'Used Via', 'Date Used', 'System Notes', 'Receiver'];
+  const row = (o) => H.map((h) => (o[h] == null ? '' : o[h]));
+  f.books[SID].tabs['Steel Tickets'].rows = [H,
+    row({ 'Ticket': '061226-006', 'Skid ID': 'SKD-1', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '3069131', 'End Use': '401 ENDS', 'Used At': '2026-07-24', 'Date Used': '260714-002, 260724-003' }),
+    row({ 'Ticket': '061226-007', 'Skid ID': 'SKD-2', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '3069132', 'End Use': '401X400', 'Used At': '2026-07-14 09:30:00', 'Receiver': 'R-00001' }),
+    row({ 'Ticket': '040626-013', 'Skid ID': 'SKD-3', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '3059113', 'End Use': '401 ENDS', 'Used At': '2026-07-10' }),
+    row({ 'Ticket': '101425-005', 'Skid ID': 'SKD-4', 'Status': 'WIP', 'Supplier': 'LS', 'Mill': '467268', 'End Use': '401X411', 'System Notes': 'Used in production 2026-07-14 (QTY 527) (from Access)' }),
+    row({ 'Ticket': '020926-102', 'Skid ID': 'SKD-5', 'Status': 'Used', 'Supplier': 'KG', 'Mill': 'DOK0768C03', 'End Use': '603X700', 'Used At': '2026-07-14' }),
+    row({ 'Ticket': '070626-015', 'Skid ID': 'SKD-6', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '1613011041', 'End Use': '401X400', 'Used At': '2026-07-31' }),
+    row({ 'Ticket': '100000-001', 'Skid ID': 'SKD-7', 'Status': 'Current', 'Supplier': 'RN', 'Mill': 'X', 'End Use': '401X400' })];
+  await call('saveReceiver', [{ date: '2026-06-12', supplier: 'RN' }, '', 'op-28-r']);
+  const sz = await call('getUseTrace', ['2026-07-14', '', 1]);
+  ok('trace: sizes from End Use, only steel that was used', sz.ok && sz.result.sizes.map((z) => z.diameter + ':' + z.count).join() === '401:5,603:1'
+    && sz.result.sizes[0].endUses.map((e) => e.endUse).join() === '401 ENDS,401X400,401X411', sz.result && sz.result.sizes);
+  const t = await call('getUseTrace', ['2026-07-14', '401', 1]);
+  const dl = t.ok ? t.result.dayList : [];
+  ok('trace: the day before / of / after (nearest production days)', dl.map((x) => x.rel + ' ' + x.date).join() === 'before 2026-07-10,on 2026-07-14,after 2026-07-24', dl.map((x) => x.date));
+  const on = dl[1] ? dl[1].tickets : [];
+  ok('trace: the day of lists every 401 ticket used that day (multi-day, partial, timestamped)', on.map((x) => x.ticket).join() === '101425-005,061226-006,061226-007', on.map((x) => x.ticket));
+  const t7 = on.filter((x) => x.ticket === '061226-007')[0], t6 = on.filter((x) => x.ticket === '061226-006')[0], t4 = on.filter((x) => x.ticket === '101425-005')[0];
+  ok('trace: each ticket has supplier, mill and receiver', t7 && t7.supplier === 'RN' && t7.mill === '3069132' && t7.receiver === 'R-00001' && /R-00001/.test(t7.receiverName), t7);
+  ok('trace: multi-day and partly used tickets flagged', t6 && t6.daysCount === 2 && t6.usedDays.join() === '2026-07-14,2026-07-24' && t4 && t4.stillOpen && t4.status === 'WIP', [t6, t4]);
+  ok('trace: other sizes left out', !on.some((x) => x.ticket === '020926-102'));
+  const t2 = await call('getUseTrace', ['2026-07-14', '401', 2]);
+  ok('trace: 2 days each side', t2.ok && t2.result.dayList.map((x) => x.date).join() === '2026-07-10,2026-07-14,2026-07-24,2026-07-31', t2.result && t2.result.dayList.map((x) => x.date));
+  const t3 = await call('getUseTrace', ['2026-07-12', '401', 1]);
+  ok('trace: a day with nothing used still shows, with its neighbours', t3.ok && t3.result.dayList.map((x) => x.rel + ' ' + x.date + ' ' + x.tickets.length).join() === 'before 2026-07-10 1,on 2026-07-12 0,after 2026-07-14 3', t3.result && t3.result.dayList.map((x) => [x.rel, x.date, x.tickets.length]));
+  const bad = await call('getUseTrace', ['', '401', 1]);
+  ok('trace: needs a date', !bad.ok && /date/.test(bad.error), bad);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

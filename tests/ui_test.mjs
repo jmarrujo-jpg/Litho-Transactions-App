@@ -1139,6 +1139,43 @@ const base = {
   await page.close();
 }
 
+// ---- 30. Reports → Begin trace: date, size, then the days around it with ticket / supplier / mill / receiver
+{ const tk = (t, sup, mill, eu, extra) => Object.assign({ ticket: t, skidId: 'SKD-' + t, supplier: sup, mill, endUse: eu, po: '8272-DC', qty: 900, status: 'Used', receiver: '', receiverName: '', receiverLink: '',
+    usedDays: [], daysCount: 1, stillOpen: false, coatings: [] }, extra || {});
+  const sizes = [{ diameter: '401', count: 5, endUses: [{ endUse: '401 ENDS', count: 2 }, { endUse: '401X400', count: 3 }] }, { diameter: '603', count: 1, endUses: [{ endUse: '603X700', count: 1 }] }];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getUseTrace: (a) => R(!a[1] ? { date: a[0], diameter: '', days: 1, sizes, dayList: [] } : { date: a[0], diameter: a[1], days: a[2], sizes, firstDay: '2026-06-01', lastDay: '2026-10-01', dayList: [
+      { date: '2026-07-10', rel: 'before', tickets: [tk('040626-013', 'RN', '3059113', '401 ENDS')] },
+      { date: a[0], rel: 'on', tickets: [tk('101425-005', 'LS', '467268', '401X400', { status: 'WIP', stillOpen: true }),
+        tk('061226-007', 'RN', '3069132', '401X400', { receiver: 'R-00001', receiverName: '26-06-12--RN--R-00001', receiverLink: 'https://drive.google.com/file/d/r1/view' }),
+        tk('061226-006', 'RN', '3069131', '401 ENDS', { daysCount: 2, usedDays: ['2026-07-14', '2026-07-24'] })] },
+      { date: '2026-07-24', rel: 'after', tickets: [] }] }),
+  }));
+  await page.evaluate(() => openReports()); await page.waitForTimeout(200);
+  await page.click('[data-rtab="trace"]'); await page.waitForTimeout(300);
+  ok('trace tab: asks for the date and shows the sizes', !!(await page.$('#trcDate')) && (await page.textContent('[data-trcdia="401"]')).includes('401'));
+  await page.fill('#trcDate', '2026-07-14'); await page.dispatchEvent('#trcDate', 'change');
+  await page.click('[data-trcdia="401"]'); await page.waitForTimeout(300);
+  const tc = calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0];
+  ok('trace: asks the worker for that day and size', tc.args.join() === '2026-07-14,401,1', tc.args);
+  let txt = await page.textContent('#trcResults');
+  ok('trace: day before / of / after', txt.includes('Day before — Fri, Jul 10, 2026') && txt.includes('Day of — Tue, Jul 14, 2026') && txt.includes('Day after — Fri, Jul 24, 2026'), txt);
+  ok('trace: ticket, supplier, mill and receiver columns', txt.includes('Ticket #') && txt.includes('Supplier') && txt.includes('Mill #') && txt.includes('Receiver')
+    && txt.includes('3069132') && txt.includes('26-06-12--RN--R-00001') && txt.includes('partly used — still WIP') && txt.includes('used on 2 days'), txt);
+  ok('trace: receiver name opens the file', await page.$eval('#trcResults a[href*="r1"]', (a) => a.target === '_blank'));
+  await page.click('[data-trceu="401 ENDS"]'); await page.waitForTimeout(150);
+  txt = await page.textContent('#trcResults');
+  ok('trace: narrow to one end use', txt.includes('061226-006') && !txt.includes('061226-007') && !txt.includes('101425-005'), txt);
+  await page.click('[data-trcrow="1-0"]'); await page.waitForTimeout(150);
+  ok('trace: a row opens its full trace', (await page.textContent('#trcResults')).includes('Used on: 2026-07-14, 2026-07-24'));
+  await page.selectOption('#trcDays', '2'); await page.waitForTimeout(300);
+  ok('trace: days each side re-asks', calls.filter((c) => c.fn === 'getUseTrace').slice(-1)[0].args[2] === 2);
+  await page.click('[data-rtab="reports"]'); await page.waitForTimeout(150);
+  ok('trace: back to the reports tab', !!(await page.$('#runReportBtn')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
