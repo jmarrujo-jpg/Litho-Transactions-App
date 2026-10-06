@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.59.0</span>
+      <span class="version" id="appVersion">v1.60.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1090,7 +1090,7 @@
       return '<button data-msf="' + c[0] + '"' + (msFilter === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
     box.innerHTML =
-      '<div class="sub" style="margin:4px 0 8px">Change a ticket&rsquo;s status (Current, WIP, Used) or receiver, or mark coatings to take off. Nothing saves until you tap <b>Save all</b> — then every change goes at once and is logged in Transactions.</div>' +
+      '<div class="sub" style="margin:4px 0 8px">Change a ticket&rsquo;s status (Current, WIP, Used) or receiver, or mark coatings to take off. Nothing saves until you tap <b>Save all</b> — then every change goes at once. Status and coating changes are logged in Transactions; receivers are just set on the ticket.</div>' +
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Find a ticket</label><input id="msSearch" placeholder="ticket, skid, mill, customer…" autocomplete="off" value="' + esc(msSearch) + '"></div>' +
         '<button class="btn secondary" id="msReload" style="margin:0">↻</button>' +
@@ -1425,7 +1425,7 @@
     if (a) a.onclick = function () {
       var batch = found.slice(0, 300);
       showConfirm('Attach ' + batch.length + ' ticket' + (batch.length === 1 ? '' : 's') + '?',
-        'Each goes on the receiver that saved its mill (or ticket) number. ' + (found.length > 300 ? 'This does the first 300; tap again for the rest. ' : '') + 'Each change is logged in the ticket’s history.',
+        'Each goes on the receiver that saved its mill (or ticket) number. ' + (found.length > 300 ? 'This does the first 300; tap again for the rest.' : ''),
         function () {
           a.disabled = true; a.textContent = 'Saving…';
           runMutation('masterEdit', [batch.map(function (t) { return { skidId: t.skidId, receiver: t.match, from: t.status || '' }; }), '', newOpId()], function (res) {
@@ -1619,8 +1619,8 @@
     if (!existingId && !rcvCleanSupplier(f.supplier)) { toast('Enter the supplier'); return; }
     var n = ids.length + ' ticket' + (ids.length === 1 ? '' : 's');
     showConfirm(existingId ? 'Put ' + n + ' on ' + existingId + '?' : 'Approve a new receiver for ' + n + '?',
-      existingId ? 'They go on ' + existingId + '. Each change is logged in the ticket’s history.'
-        : 'It gets the next R-number, the scan is copied into the receivers folder as ' + rcvFileName('R-?????', f.date, f.supplier) + ', and the tickets are put on it. Each change is logged in the ticket’s history.',
+      existingId ? 'They go on ' + existingId + '.'
+        : 'It gets the next R-number, the scan is copied into the receivers folder as ' + rcvFileName('R-?????', f.date, f.supplier) + ', and the tickets are put on it.',
       function () {
         drvProgress = 'Saving…'; var el = document.getElementById('drvProgress'); if (el) el.textContent = drvProgress;
         drvSend(g, ids, existingId, function (res) {
@@ -2002,7 +2002,7 @@
     showConfirm('Save ' + changes.length + ' ticket' + (changes.length === 1 ? '' : 's') + '?',
       [Object.keys(rcvAdd).length && ('Add ' + Object.keys(rcvAdd).length + ' to ' + r.name + '.'),
         moving.length && (moving.length + ' of them move off another receiver: ' + moving.slice(0, 8).map(function (s) { return byId[s].ticket + ' (' + byId[s].receiver + ')'; }).join(', ') + (moving.length > 8 ? '…' : '') + '.'),
-        Object.keys(rcvDrop).length && ('Take ' + Object.keys(rcvDrop).length + ' off.'), 'Each change is logged in the ticket’s history.'].filter(Boolean).join(' '),
+        Object.keys(rcvDrop).length && ('Take ' + Object.keys(rcvDrop).length + ' off.')].filter(Boolean).join(' '),
       function () {
         var btn = document.getElementById('rcvSaveTickets');
         if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }

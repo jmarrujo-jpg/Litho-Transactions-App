@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'used-63', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'rcvlog-64', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1831,15 +1831,9 @@ async function masterEdit(sheets, changes, operator, opId) {
         rcvDropped.push({ receiver: keepKey(prevRcv), mill: keepKey(o['Mill']), ticket: keepKey(o['Ticket']) });
       }
     }
-    const rOp = subOp(op, skidId + '#r');
-    if (wantRcv && (rcvChange || resumed) && !ops.has(rOp)) {
-      const name = rcv ? receiverName(ctx.receivers[rcv]) : '';
-      rows.push({ 'Timestamp': ts, 'Ticket': o['Ticket'], 'Pass Number': 0, 'Operator': operator, 'Group': '', 'Sub-Variant': '',
-        'Item': rcv ? 'RECEIVER SET' : 'RECEIVER REMOVED', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0, 'Pass Total Cost': 0,
-        'Running Total After Pass': after,
-        'Notes': rcv ? name + (rcvChange && prevRcv ? ' (was ' + prevRcv + ')' : '') : (rcvChange && prevRcv ? 'took off ' + prevRcv : 'receiver taken off'),
-        'Job Name': '', 'Job ID': '', 'Skid ID': skidId, 'Op ID': rOp });
-    }
+    // Receiver changes aren't written to Transactions: the ticket's Receiver cell (and the numbers
+    // kept on the receiver) is the record. A retry is still safe: the cells are set to the same
+    // values again, and Last Op ID marks the ticket as already done.
     done.push({ skidId, ticket: o['Ticket'], from: moving ? cur : (resumed ? from : ''), status: moving ? to : (resumed && to ? to : cur), litho: after,
       removed: v.removed.map((c) => c.item), receiver: wantRcv ? rcv : prevRcv });
   }

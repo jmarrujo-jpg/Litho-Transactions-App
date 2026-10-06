@@ -608,18 +608,19 @@ await concurrency(envBase, 'in-worker lock');
   ok('second is R-00002, no date', b.ok && b.result.id === 'R-00002' && b.result.name === 'NO-DATE--REYNOLDS--R-00002', b.result);
   const e = await call('saveReceiver', [{ id: 'R-00002', date: '2026-09-01', supplier: 'REY', pos: '8780-DC' }, 'Jo', 'op-23-e']);
   ok('edit renames it', e.ok && f.rows(SID, 'Receivers').filter((r) => r['Receiver ID'] === 'R-00002')[0]['File Name'] === '26-09-01--REY--R-00002', f.rows(SID, 'Receivers'));
-  // Attach (also an Used/WIP ticket) + one unknown receiver; first try loses its log append.
+  // Attach (also an Used/WIP ticket) + one unknown receiver; first try loses the ticket write.
   const changes = [{ skidId: 'SKD-000001', receiver: 'R-00001', from: 'Current' }, { skidId: 'SKD-000003', receiver: 'r-00001', from: 'WIP' },
     { skidId: 'SKD-000004', receiver: 'R-00001', from: 'Current' }, { skidId: 'SKD-000005', receiver: 'R-00099', from: 'Current' }];
-  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  f.faults.push({ match: isMasterStamp, mode: 'before', status: 400, times: 1 });
   const fail1 = await call('masterEdit', [changes, '', 'op-23-m']);
-  ok('attach: failed log append reported', !fail1.ok, fail1);
+  ok('attach: failed write reported', !fail1.ok && !skidRow(f, 'SKD-000001')['Receiver'], fail1);
   const m = await call('masterEdit', [changes, '', 'op-23-m']);
   ok('attach saved', m.ok && skidRow(f, 'SKD-000001')['Receiver'] === 'R-00001' && skidRow(f, 'SKD-000003')['Receiver'] === 'R-00001', m);
   ok('unknown receiver skipped with a reason', m.ok && m.result.skipped.some((x) => x.skidId === 'SKD-000005' && /R-00099/.test(x.reason)) && !skidRow(f, 'SKD-000005')['Receiver'], m.result && m.result.skipped);
   ok('status untouched by a receiver-only change', skidRow(f, 'SKD-000003')['Status'] === 'WIP' && skidRow(f, 'SKD-000001')['Status'] === 'Current');
-  ok('logged once each after the retry', txFor(f, 'SKD-000001').filter((t) => t['Item'] === 'RECEIVER SET').length === 1
-    && /26-10-01--TCC--R-00001/.test(txFor(f, 'SKD-000001').filter((t) => t['Item'] === 'RECEIVER SET')[0]['Notes']), txFor(f, 'SKD-000001'));
+  ok('receiver changes are not written to Transactions', !f.rows(SID, 'Transactions').some((t) => /^RECEIVER/.test(t['Item'] || '')), f.rows(SID, 'Transactions'));
+  const again = await call('masterEdit', [changes, '', 'op-23-m']);
+  ok('the same save again (retry after it landed) changes nothing', again.ok && skidRow(f, 'SKD-000001')['Receiver'] === 'R-00001' && f.rows(SID, 'Receivers').filter((r) => r['Receiver ID'] === 'R-00001')[0]['Tickets'].split(', ').length === 3, again);
   const same = await call('masterEdit', [[{ skidId: 'SKD-000001', receiver: 'R-00001' }], '', 'op-23-s']);
   ok('already on it: nothing saved', !same.ok && /already on R-00001/.test(same.error), same);
   // A piece cut from a ticket inherits its receiver.
@@ -633,8 +634,7 @@ await concurrency(envBase, 'in-worker lock');
   const hi = await call('getSkidHistory', ['SKD-000050']);
   ok('piece without its own receiver inherits it', hi.ok && hi.result.skid.receiver === 'R-00001' && hi.result.skid.receiverFrom === '103', hi.result && hi.result.skid);
   const h1 = await call('getSkidHistory', ['SKD-000001']);
-  ok('history: receiver in the summary and the timeline', h1.ok && h1.result.skid.receiverName === '26-10-01--TCC--R-00001' && /drive\.google/.test(h1.result.skid.receiverLink)
-    && h1.result.events.some((x) => x.what === 'RECEIVER SET'), h1.result && h1.result.skid);
+  ok('history: receiver in the summary', h1.ok && h1.result.skid.receiverName === '26-10-01--TCC--R-00001' && /drive\.google/.test(h1.result.skid.receiverLink), h1.result && h1.result.skid);
   const g = await call('getReceivers', []);
   const r1 = g.ok && g.result.receivers.filter((r) => r.id === 'R-00001')[0];
   ok('list: ticket count and newest first', r1 && r1.ticketCount === 4 && g.result.receivers[0].id === 'R-00002', g.result && g.result.receivers);
@@ -650,7 +650,7 @@ await concurrency(envBase, 'in-worker lock');
   const d1 = await call('deleteReceiver', ['R-00001', '', 'op-23-d']);
   ok('delete refused while in use', !d1.ok && /4 ticket/.test(d1.error), d1);
   const off = await call('masterEdit', [['SKD-000001', 'SKD-000003', 'SKD-000004', rem['Skid ID']].map((id) => ({ skidId: id, receiver: '' })), '', 'op-23-o']);
-  ok('take off: cleared and logged', off.ok && !skidRow(f, 'SKD-000001')['Receiver'] && txFor(f, 'SKD-000001').some((t) => t['Item'] === 'RECEIVER REMOVED' && /took off R-00001/.test(t['Notes'])), off);
+  ok('take off: cleared (not logged)', off.ok && !skidRow(f, 'SKD-000001')['Receiver'] && !txFor(f, 'SKD-000001').some((t) => /^RECEIVER/.test(t['Item'] || '')), off);
   const d2 = await call('deleteReceiver', ['R-00001', '', 'op-23-d2']);
   ok('delete when empty', d2.ok && !f.rows(SID, 'Receivers').some((r) => r['Receiver ID'] === 'R-00001') && f.rows(SID, 'Receivers').length === 1, d2);
   const d3 = await call('deleteReceiver', ['R-00001', '', 'op-23-d2']);
@@ -797,7 +797,7 @@ await concurrency(envBase, 'in-worker lock');
   ok('drive: not found and not searchable listed', g.result.misses.map((x) => x.mill).join() === '9999999,M77' && g.result.noMill >= 1 && g.result.unsearched === 0, g.result);
   // Approve the scan: new receiver, copy, attach (first try loses the attach's log append).
   const rec = { fileId: 'src-1', date: '2025-10-28', supplier: 'rn', pos: '7730-DC', notes: '', skidIds: ['SKD-000070', 'SKD-000071'] };
-  f.faults.push({ match: isTxAppend, mode: 'before', status: 400, times: 1 });
+  f.faults.push({ match: isMasterStamp, mode: 'before', status: 400, times: 1 });
   const a1 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
   ok('drive approve: failed attach reported', !a1.ok, a1);
   const a2 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
@@ -808,7 +808,7 @@ await concurrency(envBase, 'in-worker lock');
   ok('drive approve: tickets on it, numbers kept', skidRow(f, 'SKD-000070')['Receiver'] === 'R-00002' && skidRow(f, 'SKD-000071')['Receiver'] === 'R-00002' && r2['Mill Numbers'] === '3045214, 3045220', r2);
   const a3 = await call('approveDriveMatch', [rec, 'Jo', 'op-26-a']);
   ok('drive approve: again with the same op changes nothing', a3.ok && f.rows(SID, 'Receivers').length === 2 && f.drive.files.filter((x) => /R-00002/.test(x.name)).length === 1
-    && txFor(f, 'SKD-000070').filter((x) => x['Item'] === 'RECEIVER SET').length === 1, a3);
+    && skidRow(f, 'SKD-000070')['Receiver'] === 'R-00002', a3);
   const a4 = await call('approveDriveMatch', [{ receiverId: 'R-00001', skidIds: ['SKD-000073'] }, 'Jo', 'op-26-b']);
   ok('drive: attach to the receiver already in the folder', a4.ok && !a4.result.created && skidRow(f, 'SKD-000073')['Receiver'] === 'R-00001', a4);
   // A My Drive folder: Google refuses the service account's copy -> linked to the original.
