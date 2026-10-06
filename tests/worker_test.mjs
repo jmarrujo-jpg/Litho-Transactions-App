@@ -899,11 +899,13 @@ await concurrency(envBase, 'in-worker lock');
     row({ 'Ticket': '101425-005', 'Skid ID': 'SKD-4', 'Status': 'WIP', 'Supplier': 'LS', 'Mill': '467268', 'End Use': '401X411', 'System Notes': 'Used in production 2026-07-14 (QTY 527) (from Access)' }),
     row({ 'Ticket': '020926-102', 'Skid ID': 'SKD-5', 'Status': 'Used', 'Supplier': 'KG', 'Mill': 'DOK0768C03', 'End Use': '603X700', 'Used At': '2026-07-14' }),
     row({ 'Ticket': '070626-015', 'Skid ID': 'SKD-6', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '1613011041', 'End Use': '401X400', 'Used At': '2026-07-31' }),
-    row({ 'Ticket': '100000-001', 'Skid ID': 'SKD-7', 'Status': 'Current', 'Supplier': 'RN', 'Mill': 'X', 'End Use': '401X400' })];
+    row({ 'Ticket': '100000-001', 'Skid ID': 'SKD-7', 'Status': 'Current', 'Supplier': 'RN', 'Mill': 'X', 'End Use': '401X400' }),
+    row({ 'Ticket': '050526-003', 'Skid ID': 'SKD-8', 'Status': 'Used', 'Supplier': 'RN', 'Mill': '3060537', 'End Use': '211 OIL', 'Used At': '2026-07-14' })];
   await call('saveReceiver', [{ date: '2026-06-12', supplier: 'RN' }, '', 'op-28-r']);
   const sz = await call('getUseTrace', ['2026-07-14', '', 1]);
-  ok('trace: the End Uses used ON that day, with that day\'s counts', sz.ok && sz.result.sizes.map((z) => z.diameter + ':' + z.count).join() === '401:3,603:1'
-    && sz.result.sizes[0].endUses.map((e) => e.endUse + ':' + e.count).join() === '401 ENDS:1,401X400:1,401X411:1', sz.result && sz.result.sizes);
+  ok('trace: what was used ON that day, by line — bodies of every height together, ends apart, odd ones alone', sz.ok
+    && sz.result.sizes.map((z) => z.key + '=' + z.label + ':' + z.count).join() === '211 OIL=211 OIL:1,401 BODIES=401 Bodies:2,401 ENDS=401 Ends:1,603 BODIES=603 Bodies:1'
+    && sz.result.sizes[1].endUses.map((e) => e.endUse).join() === '401X400,401X411' && sz.result.dayCount === 5, sz.result && sz.result.sizes);
   const sz0 = await call('getUseTrace', ['2026-07-12', '', 1]);
   ok('trace: a day with nothing used offers the nearest production days', sz0.ok && !sz0.result.sizes.length && sz0.result.prevDay === '2026-07-10' && sz0.result.nextDay === '2026-07-14', sz0.result);
   const t = await call('getUseTrace', ['2026-07-14', '401', 1]);
@@ -915,8 +917,13 @@ await concurrency(envBase, 'in-worker lock');
   ok('trace: each ticket has supplier, mill and receiver', t7 && t7.supplier === 'RN' && t7.mill === '3069132' && t7.receiver === 'R-00001' && /R-00001/.test(t7.receiverName), t7);
   ok('trace: multi-day and partly used tickets flagged', t6 && t6.daysCount === 2 && t6.usedDays.join() === '2026-07-14,2026-07-24' && t4 && t4.stillOpen && t4.status === 'WIP', [t6, t4]);
   ok('trace: other sizes left out', !on.some((x) => x.ticket === '020926-102'));
+  const tb = await call('getUseTrace', ['2026-07-14', '401 BODIES', 1]);
+  ok('trace: 401 Bodies = every 401 height (a changeover is covered), no ends', tb.ok && tb.result.label === '401 Bodies' && tb.result.dayList[1].tickets.map((y) => y.ticket).join() === '101425-005,061226-007', tb.result && tb.result.dayList[1].tickets.map((y) => y.ticket));
+  const ta = await call('getUseTrace', ['2026-07-14', 'ALL', 1]);
+  ok('trace: all steel used that day', ta.ok && ta.result.label === 'All steel' && ta.result.dayList[1].tickets.length === 5, ta.result && ta.result.dayList[1].tickets.map((y) => y.ticket));
+  ok('trace: each ticket says who it was for and whether it was coated', tb.ok && 'litho' in tb.result.dayList[1].tickets[0] && 'comments' in tb.result.dayList[1].tickets[0]);
   const te = await call('getUseTrace', ['2026-07-14', '401 ends', 1]);
-  ok('trace: by one end use — only its tickets', te.ok && te.result.byEndUse && te.result.dayList.map((x) => x.date + ':' + x.tickets.map((y) => y.ticket).join('+')).join() === '2026-07-13:,2026-07-14:061226-006,2026-07-15:', te.result && te.result.dayList.map((x) => [x.date, x.tickets.map((y) => y.ticket)]));
+  ok('trace: by one end use — only its tickets', te.ok && te.result.label === '401 Ends' && te.result.dayList.map((x) => x.date + ':' + x.tickets.map((y) => y.ticket).join('+')).join() === '2026-07-13:,2026-07-14:061226-006,2026-07-15:', te.result && te.result.dayList.map((x) => [x.date, x.tickets.map((y) => y.ticket)]));
   const t2 = await call('getUseTrace', ['2026-07-14', '401', 2]);
   ok('trace: 2 days each side', t2.ok && t2.result.dayList.map((x) => x.rel + x.offset + ' ' + x.date).join() === 'before2 2026-07-12,before1 2026-07-13,on0 2026-07-14,after1 2026-07-15,after2 2026-07-16', t2.result && t2.result.dayList.map((x) => x.date));
   const t5 = await call('getUseTrace', ['2026-07-11', '401', 1]);

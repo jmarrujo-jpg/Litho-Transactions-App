@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-68', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-69', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3810,7 +3810,7 @@ function traceOf(o, ctx) {
     coatedOn: toYMD(o['First Coated At']), coatedBy: o['First Coated By'] || '', approvedBy: o['Approved By'] || '',
     usedOn: toYMD(usedAt(o)), usedVia: o['Used Via'] || '', runId: o['Run ID'] || '', splitOf: o['Split Of'] || '',
     comments: o['Comments'] || '', lithoNotes: o['Litho Notes'] || '',
-    po: o['PO Number'] != null ? String(o['PO Number']) : '', ...receiverTrace(o, ctx),
+    po: o['PO Number'] != null ? String(o['PO Number']) : '', litho: num(o['Litho']), ...receiverTrace(o, ctx),
   };
 }
 
@@ -3818,6 +3818,16 @@ function traceOf(o, ctx) {
 // The size is the can diameter: the first three digits of the ticket's End Use (603X700, 603 ENDS
 // -> 603). '' = no size on the ticket.
 function endUseDiameter(v) { const m = /^\s*(\d{3})(?!\d)/.exec(String(v || '')); return m ? m[1] : ''; }
+// What a trace searches by: the line, not the exact can. Bodies run by diameter on their line, so
+// every height is one group (603X700, 603X812 -> '603 BODIES': a changeover from 401X411 to 401X508
+// is covered); ends only ever go to ends of their own diameter ('603 ENDS'). Anything else
+// (211 OIL, 507 SF …) is its own group by its exact End Use.
+function traceGroup(endUse) {
+  const eu = String(endUse || '').trim().toUpperCase().replace(/\s+/g, ' '), dia = endUseDiameter(eu);
+  if (dia && /\bENDS?\b/.test(eu)) return { key: dia + ' ENDS', label: dia + ' Ends', dia, kind: 2 };
+  if (dia && /^\d{3}\s*X\s*\d/.test(eu)) return { key: dia + ' BODIES', label: dia + ' Bodies', dia, kind: 1 };
+  return { key: eu, label: eu || 'No end use', dia: dia || '999', kind: 3 };
+}
 // Every day a ticket was used in production: its Used At (once Used), each day on its Access
 // 'Date Used' (260916-005, 260918-002 -> 2026-09-16, 2026-09-18), and the days the import noted in
 // System Notes for a ticket used partly and still on Current / WIP.
@@ -3828,37 +3838,41 @@ function usedDays(o) {
   (String(o['System Notes'] || '').match(/Used in production[^|]*/gi) || []).forEach((seg) => (seg.match(/\d{4}-\d\d-\d\d/g) || []).forEach((d) => { out[d] = 1; }));
   return Object.keys(out).sort();
 }
-// date: the day the product was made. diameter: an End Use exactly ('603 ENDS', '603X700') or a
-// whole diameter ('603' = every 603 end use); '' = just list the sizes. days: how many calendar
+// date: the day the product was made. diameter: a trace group ('603 BODIES', '603 ENDS', or an
+// exact odd End Use like '211 OIL'), 'ALL' for every ticket used, or a bare diameter ('603');
+// '' = just list the groups used that day. days: how many calendar
 // days to show on each side (1-5): with 1, the day before, the day itself and the day after —
 // a day nothing was used on is still listed (empty), so the trace reads in date order.
 async function getUseTrace(sheets, date, diameter, days) {
   date = toYMD(date || '');
   if (!/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Pick the date the product was made.');
   diameter = String(diameter || '').trim().toUpperCase().replace(/\s+/g, ' ');
-  const byEndUse = !/^\d{3}$/.test(diameter);
+  const all3 = diameter === 'ALL', bareDia = /^\d{3}$/.test(diameter);
   days = Math.min(5, Math.max(1, parseInt(days, 10) || 1));
   const master = await readObjects(sheets, MASTER);
   // The sizes to pick from are the End Uses used ON that day (counts = tickets used that day).
   const sizes = {}, rows = [], anyDay = {};
+  let dayCount = 0;
   master.rows.forEach((o) => {
     if (!(o['Ticket'] || o['Skid ID'])) return;
     const ud = usedDays(o);
     if (!ud.length) return;
     ud.forEach((d) => { anyDay[d] = 1; });
-    const dia = endUseDiameter(o['End Use']), eu = String(o['End Use'] || '').trim().toUpperCase();
+    const eu = String(o['End Use'] || '').trim().toUpperCase().replace(/\s+/g, ' '), g = traceGroup(eu);
     if (ud.indexOf(date) !== -1) {
-      const z = sizes[dia] = sizes[dia] || { diameter: dia, count: 0, endUses: {} };
+      dayCount++;
+      const z = sizes[g.key] = sizes[g.key] || { key: g.key, label: g.label, dia: g.dia, kind: g.kind, count: 0, endUses: {} };
       z.count++; if (eu) z.endUses[eu] = (z.endUses[eu] || 0) + 1;
     }
-    if (diameter && (byEndUse ? eu.replace(/\s+/g, ' ') === diameter : dia === diameter)) rows.push({ o, ud });
+    if (diameter && (all3 || (bareDia ? g.dia === diameter : g.key === diameter))) rows.push({ o, ud });
   });
-  const sizeList = Object.keys(sizes).sort((a, b) => (a === '' ? 1 : b === '' ? -1 : a < b ? -1 : a > b ? 1 : 0))
-    .map((k) => ({ diameter: k, count: sizes[k].count, endUses: Object.keys(sizes[k].endUses).sort().map((e) => ({ endUse: e, count: sizes[k].endUses[e] })) }));
+  const sizeList = Object.keys(sizes).map((k) => sizes[k]).sort((a, b) => (a.dia < b.dia ? -1 : a.dia > b.dia ? 1 : a.kind - b.kind || (a.key < b.key ? -1 : 1)))
+    .map((z) => ({ key: z.key, label: z.label, count: z.count, endUses: Object.keys(z.endUses).sort().map((e) => ({ endUse: e, count: z.endUses[e] })) }));
   // With nothing used that day, the nearest days that used any steel (to jump to).
   const used = Object.keys(anyDay).sort();
   const near = { prevDay: used.filter((d) => d < date).slice(-1)[0] || '', nextDay: used.filter((d) => d > date)[0] || '' };
-  if (!diameter) return Object.assign({ date, diameter, days, sizes: sizeList, dayList: [] }, near);
+  const label = all3 ? 'All steel' : bareDia ? 'All ' + diameter : (sizes[diameter] ? sizes[diameter].label : traceGroup(diameter).label);
+  if (!diameter) return Object.assign({ date, diameter, days, sizes: sizeList, dayCount, dayList: [] }, near);
   const ctx = await traceContext(sheets, master.rows);
   const byDay = {};
   rows.forEach((r) => r.ud.forEach((d) => { (byDay[d] = byDay[d] || []).push(r); }));
@@ -3872,7 +3886,7 @@ async function getUseTrace(sheets, date, diameter, days) {
       ticket: r.o['Ticket'] || '', skidId: r.o['Skid ID'] || '', usedDays: r.ud, stillOpen: String(r.o['Status'] || '') !== STATUS.USED,
       daysCount: r.ud.length })).sort((a, b) => (key(a.ticket) < key(b.ticket) ? -1 : key(a.ticket) > key(b.ticket) ? 1 : 0)) });
   const dayList = before.map((d, i) => dayOut(d, 'before', days - i)).concat([dayOut(date, 'on', 0)], after.map((d, i) => dayOut(d, 'after', i + 1)));
-  return Object.assign({ date, diameter, byEndUse, days, sizes: sizeList, dayList, firstDay: all[0] || '', lastDay: all[all.length - 1] || '' }, near);
+  return Object.assign({ date, diameter, label, days, sizes: sizeList, dayCount, dayList, firstDay: all[0] || '', lastDay: all[all.length - 1] || '' }, near);
 }
 
 // Completed-work activity by department for a date range. dept: 'all' | 'litho' | 'lines' |
