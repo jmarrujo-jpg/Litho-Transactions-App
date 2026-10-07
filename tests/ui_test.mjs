@@ -1434,6 +1434,37 @@ const base = {
   await page.close();
 }
 
+// ---- 36. A full skid's count comes from the same job (End Use + size), with a little slack
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const sk = (id, t, eu, q) => ticket(id, t, 'Used', { cs: 'S', endUse: eu, qty: q, width: 30.6875, length: 34.005 });
+  const tickets = [
+    sk('H1', '090126-200', '603 ENDS', 1300), sk('H2', '090126-201', '603 ENDS', 1300), sk('H3', '090126-202', '603 ENDS', 665),
+    sk('H4', '090226-200', '401 ENDS', 1500), sk('H5', '090226-201', '401 ENDS', 1500), sk('H6', '090226-202', '401 ENDS', 1500), sk('H7', '090226-203', '401 ENDS', 1500),
+    ticket('SKD-E', 'E1', 'Current', { cs: 'C', mill: 'ME', endUse: '603 ENDS', width: 30.6875, length: 34.005 }),
+    ticket('SKD-F', 'F1', 'Current', { cs: 'C', mill: 'MF', endUse: '603 ENDS', width: 30.6875, length: 34.005 }),
+    ticket('SKD-G', 'G1', 'Current', { cs: 'C', mill: 'MG', endUse: '401 ENDS', width: 30.6875, length: 34.005 }),
+    ticket('SKD-K', 'K1', 'Current', { cs: 'C', mill: 'MK', endUse: '401 ENDS', width: 30.6875, length: 34.005 })];
+  const { page, calls } = await boot(Object.assign({}, base, { getAllTickets: () => R(tickets) }), { userAgent: IPAD });
+  const q = (ci, ri) => `.crep-row[data-crc="${ci}"][data-crr="${ri}"] .crepQty`;
+  const flip = async () => (await page.textContent('[data-crepflip="0"]')).trim();
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  // 603 ENDS: the first skid of the day is 1,296 — the past 603 ENDS skids say a full one is 1,300
+  await page.click('[data-coil="SKD-E"]'); await page.fill(q(0, 0), '1296');
+  await page.click('#crepNextBtn'); await page.click('[data-coil="SKD-F"]'); await page.waitForTimeout(100);
+  ok('full: 1,296 of a 1,300 job (from past skids) is full', (await flip()).startsWith('✔ Full skid'), await flip());
+  await page.fill(q(0, 0), '1200'); await page.waitForTimeout(50);
+  ok('full: 1,200 is short, so it finishes on the next coil', (await flip()).startsWith('↘ Not full'), await flip());
+  await page.click('[data-crepremove]'); await page.click('[data-crepremove]'); await page.waitForTimeout(100);
+  // 401 ENDS on the same line: a full skid is 1,500, so 1,300 isn't
+  await page.click('[data-coil="SKD-G"]'); await page.fill(q(0, 0), '1300');
+  await page.click('#crepNextBtn'); await page.click('[data-coil="SKD-K"]'); await page.waitForTimeout(100);
+  ok('full: a 401 ENDS job uses 1,500, not the 603 count', (await flip()).startsWith('↘ Not full'), await flip());
+  await page.fill(q(0, 0), '1500'); await page.waitForTimeout(50);
+  ok('full: 1,500 is full for it', (await flip()).startsWith('✔ Full skid'), await flip());
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

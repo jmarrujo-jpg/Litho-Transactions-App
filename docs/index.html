@@ -231,7 +231,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.72.0</span>
+      <span class="version" id="appVersion">v1.73.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -6202,23 +6202,41 @@
     if (prev) while (prev.rows.length > 1 && !String(prev.rows[prev.rows.length - 1].qty).trim()) prev.rows.pop();   // drop blank rows at the end
     if (!cs.length && !crep.start) crep.start = crepNowHM();   // hours running start themselves
     cs.push({ skidId: t.skidId, ticket: t.ticket, mill: t.mill || '', bw: t.bw || '', type: t.type || '', temper: t.temper || '',
-      endUse: t.endUse || '', comments: t.comments || '', rows: [{ qty: '', weight: '' }], spoil: '', carryMode: null });
+      endUse: t.endUse || '', comments: t.comments || '', width: t.width || '', length: t.length || '', rows: [{ qty: '', weight: '' }], spoil: '', carryMode: null });
     crep.picking = false; crep.asking = false;
     renderCoilReport();
   }
   function crepNowHM() { var d = new Date(); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
 
-  // A full skid's count, worked out (no one types it): the count that comes up most on this report
-  // and on this line's recent coil-line skids (1,300 on the paper report). 0 = can't tell yet.
-  function crepFullSize() {
-    var n = {}, add = function (q) { q = crepNum(q); if (q > 0) n[q] = (n[q] || 0) + 1; };
-    crep.coils.forEach(function (c) { c.rows.forEach(function (r) { add(r.qty); }); });
-    var re = new RegExp('^\\d{6}-' + coilLineNo + '\\d\\d$');
-    allCache.filter(function (t) { return re.test(String(t.ticket || '').trim()); }).slice(-60).forEach(function (t) { add(t.qty); });
-    var best = 0, bestN = 1;   // a count has to come up at least twice to be "full"
-    Object.keys(n).forEach(function (q) { q = Number(q); if (n[q] > bestN || (n[q] === bestN && bestN > 1 && q > best)) { best = q; bestN = n[q]; } });
-    return best;
+  // A full skid's count, worked out (no one types it): the count that comes up most for the same job.
+  // A full count depends on the job (603 ENDS = 1,300, 401 ENDS = 1,500, and 603X600 differs by sheet
+  // size), so it's taken from: this report's own counts for that job first (today's run), else past
+  // coil-line skids of the same End Use and sheet size, else the same End Use. Partial skids are
+  // scattered (175, 925, 1,125…) so they never win. A count has to come up at least twice. 0 = can't tell.
+  function crepFullSize(c) {
+    if (!c) return 0;
+    var eu = String(c.endUse || '').trim().toUpperCase(), size = crepSizeKey(c);
+    var modeOf = function (qs) {
+      var n = {}, best = 0, bestN = 1;
+      qs.forEach(function (q) { q = crepNum(q); if (q > 0) n[q] = (n[q] || 0) + 1; });
+      Object.keys(n).forEach(function (q) { q = Number(q); if (n[q] > bestN || (n[q] === bestN && bestN > 1 && q > best)) { best = q; bestN = n[q]; } });
+      return best;
+    };
+    var today = [];
+    crep.coils.forEach(function (x) { if (String(x.endUse || '').trim().toUpperCase() === eu) x.rows.forEach(function (r) { today.push(r.qty); }); });
+    var full = modeOf(today);
+    if (full) return full;
+    var past = allCache.filter(function (t) { return /^\d{6}-[12]\d\d$/.test(String(t.ticket || '').trim()) && String(t.endUse || '').trim().toUpperCase() === eu; });
+    var sameSize = past.filter(function (t) { return size && crepSizeKey(t) === size; });
+    return modeOf(sameSize.slice(-200).map(function (t) { return t.qty; })) || modeOf(past.slice(-200).map(function (t) { return t.qty; }));
   }
+  // Sheet size, rounded so 33.593 / 33.594 (typed differently) match.
+  function crepSizeKey(x) {
+    var w = Number(x.width), l = Number(x.length);
+    return w && l ? (Math.round(w * 10) / 10) + 'x' + (Math.round(l * 10) / 10) : '';
+  }
+  // Within 2% of a full count is full: 1,296 or 1,280 out of 1,300 is a full skid less a few spoiled sheets.
+  function crepIsFull(q, full) { return !!(q && full && q >= full * 0.98); }
   // Does coil ci's last skid continue on the next coil (a changeover)? Worked out from its count:
   // short of a full skid = it continues. A tap on the row overrides it (carryMode 'yes' / 'no').
   function crepCarries(ci) {
@@ -6226,8 +6244,7 @@
     if (!c || ci >= cs.length - 1) return false;
     if (c.carryMode === 'yes') return true;
     if (c.carryMode === 'no') return false;
-    var q = crepNum(c.rows[c.rows.length - 1].qty), full = crepFullSize();
-    return !(q && full && q >= full);
+    return !crepIsFull(crepNum(c.rows[c.rows.length - 1].qty), crepFullSize(c));
   }
 
   // The unfinished skid an earlier run left on this coil line (on its coil's 'Carry Over'), if any.
@@ -6387,9 +6404,9 @@
   // Finishing: at most two plain questions, then one big button. Asked only when the app can't tell.
   function crepAskQs() {
     var cs = crep.coils, lastC = cs[cs.length - 1], r = lastC.rows[lastC.rows.length - 1];
-    var q = crepNum(r.qty), full = crepFullSize();
+    var q = crepNum(r.qty), full = crepFullSize(lastC);
     var joined = crepSkids().some(function (s) { return s.rows.length > 1 && s.rows.some(function (p) { return p[0] === cs.length - 1 && p[1] === lastC.rows.length - 1; }); });
-    return { lastC: lastC, lastQty: q, askFull: !!(q && full && q < full && !joined), full: full };
+    return { lastC: lastC, lastQty: q, askFull: !!(q && full && !crepIsFull(q, full) && !joined), full: full };
   }
   function crepAskHtml(skids) {
     var qs = crepAskQs(), nm = qs.lastC.mill || qs.lastC.ticket || qs.lastC.skidId, a = crep.ask;   // the mill number: what the paper report calls the coil
