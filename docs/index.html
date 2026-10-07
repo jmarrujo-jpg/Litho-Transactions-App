@@ -138,6 +138,15 @@
   .crep-row input { margin: 0; min-width: 0; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 16px; }
   .crep-no { font-weight: 700; font-variant-numeric: tabular-nums; }
   .crep-note { grid-column: 2 / 5; font-size: 12px; color: var(--muted); margin-top: -2px; }
+  /* the app's call on a coil's last skid (full, or finishes on the next coil): one big tap flips it */
+  .crep-flip { grid-column: 2 / 5; text-align: left; border: 2px solid var(--good); background: #ecfdf3; color: var(--good); font-weight: 700;
+    border-radius: 10px; padding: 10px 12px; font-size: 15px; cursor: pointer; }
+  .crep-flip.on { border-color: var(--warn); background: #fff7ed; color: var(--warn); }
+  .crep-flip span { font-weight: 400; font-size: 13px; color: var(--muted); }
+  .crep-q { margin: 0 0 14px; }
+  .crep-qt { font-size: 17px; margin-bottom: 8px; }
+  .crep-yn { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .crep-yn .btn { padding: 16px 10px; font-size: 17px; margin: 0; }
   .gate h2 { margin-bottom: 4px; }
   .gate p { color: var(--muted); font-size: 14px; margin-top: 0; }
   .modal-overlay {
@@ -222,7 +231,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.71.0</span>
+      <span class="version" id="appVersion">v1.72.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -5990,7 +5999,9 @@
   // the next coil.
   // carryOut = the last skid isn't full: it's finished on the next run on this line (and takes that
   // run's first number); carryUse = finish yesterday's unfinished skid on this run's first coil.
-  var crep = { coils: [], picking: false, operator: '', start: '', end: '', date: '', fin: true, carryOut: false, carryUse: true };
+  // asking = the "Almost done" questions are showing; ask = their answers (null = not answered).
+  var crep = { coils: [], picking: false, operator: '', start: '', end: '', date: '', carryOut: false, carryUse: true, carryOpts: false,
+    asking: false, ask: { fin: null, full: null } };
 
   // Preview the ticket shape for a cut date + coil line, e.g. 2026-08-01 / line 1 -> "080126-1XX".
   function fmtTicketPreview(ymd, line) {
@@ -6072,7 +6083,7 @@
     s.oninput = function () { renderCoilPicker(s.value); };
     ensureAllCache(function () {
       // The tickets just arrived: an unfinished skid from the last run shows its card now.
-      if (coilMode === 'metals' && !crep.coils.length && crepCarryIn() && !document.getElementById('crepCarryUse')) { renderCoilReport(); return; }
+      if (coilMode === 'metals' && !crep.coils.length && crepCarryIn() && !document.getElementById('crepCarryCard')) { renderCoilReport(); return; }
       renderCoilPicker(s.value);
     });
     renderCoilPicker('');
@@ -6188,14 +6199,35 @@
 
   function crepAddCoil(t) {
     var cs = crep.coils, prev = cs[cs.length - 1];
-    if (prev) {
-      while (prev.rows.length > 1 && !String(prev.rows[prev.rows.length - 1].qty).trim()) prev.rows.pop();   // drop blank rows at the end
-      prev.carry = true;   // most coils run out partway through a skid: its last count continues on this one
-    }
+    if (prev) while (prev.rows.length > 1 && !String(prev.rows[prev.rows.length - 1].qty).trim()) prev.rows.pop();   // drop blank rows at the end
+    if (!cs.length && !crep.start) crep.start = crepNowHM();   // hours running start themselves
     cs.push({ skidId: t.skidId, ticket: t.ticket, mill: t.mill || '', bw: t.bw || '', type: t.type || '', temper: t.temper || '',
-      endUse: t.endUse || '', comments: t.comments || '', rows: [{ qty: '', weight: '' }], spoil: '', carry: false });
-    crep.picking = false;
+      endUse: t.endUse || '', comments: t.comments || '', rows: [{ qty: '', weight: '' }], spoil: '', carryMode: null });
+    crep.picking = false; crep.asking = false;
     renderCoilReport();
+  }
+  function crepNowHM() { var d = new Date(); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
+
+  // A full skid's count, worked out (no one types it): the count that comes up most on this report
+  // and on this line's recent coil-line skids (1,300 on the paper report). 0 = can't tell yet.
+  function crepFullSize() {
+    var n = {}, add = function (q) { q = crepNum(q); if (q > 0) n[q] = (n[q] || 0) + 1; };
+    crep.coils.forEach(function (c) { c.rows.forEach(function (r) { add(r.qty); }); });
+    var re = new RegExp('^\\d{6}-' + coilLineNo + '\\d\\d$');
+    allCache.filter(function (t) { return re.test(String(t.ticket || '').trim()); }).slice(-60).forEach(function (t) { add(t.qty); });
+    var best = 0, bestN = 1;   // a count has to come up at least twice to be "full"
+    Object.keys(n).forEach(function (q) { q = Number(q); if (n[q] > bestN || (n[q] === bestN && bestN > 1 && q > best)) { best = q; bestN = n[q]; } });
+    return best;
+  }
+  // Does coil ci's last skid continue on the next coil (a changeover)? Worked out from its count:
+  // short of a full skid = it continues. A tap on the row overrides it (carryMode 'yes' / 'no').
+  function crepCarries(ci) {
+    var cs = crep.coils, c = cs[ci];
+    if (!c || ci >= cs.length - 1) return false;
+    if (c.carryMode === 'yes') return true;
+    if (c.carryMode === 'no') return false;
+    var q = crepNum(c.rows[c.rows.length - 1].qty), full = crepFullSize();
+    return !(q && full && q >= full);
   }
 
   // The unfinished skid an earlier run left on this coil line (on its coil's 'Carry Over'), if any.
@@ -6216,6 +6248,7 @@
     var out = [], cs = crep.coils, cin = crepCarryIn();
     if (cin) out.push({ coils: [-1], parts: null, qty: cin.sheets, weight: '', rows: [[-1, 0]], open: crep.carryUse, carryIn: true });
     cs.forEach(function (c, ci) {
+      var carries = crepCarries(ci);
       c.rows.forEach(function (r, ri) {
         var open = out[out.length - 1];
         if (crep.carryOut && ci === cs.length - 1 && ri === c.rows.length - 1 && !(ri === 0 && open && open.open)) return;   // left for the next run
@@ -6224,8 +6257,7 @@
           open.weight = r.weight; open.open = false; open.rows.push([ci, ri]);
           return;
         }
-        out.push({ coils: [ci], parts: null, qty: crepNum(r.qty), weight: r.weight, rows: [[ci, ri]],
-          open: c.carry && ci < cs.length - 1 && ri === c.rows.length - 1 });
+        out.push({ coils: [ci], parts: null, qty: crepNum(r.qty), weight: r.weight, rows: [[ci, ri]], open: carries && ri === c.rows.length - 1 });
       });
     });
     return out;
@@ -6240,6 +6272,13 @@
   }
   function crepSkidNo(k) { var n = crepFirstSeq() + k; return '-' + coilLineNo + (n < 10 ? '0' + n : String(n)); }
 
+  // Two big buttons for a plain yes / no; the picked one is filled in.
+  function crepYesNo(id, val, yes, no) {
+    return '<div class="crep-yn">' +
+      '<button class="btn ' + (val === true ? 'success' : 'secondary') + '" data-crepyn="' + id + ':1">' + yes + '</button>' +
+      '<button class="btn ' + (val === false ? 'warn' : 'secondary') + '" data-crepyn="' + id + ':0">' + no + '</button></div>';
+  }
+
   function renderCoilReport() {
     var body = document.getElementById('coilBody');
     if (!body) return;
@@ -6253,7 +6292,7 @@
           '<h3 style="margin-top:0">' + (cs.length ? 'Next coil' : 'Coil Line Production Report') + '</h3>' +
           '<div class="sub" style="margin-bottom:12px">' + (cs.length
             ? 'Pick the coil that started when ' + esc(lastC.ticket || lastC.skidId) + ' ran out.'
-            : 'Pick the first coil you ran. Add the next one when it runs out.' + (cin && crep.carryUse ? ' Its first count finishes the unfinished skid above.' : '')) + '</div>' +
+            : 'Pick the first coil you ran. Add the next one when it runs out.') + '</div>' +
           coilPickerHtml() +
           (cs.length ? '<button class="btn secondary" id="coilPickCancel" style="width:100%;margin-top:8px">Cancel</button>' : '') +
         '</div>';
@@ -6276,7 +6315,7 @@
           '<div class="field"><label>Date</label><input type="date" id="crepDate" value="' + esc(crep.date) + '" max="' + esc(todayStr()) + '"></div></div>' +
         '<div class="row">' +
           '<div class="field" style="flex:1"><label>Hours running — start</label><input type="time" id="crepStart" value="' + esc(crep.start) + '"></div>' +
-          '<div class="field" style="flex:1;margin-left:8px"><label>End</label><input type="time" id="crepEnd" value="' + esc(crep.end) + '"></div></div>' +
+          '<div class="field" style="flex:1;margin-left:8px"><label>End <span class="sub">(fills in when you finish)</span></label><input type="time" id="crepEnd" value="' + esc(crep.end) + '"></div></div>' +
       '</div>' + crepCarryHtml(cin, skids);
     cs.forEach(function (c, ci) {
       html += '<div class="card crep-coil">' +
@@ -6288,62 +6327,109 @@
         '</div>' +
         '<div class="crep-head"><span>Skid</span><span>Ticket count</span><span>Weight</span><span></span></div>';
       c.rows.forEach(function (r, ri) {
-        var a = at[ci + ':' + ri], sk = a ? skids[a.k] : null;
-        if (!a) {   // this run's unfinished last skid: no number yet
-          html += '<div class="crep-row" data-crc="' + ci + '" data-crr="' + ri + '">' +
-            '<span class="crep-no">next ↘</span>' +
-            '<input type="number" inputmode="numeric" class="crepQty" value="' + esc(r.qty) + '" placeholder="sheets">' +
-            '<span class="sub" style="align-self:center">—</span>' +
-            '<button class="btn danger" data-crepdel="' + ci + ':' + ri + '" style="padding:8px 10px">&times;</button>' +
-            '<div class="crep-note">not full — finished on the next run, as its first skid</div></div>';
-          return;
-        }
-        var label = crepSkidNo(a.k) + (a.part === 0 ? ' ↘' : a.part === 1 ? ' ↳' : '');
-        var tail = a.part === 0 ? '<div class="crep-note">continues on coil ' + (ci + 2) + '</div>'
-          : a.part === 1 ? '<div class="crep-note" data-creptot="' + a.k + '">' + crepFmt(sk.qty) + ' on the skid (' + crepFmt(sk.parts[0]) + (sk.carryIn ? ' from the last run' : '') + ' + ' + crepFmt(sk.parts[1]) + ')</div>' : '';
+        var v = crepRowView(ci, ri, skids, at);
         html += '<div class="crep-row" data-crc="' + ci + '" data-crr="' + ri + '">' +
-          '<span class="crep-no">' + esc(label) + '</span>' +
+          '<span class="crep-no">' + esc(v.label) + '</span>' +
           '<input type="number" inputmode="numeric" class="crepQty" value="' + esc(r.qty) + '" placeholder="sheets">' +
-          (a.part === 0 ? '<span class="sub" style="align-self:center">—</span>' : '<input type="number" inputmode="decimal" class="crepWt" value="' + esc(r.weight) + '" placeholder="lbs">') +
-          '<button class="btn danger" data-crepdel="' + ci + ':' + ri + '" style="padding:8px 10px">&times;</button>' + tail +
+          '<input type="number" inputmode="decimal" class="crepWt" value="' + esc(r.weight) + '" placeholder="lbs"' + (v.showWt ? '' : ' style="visibility:hidden"') + '>' +
+          '<button class="btn danger" data-crepdel="' + ci + ':' + ri + '" style="padding:8px 10px">&times;</button>' +
+          '<div class="crep-note"' + (v.note ? '' : ' style="display:none"') + '>' + esc(v.note) + '</div>' +
+          (v.flip ? '<button class="crep-flip' + (v.flip.on ? ' on' : '') + '" data-crepflip="' + ci + '">' + v.flip.html + '</button>' : '') +
         '</div>';
       });
       html += '<button class="btn secondary" data-crepadd="' + ci + '" style="width:100%;margin-top:6px">+ Add skid</button>' +
-        '<div class="row" style="align-items:flex-end;margin-top:10px">' +
-          '<div class="field" style="flex:1;margin:0"><label>Spoilage count</label><input type="number" inputmode="numeric" class="crepSpoil" data-crepspoil="' + ci + '" value="' + esc(c.spoil) + '" placeholder="sheets"></div>' +
-          (ci < last
-            ? '<label style="flex:1;display:flex;align-items:center;gap:8px;margin:0 0 10px 10px;font-size:14px"><input type="checkbox" data-crepcarry="' + ci + '" style="width:auto;margin:0"' + (c.carry ? ' checked' : '') + '> Last skid continues on coil ' + (ci + 2) + '</label>'
-            : '<label style="flex:1;display:flex;align-items:center;gap:8px;margin:0 0 10px 10px;font-size:14px"><input type="checkbox" id="crepFin" style="width:auto;margin:0"' + (crep.fin ? ' checked' : '') + '> <b>FIN COIL</b> (coil finished)</label>') +
-        '</div>' +
-        (ci === last ? '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:14px"><input type="checkbox" id="crepCarryOut" style="width:auto;margin:0"' + (crep.carryOut ? ' checked' : '') + '> Last skid isn’t full — finish it on the next run</label>' : '') +
+        '<div class="field" style="margin:10px 0 0"><label>Spoilage count</label><input type="number" inputmode="numeric" class="crepSpoil" data-crepspoil="' + ci + '" value="' + esc(c.spoil) + '" placeholder="sheets"></div>' +
         (ci < last ? '<div class="sub" style="margin-top:6px"><b>FIN COIL</b> — ran out, coil ' + (ci + 2) + ' started</div>' : '') +
       '</div>';
     });
-    var tot = skids.reduce(function (a, s) { return a + s.qty; }, 0), spoil = cs.reduce(function (a, c) { return a + crepNum(c.spoil); }, 0);
-    html += '<button class="btn secondary" id="crepNextBtn" style="width:100%;margin-bottom:12px">+ Next coil (this one ran out)</button>' +
-      '<div class="card"><div id="crepSummary" class="sub" style="margin-bottom:10px">' + crepSummaryText(skids, tot, spoil) + '</div>' +
-        '<button class="btn success" id="crepCutBtn" style="width:100%">' + (cs.length > 1 ? 'Cut ' + cs.length + ' coils &amp; create skids' : 'Cut coil &amp; create skids') + '</button></div>';
+    if (!crep.asking) {
+      html += '<button class="btn secondary" id="crepNextBtn" style="width:100%;margin-bottom:12px">+ Next coil (this one ran out)</button>' +
+        '<div class="card"><div id="crepSummary" class="sub" style="margin-bottom:10px">' + crepSummaryText(skids) + '</div>' +
+          '<button class="btn success" id="crepCutBtn" style="width:100%;padding:16px;font-size:18px">Done — finish the report</button></div>';
+    } else {
+      html += crepAskHtml(skids);
+    }
     body.innerHTML = html;
     wireCoilReport();
+    if (crep.asking) { var a2 = document.getElementById('crepAsk'); if (a2 && a2.scrollIntoView) a2.scrollIntoView({ block: 'nearest' }); }
   }
 
-  // The card for an unfinished skid the last run on this line left: it becomes this run's first
-  // skid, finished by the first coil's first count (or, unticked, made as it is).
+  // What a row shows: its skid number (↘ = continues on the next coil, ↳ = the rest of one), a note,
+  // whether it has a weight box, and — on a coil's last count — the app's call on whether it's full.
+  function crepRowView(ci, ri, skids, at) {
+    var cs = crep.coils, c = cs[ci], a = at[ci + ':' + ri], sk = a ? skids[a.k] : null, v = { label: '', note: '', showWt: true, flip: null };
+    if (!a) return { label: 'next ↘', note: 'not full — finished on the next run, as its first skid', showWt: false, flip: null };
+    v.label = crepSkidNo(a.k) + (a.part === 0 ? ' ↘' : a.part === 1 ? ' ↳' : '');
+    if (a.part === 0) v.showWt = false;
+    if (a.part === 1) v.note = crepFmt(sk.qty) + ' on the skid (' + crepFmt(sk.parts[0]) + (sk.carryIn ? ' from the last run' : '') + ' + ' + crepFmt(sk.parts[1]) + ')';
+    if (ci < cs.length - 1 && ri === c.rows.length - 1) {
+      var on = crepCarries(ci);
+      v.flip = { on: on, html: on ? '↘ Not full — finishes on coil ' + (ci + 2) + ' <span>(tap if it was full)</span>' : '✔ Full skid <span>(tap if it finishes on coil ' + (ci + 2) + ')</span>' };
+    }
+    return v;
+  }
+  // Re-number and re-label the rows in place as counts are typed (no redraw, so a tap isn't lost).
+  function crepRelabel() {
+    var skids = crepSkids(), at = {};
+    skids.forEach(function (sk, k) { sk.rows.forEach(function (p, j) { at[p[0] + ':' + p[1]] = { k: k, part: sk.rows.length > 1 ? j : -1 }; }); });
+    Array.prototype.forEach.call(document.querySelectorAll('.crep-row'), function (el) {
+      var v = crepRowView(Number(el.getAttribute('data-crc')), Number(el.getAttribute('data-crr')), skids, at);
+      el.querySelector('.crep-no').textContent = v.label;
+      el.querySelector('.crepWt').style.visibility = v.showWt ? '' : 'hidden';
+      var n = el.querySelector('.crep-note'); n.textContent = v.note; n.style.display = v.note ? '' : 'none';
+      var f = el.querySelector('.crep-flip');
+      if (f && v.flip) { f.className = 'crep-flip' + (v.flip.on ? ' on' : ''); f.innerHTML = v.flip.html; }
+    });
+    var sum = document.getElementById('crepSummary');
+    if (sum) sum.innerHTML = crepSummaryText(skids);
+  }
+
+  // Finishing: at most two plain questions, then one big button. Asked only when the app can't tell.
+  function crepAskQs() {
+    var cs = crep.coils, lastC = cs[cs.length - 1], r = lastC.rows[lastC.rows.length - 1];
+    var q = crepNum(r.qty), full = crepFullSize();
+    var joined = crepSkids().some(function (s) { return s.rows.length > 1 && s.rows.some(function (p) { return p[0] === cs.length - 1 && p[1] === lastC.rows.length - 1; }); });
+    return { lastC: lastC, lastQty: q, askFull: !!(q && full && q < full && !joined), full: full };
+  }
+  function crepAskHtml(skids) {
+    var qs = crepAskQs(), nm = qs.lastC.mill || qs.lastC.ticket || qs.lastC.skidId, a = crep.ask;   // the mill number: what the paper report calls the coil
+    var ready = a.fin !== null && (!qs.askFull || a.full !== null);
+    var keep = skids.filter(function (s) { return s.qty > 0 || String(s.weight || '').trim(); });
+    var lastNo = skids.length ? crepSkidNo(skids.length - (crep.carryOut ? 0 : 1)) : '';
+    return '<div class="card" id="crepAsk" style="border:2px solid var(--accent)">' +
+      '<h3 style="margin-top:0">Almost done</h3>' +
+      '<div class="crep-q"><div class="crep-qt">Is coil <b>' + esc(nm) + '</b> used up?</div>' +
+        crepYesNo('fin', a.fin, 'Yes — FIN COIL', 'No — there’s more on it') + '</div>' +
+      (qs.askFull ? '<div class="crep-q"><div class="crep-qt">The last skid' + (crep.carryOut ? '' : ' (' + esc(lastNo) + ')') + ' has <b>' + crepFmt(qs.lastQty) + '</b> sheets. Is it full?</div>' +
+        crepYesNo('full', a.full, 'Yes — it’s done', 'No — finish it next run') + '</div>' : '') +
+      (ready ? '<div class="sub" id="crepSummary" style="margin:6px 0 10px">' + crepSummaryText(skids) + '</div>' +
+        '<button class="btn success" id="crepGoBtn" style="width:100%;padding:16px;font-size:18px">Create ' + keep.length + ' skid' + (keep.length === 1 ? '' : 's') + '</button>'
+        : '<div class="sub" style="margin:6px 0 0">Tap an answer' + (qs.askFull ? ' to each question' : '') + '.</div>') +
+      '<button class="btn secondary" id="crepAskBack" style="width:100%;margin-top:8px">&larr; Back to the report</button>' +
+    '</div>';
+  }
+
+  // The card for an unfinished skid the last run on this line left: it's this run's first skid,
+  // finished by the first coil's first count. "Options" holds the rarely needed choices.
   function crepCarryHtml(cin, skids) {
     if (!cin) return '';
     var sk = skids && skids[0] && skids[0].carryIn ? skids[0] : null;
-    return '<div class="card" style="border-left:4px solid #b45309">' +
-      '<div class="sub">Unfinished skid from the last run' + (cin.date ? ' (' + esc(cin.date) + ')' : '') + ' on Coil Line ' + coilLineNo + '</div>' +
-      '<div class="ticket-id" style="font-size:16px">' + esc(crepSkidNo(0)) + (crep.carryUse ? ' ↘ ' : ' ') + crepFmt(cin.sheets) + ' sheets</div>' +
-      '<div class="sub">from coil ' + esc(cin.ticket || cin.skidId) + (cin.mill ? ' · ' + esc(cin.mill) : '') + '</div>' +
-      '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px"><input type="checkbox" id="crepCarryUse" style="width:auto;margin:0"' + (crep.carryUse ? ' checked' : '') + '> Finish it with this run’s first coil' + (sk && sk.parts ? ' — ' + crepFmt(sk.qty) + ' on the skid' : '') + '</label>' +
-      (crep.carryUse ? '' : '<div class="sub" style="margin-top:4px">It’s made as it is: ' + esc(crepSkidNo(0)) + ' with ' + crepFmt(cin.sheets) + ' sheets.</div>') +
-      '<button class="btn secondary" id="crepCarryDiscard" style="margin-top:8px;padding:6px 12px;font-size:13px">Discard it (a test or a mistake)</button>' +
+    return '<div class="card" id="crepCarryCard" style="border-left:4px solid var(--warn)">' +
+      '<div class="ticket-id" style="font-size:16px">' + esc(crepSkidNo(0)) + (crep.carryUse ? ' continues from the last run' : ' — made as it is') + ': ' + crepFmt(cin.sheets) + ' sheets</div>' +
+      '<div class="sub">from coil ' + esc(cin.ticket || cin.skidId) + (cin.mill ? ' · ' + esc(cin.mill) : '') + (cin.date ? ' · left ' + esc(cin.date) : '') +
+        (crep.carryUse ? (sk && sk.parts ? ' · <b>' + crepFmt(sk.qty) + ' on the skid now</b>' : ' · the first count you type on coil 1 finishes it') : '') + '</div>' +
+      (crep.carryOpts
+        ? '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">' +
+            '<button class="btn secondary" id="crepCarryUse" style="padding:8px 12px;font-size:14px">' + (crep.carryUse ? 'Make it its own skid (' + crepFmt(cin.sheets) + ' sheets)' : 'Finish it with this run instead') + '</button>' +
+            '<button class="btn danger" id="crepCarryDiscard" style="padding:8px 12px;font-size:14px">Discard it (a test or a mistake)</button></div>'
+        : '<button class="btn secondary" id="crepCarryOpts" style="margin-top:8px;padding:6px 12px;font-size:13px">Options</button>') +
     '</div>';
   }
   function wireCrepCarry() {
+    var op = document.getElementById('crepCarryOpts');
+    if (op) op.onclick = function () { crep.carryOpts = true; renderCoilReport(); };
     var cb = document.getElementById('crepCarryUse');
-    if (cb) cb.onchange = function () { crep.carryUse = this.checked; renderCoilReport(); };
+    if (cb) cb.onclick = function () { crep.carryUse = !crep.carryUse; crep.carryOpts = false; renderCoilReport(); };
     var dc = document.getElementById('crepCarryDiscard');
     if (dc) dc.onclick = function () {
       var cin = crepCarryIn();
@@ -6354,6 +6440,7 @@
         runMutation('discardCoilCarry', [cin.skidId, String(crep.operator || lastOperator || '').trim(), newOpId()],
           function () {
             allCache.forEach(function (t) { if (t.skidId === cin.skidId) { t.carryOver = 0; t.carryLine = ''; t.carryDate = ''; } });
+            crep.carryOpts = false; crep.carryUse = true;
             toast('Unfinished skid discarded');
             renderCoilReport();
           },
@@ -6362,28 +6449,19 @@
     };
   }
 
-  function crepSummaryText(skids, tot, spoil) {
-    var ch = skids.filter(function (s) { return s.coils.length > 1; }).length;
-    var co = crepCarryOutQty();
-    return '<b>' + skids.length + ' skid' + (skids.length === 1 ? '' : 's') + '</b>' + (skids.length ? ' (' + esc(crepSkidNo(0)) + (skids.length > 1 ? ' to ' + esc(crepSkidNo(skids.length - 1)) : '') + ')' : '') + ' &middot; ' +
+  function crepSummaryText(skids) {
+    var keep = skids.filter(function (s) { return s.qty > 0 || String(s.weight || '').trim(); });
+    var tot = keep.reduce(function (a, s) { return a + s.qty; }, 0), spoil = crep.coils.reduce(function (a, c) { return a + crepNum(c.spoil); }, 0);
+    var ch = keep.filter(function (s) { return s.coils.length > 1; }).length, co = crepCarryOutQty();
+    return '<b>' + keep.length + ' skid' + (keep.length === 1 ? '' : 's') + '</b>' + (keep.length ? ' (' + esc(crepSkidNo(0)) + (keep.length > 1 ? ' to ' + esc(crepSkidNo(keep.length - 1)) : '') + ')' : '') + ' &middot; ' +
       crepFmt(tot) + ' sheets' + (spoil ? ' &middot; ' + crepFmt(spoil) + ' spoiled' : '') + (ch ? ' &middot; ' + ch + ' changeover' + (ch === 1 ? '' : 's') : '') +
-      (crep.carryOut ? ' &middot; ' + crepFmt(co) + ' on an unfinished skid for the next run' : '');
+      (crep.carryOut ? ' &middot; ' + crepFmt(co) + ' left on a skid for the next run' : '');
   }
   // Sheets on this run's unfinished last skid (0 when there isn't one).
   function crepCarryOutQty() {
     var cs = crep.coils, c = cs[cs.length - 1];
     return crep.carryOut && c ? crepNum(c.rows[c.rows.length - 1].qty) : 0;
   }
-  function crepRefreshTotals() {
-    var skids = crepSkids();
-    Array.prototype.forEach.call(document.querySelectorAll('[data-creptot]'), function (el) {
-      var sk = skids[Number(el.getAttribute('data-creptot'))];
-      if (sk && sk.parts) el.textContent = crepFmt(sk.qty) + ' on the skid (' + crepFmt(sk.parts[0]) + (sk.carryIn ? ' from the last run' : '') + ' + ' + crepFmt(sk.parts[1]) + ')';
-    });
-    var sum = document.getElementById('crepSummary');
-    if (sum) sum.innerHTML = crepSummaryText(skids, skids.reduce(function (a, s) { return a + s.qty; }, 0), crep.coils.reduce(function (a, c) { return a + crepNum(c.spoil); }, 0));
-  }
-
   function wireCoilReport() {
     var cs = crep.coils;
     var op = document.getElementById('crepOperator');
@@ -6394,7 +6472,8 @@
     document.getElementById('crepEnd').onchange = function () { crep.end = this.value; };
     Array.prototype.forEach.call(document.querySelectorAll('.crep-row'), function (el) {
       var r = cs[Number(el.getAttribute('data-crc'))].rows[Number(el.getAttribute('data-crr'))];
-      el.querySelector('.crepQty').oninput = function () { r.qty = this.value; crepRefreshTotals(); };
+      var qi = el.querySelector('.crepQty');
+      qi.oninput = function () { r.qty = this.value; crepRelabel(); };
       var wt = el.querySelector('.crepWt');
       if (wt) wt.oninput = function () { r.weight = this.value; };
     });
@@ -6407,49 +6486,65 @@
       };
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-crepadd]'), function (b) {
-      b.onclick = function () { cs[Number(b.getAttribute('data-crepadd'))].rows.push({ qty: '', weight: '' }); renderCoilReport(); };
+      b.onclick = function () { cs[Number(b.getAttribute('data-crepadd'))].rows.push({ qty: '', weight: '' }); crep.asking = false; renderCoilReport(); };
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-crepspoil]'), function (inp) {
-      inp.oninput = function () { cs[Number(inp.getAttribute('data-crepspoil'))].spoil = this.value; crepRefreshTotals(); };
+      inp.oninput = function () { cs[Number(inp.getAttribute('data-crepspoil'))].spoil = this.value; crepRelabel(); };
     });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-crepcarry]'), function (cb) {
-      cb.onchange = function () { cs[Number(cb.getAttribute('data-crepcarry'))].carry = this.checked; renderCoilReport(); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-crepflip]'), function (b) {
+      b.onclick = function () { var ci = Number(b.getAttribute('data-crepflip')); cs[ci].carryMode = crepCarries(ci) ? 'no' : 'yes'; renderCoilReport(); };
     });
-    var fin = document.getElementById('crepFin');
-    if (fin) fin.onchange = function () { crep.fin = this.checked; };
-    var co = document.getElementById('crepCarryOut');
-    if (co) co.onchange = function () { crep.carryOut = this.checked; renderCoilReport(); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-crepyn]'), function (b) {
+      b.onclick = function () {
+        var p = b.getAttribute('data-crepyn').split(':'), v = p[1] === '1';
+        crep.ask[p[0]] = v;
+        if (p[0] === 'full') crep.carryOut = !v;
+        renderCoilReport();
+      };
+    });
     wireCrepCarry();
     var rm = document.querySelector('[data-crepremove]');
     if (rm) rm.onclick = function () {
       cs.pop();
-      if (cs.length) cs[cs.length - 1].carry = false;
+      if (cs.length) cs[cs.length - 1].carryMode = null;
       else crep.picking = false;
+      crep.asking = false;
       renderCoilReport();
     };
-    document.getElementById('crepNextBtn').onclick = function () { crep.picking = true; renderCoilReport(); };
-    document.getElementById('crepCutBtn').onclick = crepSubmit;
+    var nx = document.getElementById('crepNextBtn');
+    if (nx) nx.onclick = function () { crep.picking = true; renderCoilReport(); };
+    var cut = document.getElementById('crepCutBtn');
+    if (cut) cut.onclick = crepFinish;
+    var back = document.getElementById('crepAskBack');
+    if (back) back.onclick = function () { crep.asking = false; crep.carryOut = false; renderCoilReport(); };
+    var go = document.getElementById('crepGoBtn');
+    if (go) go.onclick = crepSubmit;
   }
 
-  function crepSubmit() {
-    var cs = crep.coils, skids = crepSkids(), line = coilLineNo, date = crep.date || todayStr(), finish = crep.fin;
-    var nm = function (c) { return c.ticket || c.skidId; };
-    // A blank row is skipped, unless it's half of a changeover: both halves need their count.
+  // "Done": check the counts, fill in the end time, then ask the (at most two) questions.
+  function crepFinish() {
+    var cs = crep.coils, skids = crepSkids(), nm = function (c) { return c.ticket || c.skidId; };
+    if (!String(crep.operator || '').trim()) { toast('Enter the operator'); var o = document.getElementById('crepOperator'); if (o) o.focus(); return; }
     var bad = skids.filter(function (s) { return s.parts && (!s.parts[0] || !s.parts[1]); })[0];
-    if (bad) { toast('Skid ' + crepSkidNo(skids.indexOf(bad)) + ' continues on the next coil: enter its count on both coils'); return; }
+    if (bad) { toast('Skid ' + crepSkidNo(skids.indexOf(bad)) + ' finishes on the next coil: enter its count on both coils'); return; }
     var open = skids.filter(function (s) { return s.open; })[0];
     if (open) { toast('Coil ' + (open.coils[0] + 2) + ' needs the rest of skid ' + crepSkidNo(skids.indexOf(open))); return; }
     var keep = skids.filter(function (s) { return s.qty > 0 || String(s.weight || '').trim(); });
-    var carryOut = crepCarryOutQty(), cin = crepCarryIn();
-    var lastCoil = cs[cs.length - 1];
-    if (crep.carryOut && !carryOut) { toast('Enter how many sheets are on the unfinished skid'); return; }
-    if (crep.carryOut && skids.some(function (s) { return s.rows.some(function (p) { return p[0] === cs.length - 1 && p[1] === lastCoil.rows.length - 1; }); })) {
-      toast('That skid already joins two coils — add its count as its own row'); return;
-    }
-    if (!keep.length && !carryOut) { toast('Enter the ticket count of at least one skid'); return; }
-    var unused = cs.filter(function (c, i) { return !keep.some(function (s) { return s.coils.indexOf(i) !== -1; }) && !(carryOut && i === cs.length - 1); })[0];
+    if (!keep.length) { toast('Enter the ticket count of at least one skid'); return; }
+    var unused = cs.filter(function (c, i) { return !keep.some(function (s) { return s.coils.indexOf(i) !== -1; }); })[0];
     if (unused) { toast('No skid is from ' + nm(unused) + ' — enter its counts or remove that coil'); return; }
-    if (!String(crep.operator || '').trim()) { toast('Enter the operator'); return; }
+    if (!crep.end) crep.end = crepNowHM();
+    crep.ask = { fin: null, full: null }; crep.carryOut = false; crep.asking = true;
+    renderCoilReport();
+  }
+
+  function crepSubmit() {
+    var cs = crep.coils, skids = crepSkids(), line = coilLineNo, date = crep.date || todayStr(), finish = crep.ask.fin === true;
+    var qs = crepAskQs();
+    if (crep.ask.fin === null || (qs.askFull && crep.ask.full === null)) { toast('Tap an answer first'); return; }
+    var keep = skids.filter(function (s) { return s.qty > 0 || String(s.weight || '').trim(); });
+    var carryOut = crepCarryOutQty(), cin = crepCarryIn();
+    if (!keep.length && !carryOut) { toast('Enter the ticket count of at least one skid'); return; }
     var multi = cs.length > 1, lastC = cs[cs.length - 1];
     // Coil list for the server: yesterday's coil goes first (index 0) when it isn't today's first coil.
     var same = cin && cs[0] && cs[0].skidId === cin.skidId, shift = cin && !same ? 1 : 0;
@@ -6460,36 +6555,31 @@
       if (s.parts && !(same && s.carryIn)) o.parts = s.parts.slice();
       return o;
     });
-    var ch = keep.filter(function (s) { return s.parts; }).length, tot = keep.reduce(function (a, s) { return a + s.qty; }, 0);
-    var msg = (multi ? cs.slice(0, -1).map(nm).join(', ') + ' ran out, so ' + (cs.length === 2 ? 'it’s' : 'they’re') + ' marked Used. ' : '') +
-      (finish ? (multi ? 'The last coil (' + nm(lastC) + ') is' : 'The coil is') + ' marked Used (FIN COIL).' : (multi ? 'The last coil (' + nm(lastC) + ')' : 'The coil') + ' stays open to cut more later.') +
-      ' ' + crepFmt(tot) + ' sheets' + (ch ? '; ' + ch + ' changeover skid' + (ch === 1 ? '' : 's') + ' with both coils’ mills' : '') + '. Tickets look like ' + fmtTicketPreview(date, line) + '.' +
-      (cin ? ' The unfinished skid from the last run (' + crepFmt(cin.sheets) + ' sheets) is ' + crepSkidNo(0) + '.' : '') +
-      (carryOut ? ' ' + crepFmt(carryOut) + ' sheets stay on an unfinished skid; the next run on Coil Line ' + line + ' finishes it.' : '');
-    showConfirm('Cut ' + (multi ? cs.length + ' coils' : 'coil ' + nm(cs[0])) + ' into ' + keep.length + ' skid' + (keep.length === 1 ? '' : 's') + ' on Coil Line ' + line + '?', msg, function () {
-      var btn = document.getElementById('crepCutBtn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Cutting…'; }
-      lastOperator = String(crep.operator).trim();
-      var info = { operator: lastOperator, start: crep.start, end: crep.end, spoilage: (shift ? [0] : []).concat(cs.map(function (c) { return crepNum(c.spoil); })) };
-      if (cin) info.carryIn = { skidId: cin.skidId, only: !same };   // only = not one of today's coils
-      if (carryOut) info.carryOut = carryOut;
-      runMutation('cutCoil', [ids, date, line, payload, finish, newOpId(), info],
-        function (res) {
-          var made = (res && res.created != null) ? res.created : keep.length;
-          var list = (res && res.tickets) ? res.tickets.map(function (t) { return t.ticket; }).join(', ') : '';
-          cs.forEach(function (c, i) { if (i < cs.length - 1 || finish) markCacheStatus(c.skidId, 'Used'); });
-          // The carry moves at once (the reload below catches up): yesterday's is finished, today's is waiting.
-          allCache.forEach(function (t) {
-            if (cin && t.skidId === cin.skidId) { t.carryOver = 0; t.carryLine = ''; t.carryDate = ''; }
-            if (carryOut && t.skidId === lastC.skidId) { t.carryOver = carryOut; t.carryLine = line; t.carryDate = date; }
-          });
-          fetchTickets();  // pull the new skids + coil state
-          crep.coils = []; crep.picking = false; crep.start = ''; crep.end = ''; crep.fin = true; crep.carryOut = false; crep.carryUse = true;
-          showInfo(multi ? 'Coils cut' : 'Coil cut', made + ' skid' + (made === 1 ? '' : 's') + ' created' + (list ? ' — tickets ' + list : '') + '.',
-            function () { renderCoilReport(); });
-        },
-        function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('crepCutBtn'); if (b2) { b2.disabled = false; b2.textContent = multi ? 'Cut ' + cs.length + ' coils & create skids' : 'Cut coil & create skids'; } });
-    });
+    var btn = document.getElementById('crepGoBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+    lastOperator = String(crep.operator).trim();
+    var info = { operator: lastOperator, start: crep.start, end: crep.end, spoilage: (shift ? [0] : []).concat(cs.map(function (c) { return crepNum(c.spoil); })) };
+    if (cin) info.carryIn = { skidId: cin.skidId, only: !same };   // only = not one of today's coils
+    if (carryOut) info.carryOut = carryOut;
+    runMutation('cutCoil', [ids, date, line, payload, finish, newOpId(), info],
+      function (res) {
+        var made = (res && res.created != null) ? res.created : keep.length;
+        var list = (res && res.tickets) ? res.tickets.map(function (t) { return t.ticket; }).join(', ') : '';
+        cs.forEach(function (c, i) { if (i < cs.length - 1 || finish) markCacheStatus(c.skidId, 'Used'); });
+        // The carry moves at once (the reload below catches up): yesterday's is finished, today's is waiting.
+        allCache.forEach(function (t) {
+          if (cin && t.skidId === cin.skidId) { t.carryOver = 0; t.carryLine = ''; t.carryDate = ''; }
+          if (carryOut && t.skidId === lastC.skidId) { t.carryOver = carryOut; t.carryLine = line; t.carryDate = date; }
+        });
+        fetchTickets();  // pull the new skids + coil state
+        crep.coils = []; crep.picking = false; crep.asking = false; crep.start = ''; crep.end = ''; crep.carryOut = false; crep.carryUse = true; crep.carryOpts = false;
+        showInfo('Report saved', made + ' skid' + (made === 1 ? '' : 's') + ' created' + (list ? ': ' + list : '') + '.' +
+          (multi || finish ? ' ' + (finish ? (multi ? 'All ' + cs.length + ' coils are' : 'The coil is') : 'The first ' + (cs.length - 1) + ' coil' + (cs.length === 2 ? ' is' : 's are')) + ' marked used (FIN COIL).' : '') +
+          (finish ? '' : ' ' + (lastC.ticket || lastC.skidId) + ' stays available — pick it again next time.') +
+          (carryOut ? ' The ' + crepFmt(carryOut) + ' sheets on the last skid wait for the next run on Coil Line ' + line + '.' : ''),
+          function () { renderCoilReport(); });
+      },
+      function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('crepGoBtn'); if (b2) { b2.disabled = false; b2.textContent = 'Create ' + keep.length + ' skid' + (keep.length === 1 ? '' : 's'); } });
   }
 
   // ----- Log Work (Metal Lines / Press): start a run, resume open runs, or go to Review -----
