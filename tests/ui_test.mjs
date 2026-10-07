@@ -1489,6 +1489,50 @@ const base = {
   await page.close();
 }
 
+// ---- 37. Spanish display: the screen changes, the records don't
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const tickets = [ticket('SKD-C', 'C1', 'Current', { cs: 'C', mill: '26HCD20179', endUse: '603 ENDS', comments: 'JF PRIME' })];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R(tickets), getProductionRuns: () => R([]),
+    cutCoil: (a) => R({ created: a[3].length, tickets: [{ ticket: '100726-200' }] }),
+  }), { userAgent: IPAD });
+  ok('es: the button is written in Spanish while the app is English', (await page.textContent('#tileLang')).includes('Cambiar idioma a español') && (await page.textContent('#tileLitho')).includes('Litho Department'));
+  await page.click('#tileLang'); await page.waitForTimeout(200);
+  ok('es: the start screen turns Spanish', (await page.textContent('#tileLitho')).includes('Departamento de Litho') && (await page.textContent('#tileProduction')).includes('Departamento de Metales') && (await page.textContent('#tileSearch')).includes('Buscar un ticket'));
+  ok('es: the button now says Change to English, in English', (await page.textContent('#tileLang')).includes('Change to English'));
+  await page.reload(); await page.waitForTimeout(300);
+  ok('es: remembered after a refresh', (await page.textContent('#tileLitho')).includes('Departamento de Litho') && (await page.textContent('#backBtn')).includes('Atrás'));
+  await page.click('#tileProduction'); await page.waitForTimeout(100);
+  ok('es: Metals screen', (await page.textContent('#view')).includes('¿En qué departamento está trabajando?') && (await page.textContent('#metalsPickCoil')).includes('Línea de bobina'));
+  await page.click('#metalsPickPress'); await page.waitForTimeout(300);
+  const opt = await page.$$eval('#runMachineSel option', (os) => os.filter((o) => o.value === 'Press 13').map((o) => o.value + '|' + o.textContent));
+  ok('es: a press shows as Prensa 13 but its value stays Press 13', opt.join() === 'Press 13|Prensa 13', opt);
+  await page.evaluate(() => { openProduction(); }); await page.waitForTimeout(100);
+  await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  ok('es: coil line asks the line in Spanish', (await page.textContent('#crepLinePick')).includes('¿En qué línea de bobina está?') && (await page.textContent('[data-crepline="1"]')).includes('Línea de bobina 1'));
+  await page.click('[data-crepline="1"]'); await page.waitForTimeout(200);
+  await page.click('[data-coil="SKD-C"]'); await page.waitForTimeout(100);
+  const body = await page.textContent('#coilBody');
+  ok('es: report labels in Spanish, data left alone', body.includes('Reporte de producción — Línea de bobina') && body.includes('Conteo de hojas') && body.includes('Peso') && body.includes('26HCD20179') && body.includes('JF PRIME') && body.includes('603 ENDS'), body.slice(0, 600));
+  ok('es: placeholders too', (await page.getAttribute('.crepQty', 'placeholder')) === 'hojas');
+  await page.fill('#crepOperator', 'Giovanni');
+  await page.fill('.crep-row[data-crc="0"][data-crr="0"] .crepQty', '1300'); await page.fill('.crep-row[data-crc="0"][data-crr="0"] .crepWt', '4515');
+  await page.click('#crepCutBtn'); await page.waitForTimeout(100);
+  ok('es: the questions in Spanish', (await page.textContent('#crepAsk')).includes('¿Se terminó la bobina') && (await page.textContent('[data-crepyn="fin:1"]')).includes('Sí — FIN COIL'));
+  await page.click('[data-crepyn="fin:1"]'); await page.waitForTimeout(100);
+  await page.click('#crepGoBtn'); await page.waitForTimeout(300);
+  const cut = calls.filter((c) => c.fn === 'cutCoil')[0];
+  ok('es: what is saved is the same as in English', cut && cut.args[0].join() === 'SKD-C' && cut.args[3][0].qty === 1300 && cut.args[3][0].weight === '4515' && cut.args[4] === true && cut.args[6].operator === 'Giovanni', cut && cut.args);
+  ok('es: the result message is Spanish', (await page.textContent('#modalRoot')).includes('Reporte guardado') && (await page.textContent('#modalRoot')).includes('1 tarima creada'), await page.textContent('#modalRoot'));
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  await page.click('#backBtn'); await page.waitForTimeout(100); await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#tileLang'); await page.waitForTimeout(200);
+  ok('en: back to English everywhere, header included', (await page.textContent('#tileLitho')).includes('Litho Department') && (await page.textContent('#backBtn')).includes('Back') && (await page.textContent('#tileLang')).includes('Cambiar idioma a español'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.evaluate(() => { try { localStorage.removeItem('cscLang'); } catch (e) {} });
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
