@@ -222,7 +222,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.69.0</span>
+      <span class="version" id="appVersion">v1.70.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1288,6 +1288,7 @@
   var rcvNoneQ = '', rcvNoneSort = 'ticket-desc', rcvNoneStatus = 'all';   // the "No receiver" list
   var rcvFind = { from: '', to: '', po: '', text: '', onlyNone: true };
   var RCV_CAP = 150;
+  var rcvEmptyOnly = false;   // receiver list: only the ones with no tickets yet
 
   function rcvCleanSupplier(v) { return String(v || '').toUpperCase().replace(/[\/\\]+/g, ' ').replace(/-{2,}/g, '-').replace(/\s+/g, ' ').trim(); }
   function rcvFileName(id, date, supplier) {
@@ -1345,7 +1346,7 @@
         '<button class="btn secondary" id="rcvDrive" style="margin:0">🔎 Find in Drive</button>' +
         '<button class="btn secondary" id="rcvNoneBtn" style="margin:0">No receiver (' + noneCount + ')</button>' +
         '<button class="btn success" id="rcvNew" style="margin:0">+ New receiver</button>' +
-      '</div><div id="rcvKeep"></div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
+      '</div><div id="rcvKeep"></div><div id="rcvEmptyNote" style="margin-top:8px"></div><div class="sub" id="rcvCount" style="margin:8px 0"></div><div id="rcvList"></div>';
     renderRcvKeep();
     var si = document.getElementById('rcvSearch');
     si.oninput = function () { rcvSearch = si.value; renderRcvList(); };
@@ -1764,21 +1765,37 @@
         next();
       }, 'Approve all');
   }
+  // A receiver with no tickets on it yet: usually one that was started and then interrupted (the page
+  // was refreshed, the tablet slept…). It was saved, so it's here — it just needs its tickets.
+  function rcvIsEmpty(r) { return !(r.ticketCount > 0); }
   function renderRcvList() {
     var box = document.getElementById('rcvList');
     if (!box) return;
     var term = String(rcvSearch || '').trim().toLowerCase();
+    var empties = rcvData.receivers.filter(rcvIsEmpty);
+    if (!empties.length) rcvEmptyOnly = false;
     var rows = rcvData.receivers.filter(function (r) {
+      if (rcvEmptyOnly && !rcvIsEmpty(r)) return false;
       return !term || [r.name, r.id, r.supplier, r.pos, r.notes, r.date].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
     });
-    var cnt = document.getElementById('rcvCount');
-    if (cnt) cnt.textContent = rows.length + ' receiver' + (rows.length === 1 ? '' : 's') + (term ? ' match' : '') + '.';
+    var note = document.getElementById('rcvEmptyNote'), cnt = document.getElementById('rcvCount');
+    if (note) note.innerHTML = (empties.length
+      ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;padding:10px 12px;margin:0 0 8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:200px;color:var(--warn);font-weight:600">⚠ ' + empties.length + ' receiver' + (empties.length === 1 ? ' has' : 's have') + ' no tickets yet' +
+            '<div class="sub" style="font-weight:400">Started but not finished? Open it and add its tickets, or delete it if it isn’t needed.</div></div>' +
+          '<button class="btn secondary" id="rcvEmptyBtn" style="padding:6px 12px;font-size:13px">' + (rcvEmptyOnly ? 'Show all receivers' : 'Show only these') + '</button></div>'
+      : '');
+    if (cnt) cnt.textContent = rows.length + ' receiver' + (rows.length === 1 ? '' : 's') + (term || rcvEmptyOnly ? ' match' : '') + '.';
+    var eb = document.getElementById('rcvEmptyBtn');
+    if (eb) eb.onclick = function () { rcvEmptyOnly = !rcvEmptyOnly; renderRcvList(); };
     box.innerHTML = rows.length ? rows.slice(0, RCV_CAP).map(function (r) {
-      return '<div class="card" data-rcvopen="' + esc(r.id) + '" style="padding:12px 14px;margin-bottom:8px;cursor:pointer">' +
-        '<div class="ticket-id" style="font-size:16px">' + esc(r.name) + '</div>' +
+      var empty = rcvIsEmpty(r);
+      return '<div class="card' + (empty ? ' rcv-empty' : '') + '" data-rcvopen="' + esc(r.id) + '" style="padding:12px 14px;margin-bottom:8px;cursor:pointer' + (empty ? ';border-left:4px solid var(--warn);background:#fff7ed' : '') + '">' +
+        '<div class="ticket-id" style="font-size:16px">' + esc(r.name) +
+          (empty ? ' <span style="background:var(--warn);color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;vertical-align:middle">NO TICKETS</span>' : '') + '</div>' +
         '<div class="sub">' + esc([r.date || 'no date', r.supplier, r.pos && ('PO ' + r.pos), r.ticketCount + ' ticket' + (r.ticketCount === 1 ? '' : 's'), r.link ? 'linked to its file' : 'no file link'].filter(Boolean).join(' · ')) + '</div>' +
         (r.notes ? '<div class="sub">' + esc(r.notes) + '</div>' : '') + '</div>';
-    }).join('') : '<div class="card empty">' + (term ? 'No receivers match.' : 'No receivers yet. Tap <b>+ New receiver</b> to add the first one.') + '</div>';
+    }).join('') : '<div class="card empty">' + (term || rcvEmptyOnly ? 'No receivers match.' : 'No receivers yet. Tap <b>+ New receiver</b> to add the first one.') + '</div>';
     Array.prototype.forEach.call(box.querySelectorAll('[data-rcvopen]'), function (c) {
       c.onclick = function () { rcvSel = c.getAttribute('data-rcvopen'); rcvAdd = {}; rcvDrop = {}; renderReceivers(); };
     });

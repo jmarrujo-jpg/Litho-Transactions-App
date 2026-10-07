@@ -1380,6 +1380,26 @@ const base = {
   await page.close();
 }
 
+// ---- 35. Receivers with no tickets stand out (started, then interrupted) and can be listed alone
+{ const RC = (id, n, extra) => Object.assign({ id, name: '26-10-07--PST--' + id, date: '2026-10-07', supplier: 'PST', pos: '', link: '', notes: '', mills: [], keptTickets: [], unkept: 0, ticketCount: n }, extra || {});
+  const db = { receivers: [RC('R-00129', 0), RC('R-00128', 0, { notes: 'Test' }), RC('R-00127', 2)], suppliers: ['PST'], tickets: [] };
+  const { page, calls } = await boot(Object.assign({}, base, { getMasterSheet: () => R({ rows: [], receivers: [] }), getReceivers: () => R(JSON.parse(JSON.stringify(db))) }));
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
+  await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
+  ok('empty: warning counts them', (await page.textContent('#rcvEmptyNote')).includes('2 receivers have no tickets yet'));
+  const tiles = await page.$$eval('[data-rcvopen]', (els) => els.map((e) => e.getAttribute('data-rcvopen') + (e.classList.contains('rcv-empty') ? ':empty' : '') + (e.textContent.includes('NO TICKETS') ? ':badge' : '')));
+  ok('empty: those tiles are marked, the one with tickets isn\'t', tiles.join() === 'R-00129:empty:badge,R-00128:empty:badge,R-00127', tiles);
+  await page.click('#rcvEmptyBtn'); await page.waitForTimeout(100);
+  ok('empty: show only these', (await page.$$('[data-rcvopen]')).length === 2 && (await page.textContent('#rcvEmptyBtn')).includes('Show all'));
+  await page.click('#rcvEmptyBtn'); await page.waitForTimeout(100);
+  ok('empty: back to all', (await page.$$('[data-rcvopen]')).length === 3);
+  db.receivers.forEach((r) => { r.ticketCount = 1; });
+  await page.click('#rcvReload'); await page.waitForTimeout(300);
+  ok('empty: no warning when every receiver has tickets', (await page.textContent('#rcvEmptyNote')).trim() === '' && !(await page.$('.rcv-empty')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
