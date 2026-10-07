@@ -222,7 +222,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.68.0</span>
+      <span class="version" id="appVersion">v1.69.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1144,7 +1144,7 @@
     var rows = msData.filter(function (t) {
       if (msFilter !== 'all' && t.status !== msFilter) return false;
       if (!term) return true;
-      return [t.ticket, t.skidId, t.mill, t.customer, t.jobId, t.po, t.receiver, t.receiverName].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+      return [t.ticket, t.skidId, t.mill, t.customer, t.jobId, t.po, t.receiver, t.receiverName, rcvAllNames(t)].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
     });
     // Changed tickets first, so marks are easy to review.
     rows.sort(function (a, b) {
@@ -1206,7 +1206,7 @@
       }).join('') + '</select>' + (rcChanged ? ' <span class="sub" style="color:#b26a00;font-weight:600">' + esc((t.receiverOwn || 'none') + ' → ' + (rc || 'none')) + '</span>' : '');
     } else {
       rcvCtl = (t.receiver ? rcvNameLink(t.receiver, t.receiverName, t.receiverLink) +
-          (t.receiverFrom ? ' <span class="sub">(from ' + esc(t.receiverFrom) + ')</span>' : '') : '<span class="sub">none</span>') +
+          (t.receiverFrom ? ' <span class="sub">(from ' + esc(t.receiverFrom) + ')</span>' : '') + rcvMoreHtml(t) : '<span class="sub">none</span>') +
         ' <button class="btn secondary" style="padding:3px 8px;font-size:12px" data-msrcvedit="' + esc(t.skidId) + '">Change</button>';
     }
     var off = t.coatings.reduce(function (n, c) { return n + (marks[String(c.passNumber)] ? Number(c.cost) || 0 : 0); }, 0);
@@ -1301,6 +1301,13 @@
       (link ? 'Open file' : 'Search Drive') + '</a>';
   }
   // A receiver's name as a link straight to its scan (the saved link, else a Drive search).
+  // The other receivers of a skid cut from two coils (a coil changeover): " + R-00012 (from 090326-005)".
+  function rcvMoreHtml(t, style) {
+    return (t.moreReceivers || []).map(function (r) {
+      return ' + ' + rcvNameLink(r.receiver, r.receiverName, r.receiverLink, style) + (r.receiverFrom ? ' <span class="sub">(from ' + esc(r.receiverFrom) + ')</span>' : '');
+    }).join('');
+  }
+  function rcvAllNames(t) { return [t.receiverName || t.receiver || ''].concat((t.moreReceivers || []).map(function (r) { return r.receiverName || r.receiver; })).filter(Boolean).join(' + '); }
   function rcvNameLink(id, name, link, style) {
     return '<a target="_blank" rel="noopener" href="' + esc(rcvFileHref(id, link)) + '" title="' + (link ? 'Open the receiver file' : 'No link saved — searches Drive for ' + esc(id)) + '" style="color:var(--accent);text-decoration:underline' + (style ? ';' + style : '') + '">' + esc(name || id) + '</a>';
   }
@@ -1897,7 +1904,9 @@
     var id = rcvSel, all = rcvData.tickets;
     var on = all.filter(function (t) { return t.receiver === id; });
     var adding = all.filter(function (t) { return rcvAdd[t.skidId]; });
-    var pieces = all.filter(function (t) { return !t.receiver && t.via === id; });
+    // Pieces with no receiver of their own that take this one from what they were cut from — for a
+    // coil-changeover skid that can be either coil (alsoVia).
+    var pieces = all.filter(function (t) { return (!t.receiver && t.via === id) || (t.receiver !== id && (t.alsoVia || []).some(function (a) { return a.receiver === id; })); });
     var found = all.filter(function (t) { return t.match === id; }), foundNotYet = found.filter(function (t) { return !rcvAdd[t.skidId]; });
     var r = rcvById(id) || {}, km = r.mills || [], kt = r.keptTickets || [];
     var byPo = rcvPoRecommended(), byPoNotYet = byPo.filter(function (t) { return !rcvAdd[t.skidId]; }), PO_CAP = 60, poList = rcvPoList();
@@ -1907,7 +1916,10 @@
       }).join('') : '') +
       (on.length ? on.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvdrop', t.skidId, !!rcvDrop[t.skidId], '', 'Take off'), rcvDrop[t.skidId] ? 'comes off at Save' : '', !!rcvDrop[t.skidId]); }).join('')
         : (adding.length ? '' : '<div class="sub">None yet. Find them below.</div>')) +
-      (pieces.length ? '<div class="sub" style="margin-top:8px">Pieces that take it from the ticket they were cut from:</div>' + pieces.map(function (t) { return rcvTicketLine(t, '', 'from ' + t.viaFrom); }).join('') : '') +
+      (pieces.length ? '<div class="sub" style="margin-top:8px">Pieces that take it from the ticket they were cut from:</div>' + pieces.map(function (t) {
+        var a = t.via === id ? null : (t.alsoVia || []).filter(function (x) { return x.receiver === id; })[0];
+        return rcvTicketLine(t, '', 'from ' + (a ? a.from + ' (coil changeover)' : t.viaFrom));
+      }).join('') : '') +
       (found.length ? '<div class="row" style="align-items:center;gap:8px;margin-top:10px"><div class="sub" style="flex:1;color:var(--accent);font-weight:600">Found by a saved number (not on it yet):</div>' +
         (foundNotYet.length ? '<button class="btn secondary" id="rcvAddFound" style="padding:6px 10px;font-size:13px">Add all ' + foundNotYet.length + '</button>' : '') + '</div>' +
         found.map(function (t) { return rcvTicketLine(t, rcvToggleBtn('data-rcvadd', t.skidId, !!rcvAdd[t.skidId], '', 'Add'), 'same ' + (t.matchBy === 'mill' ? 'mill' : 'ticket number')); }).join('') : '') +
@@ -2917,7 +2929,7 @@
       html += '<div style="overflow-x:auto"><table style="margin-top:6px"><thead><tr>' + ['Ticket #', 'Supplier', 'Mill #', 'Receiver', 'End Use', 'For', 'Coated', 'PO', 'Sheets'].map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead><tbody>' +
         list.map(function (t, ti) {
           var id = di + '-' + ti, open = trc.open[id];
-          var rcv = t.receiver ? rcvNameLink(t.receiver, t.receiverName, t.receiverLink, 'font-weight:600') + (t.receiverFrom ? ' <span class="sub">(from ' + esc(t.receiverFrom) + ')</span>' : '') : '<span class="sub">none</span>';
+          var rcv = t.receiver ? rcvNameLink(t.receiver, t.receiverName, t.receiverLink, 'font-weight:600') + (t.receiverFrom ? ' <span class="sub">(from ' + esc(t.receiverFrom) + ')</span>' : '') + rcvMoreHtml(t, 'font-weight:600') : '<span class="sub">none</span>';
           var note = (t.daysCount > 1 ? 'used on ' + t.daysCount + ' days' : '') + (t.stillOpen ? (t.daysCount > 1 ? ', ' : '') + 'partly used — still ' + t.status : '');
           return '<tr data-trcrow="' + id + '" style="cursor:pointer"><td style="white-space:nowrap">' + (open ? '▾ ' : '▸ ') + histTicketLink(t) + (note ? '<div class="sub">' + esc(note) + '</div>' : '') + '</td>' +
             '<td>' + dash(t.supplier) + '</td><td>' + dash(t.mill) + '</td><td>' + rcv + '</td><td>' + dash(t.endUse) + '</td><td>' + dash(trcFor(t)) + '</td><td>' + esc(trcCoated(t)) + '</td><td>' + dash(t.po) + '</td><td>' + dash(t.qty) + '</td></tr>' +
@@ -2940,7 +2952,7 @@
     var lines = [['Product made', 'Traced', 'Day', 'Date used', 'Ticket', 'Skid ID', 'Supplier', 'Mill', 'Receiver', 'PO', 'End Use', 'For', 'Coated', 'Sheets', 'Weight', 'Status', 'All days used'].join(',')];
     d.dayList.forEach(function (day) {
       trcTickets(day).forEach(function (t) {
-        lines.push([d.date, d.label || d.diameter, day.rel, day.date, t.ticket, t.skidId, t.supplier, t.mill, t.receiverName || t.receiver || '', t.po, t.endUse, trcFor(t), trcCoated(t), t.qty, t.weight, t.status,
+        lines.push([d.date, d.label || d.diameter, day.rel, day.date, t.ticket, t.skidId, t.supplier, t.mill, rcvAllNames(t), t.po, t.endUse, trcFor(t), trcCoated(t), t.qty, t.weight, t.status,
           (t.usedDays || []).join(' ')].map(q).join(','));
       });
     });
@@ -3033,7 +3045,7 @@
     var notes = [x.comments, x.lithoNotes].filter(Boolean).map(esc).join(' | ');
     var rcv = x.receiver
       ? rcvNameLink(x.receiver, x.receiverName, x.receiverLink, 'font-weight:700') +
-        (x.receiverFrom ? ' <span class="sub">(from ' + esc(x.receiverFrom) + ')</span>' : '')
+        (x.receiverFrom ? ' <span class="sub">(from ' + esc(x.receiverFrom) + ')</span>' : '') + rcvMoreHtml(x, 'font-weight:700')
       : '<span class="sub">none yet</span>';
     return '<div style="line-height:1.6">' +
       kv('Steel', steel || '—') +
@@ -3111,7 +3123,7 @@
         var srcs = x.sources || [];
         var coats = (x.coatings || []).concat.apply(x.coatings || [], srcs.map(function (t) { return t.coatings || []; }));
         var pick = function (k) { return x[k] != null && x[k] !== '' ? x[k] : srcs.map(function (t) { return t[k] || ''; }).filter(Boolean).join(' + '); };
-        lines.push([sec.label, x.date, x.ticket || '', x.skidId || '', pick('customer'), pick('jobId'), pick('mill'), pick('supplier'), pick('po'), pick('receiverName'), pick('endUse'),
+        lines.push([sec.label, x.date, x.ticket || '', x.skidId || '', pick('customer'), pick('jobId'), pick('mill'), pick('supplier'), pick('po'), x.receiver ? rcvAllNames(x) : pick('receiverName'), pick('endUse'),
           pick('bw'), pick('testedBw'), pick('type'), pick('temper'), x.width, x.length, x.sheets != null ? x.sheets : x.qty, x.weight,
           coats.map(function (c) { return c.item + (c.date ? ' ' + c.date : '') + (c.by ? ' ' + c.by : ''); }).join('; '),
           coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),

@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-73', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'rcv-74', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1740,6 +1740,7 @@ async function getMasterSheet(sheets) {
     const t = traceOf(o, ctx);
     out.push({ skidId: o['Skid ID'] || '', ticket: o['Ticket'] || '', status: st, litho: num(o['Litho']), mill: t.mill, customer: t.customer,
       jobId: t.jobId, qty: t.qty, usedOn: t.usedOn, po: t.po, receiver: t.receiver, receiverName: t.receiverName, receiverLink: t.receiverLink, receiverFrom: t.receiverFrom,
+      moreReceivers: t.moreReceivers || [],
       receiverOwn: String(o['Receiver'] || '').trim(),
       coatings: activeCoatings(skidHist(ctx, o)).map((c) => ({ passNumber: c.passNumber, item: c.item, group: c.group || '', sub: c.sub || '', chemCode: c.chemCode || '', cost: c.cost, date: c.date })) });
   });
@@ -1883,7 +1884,30 @@ async function receiverMap(sheets) {
 }
 // A ticket's receiver: its own, else the skid it was split / cut from (and up the chain), else the
 // original ticket of a remainder (042426-207-LR1 -> 042426-207). `receiverFrom` names where it came from.
+// A coil-changeover skid (or a piece cut from one) holds steel from two coils, so it has every
+// receiver those coils came in on: the first comes back as receiver/receiverName/…, the others in
+// moreReceivers [{ receiver, receiverName, receiverLink, receiverFrom }].
 function receiverTrace(o, ctx) {
+  const first = receiverTraceOne(o, ctx), more = [], seen = {};
+  if (first.receiver) seen[first.receiver] = 1;
+  let cur = o;
+  const walked = {};
+  for (let i = 0; i < 25 && cur; i++) {
+    const also = String(cur['Also Cut From'] || '').trim();
+    const p = also && ctx.skids ? ctx.skids[also] : null;
+    if (p && !walked['a' + also]) {
+      walked['a' + also] = 1;
+      const r = receiverTraceOne(p, ctx);
+      if (r.receiver && !seen[r.receiver]) { seen[r.receiver] = 1; more.push(Object.assign({}, r, { receiverFrom: r.receiverFrom || p['Ticket'] || also })); }
+    }
+    const sp = String(cur['Split Of'] || '').trim();
+    if (!sp || walked['s' + sp]) break;
+    walked['s' + sp] = 1; cur = ctx.skids ? ctx.skids[sp] : null;
+  }
+  if (!first.receiver && more.length) return Object.assign(more.shift(), { moreReceivers: more });   // only the second coil has one
+  return Object.assign(first, { moreReceivers: more });
+}
+function receiverTraceOne(o, ctx) {
   let cur = o, from = '';
   const seen = {};
   for (let i = 0; i < 25 && cur; i++) {
@@ -2024,6 +2048,7 @@ async function getReceivers(sheets) {
     tickets.push({ skidId: o['Skid ID'] || '', ticket: String(o['Ticket'] || ''), status: o['Status'] || '', mill: String(o['Mill'] || ''),
       po: o['PO Number'] != null ? String(o['PO Number']) : '', supplier: String(o['Supplier'] || ''), qty: o['QTY/LOAD'] != null ? o['QTY/LOAD'] : '',
       receiver: own, via: own ? '' : tr.receiver, viaFrom: own ? '' : tr.receiverFrom, splitOf: o['Split Of'] || '',
+      alsoVia: tr.moreReceivers.filter((r) => r.receiver !== own).map((r) => ({ receiver: r.receiver, from: r.receiverFrom })),   // a changeover skid's other coil
       match: mt && mt.receiver ? mt.receiver : '', matchBy: mt && mt.receiver ? mt.by : '', matchConflict: !!(mt && mt.conflict) });
   });
   const list = Object.keys(receivers).map((id) => Object.assign({}, receivers[id], { name: receiverName(receivers[id]), ticketCount: count[id] || 0, unkept: unkept[id] || 0 }));

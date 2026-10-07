@@ -1365,6 +1365,21 @@ const base = {
   await page.close();
 }
 
+// ---- 34. Both receivers of a coil-changeover skid show, each linked to its scan
+{ const { page, calls } = await boot(base);
+  const out = await page.evaluate(() => {
+    const t = { receiver: 'R-00011', receiverName: '26-01-01--KG--R-00011', receiverLink: 'https://drive/r11', receiverFrom: '',
+      moreReceivers: [{ receiver: 'R-00118', receiverName: '26-06-12--TCC--R-00118', receiverLink: 'https://drive/r118', receiverFrom: 'C-8' }] };
+    const box = document.createElement('div'); box.innerHTML = traceDetailHtml(Object.assign({ mill: 'MA / MB', coatings: [] }, t));
+    return { names: rcvAllNames(t), text: box.textContent, links: Array.from(box.querySelectorAll('a')).map((a) => a.href) };
+  });
+  ok('receivers: CSV name has both', out.names === '26-01-01--KG--R-00011 + 26-06-12--TCC--R-00118', out.names);
+  ok('receivers: the trace detail shows both, the second says which coil', out.text.includes('26-01-01--KG--R-00011') && out.text.includes('+ 26-06-12--TCC--R-00118 (from C-8)'), out.text);
+  ok('receivers: each opens its own scan', out.links.indexOf('https://drive/r11') !== -1 && out.links.indexOf('https://drive/r118') !== -1, out.links);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

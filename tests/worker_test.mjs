@@ -1036,5 +1036,44 @@ await concurrency(envBase, 'in-worker lock');
   ok('same coil: the next run finishes it as -100, and the coil is FIN', d4.ok && d4.result.tickets[0].ticket === '091326-100' && row('SKD-000011')['Status'] === 'Used' && !row('SKD-000011')['Carry Over'], d4);
 }
 
+// 32. A coil-changeover skid shows both coils' receivers
+{ const RH = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Source File ID', 'Notes', 'Mill Numbers', 'Tickets', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+  const H = MASTER_H.concat(['Receiver']);
+  const sk = (t, id, status, extra) => { const o = Object.assign({ 'Ticket': t, 'Skid ID': id, 'Status': status }, extra); return H.map((h) => (o[h] == null ? '' : o[h])); };
+  const fk = makeFake({ [SID]: { 'Steel Tickets': [H,
+    sk('C-7', 'SKD-000020', 'Current', { 'C/S': 'C', 'Mill': 'MA', 'End Use': '603 ENDS', 'Receiver': 'R-00011', 'Supplier': 'TCC' }),
+    sk('C-8', 'SKD-000021', 'Current', { 'C/S': 'C', 'Mill': 'MB', 'End Use': '603 ENDS', 'Receiver': 'R-00118', 'Supplier': 'TCC' }),
+    sk('C-9', 'SKD-000022', 'Current', { 'C/S': 'C', 'Mill': 'MC', 'End Use': '603 ENDS', 'Supplier': 'TCC' }),
+    sk('C-10', 'SKD-000023', 'Current', { 'C/S': 'C', 'Mill': 'MD', 'End Use': '603 ENDS', 'Receiver': 'R-00200', 'Supplier': 'TCC' }),
+  ], 'Transactions': [TX_H], 'Receivers': [RH,
+    ['R-00011', '26-01-01--KG--R-00011', '2026-01-01', 'KG', '', 'https://drive/r11', '', '', '', '', '', '', '', ''],
+    ['R-00118', '26-06-12--TCC--R-00118', '2026-06-12', 'TCC', '', 'https://drive/r118', '', '', '', '', '', '', '', ''],
+    ['R-00200', '26-07-01--TCC--R-00200', '2026-07-01', 'TCC', '', '', '', '', '', '', '', '', '', ''],
+  ] } });
+  globalThis.fetch = fk.fetchImpl;
+  const c1 = await call('cutCoil', [['SKD-000020', 'SKD-000021'], '2026-09-16', 1, [{ qty: 1300, coils: [0] }, { coils: [0, 1], parts: [175, 1125] }, { qty: 1300, coils: [1] }], true, 'op-32-a']);
+  const c2 = await call('cutCoil', [['SKD-000022', 'SKD-000023'], '2026-09-17', 1, [{ coils: [0, 1], parts: [500, 800] }], true, 'op-32-b']);
+  ok('cuts ok', c1.ok && c2.ok, [c1, c2]);
+  const tk = (t) => fk.rows(SID, 'Steel Tickets').filter((o) => o['Ticket'] === t)[0];
+  const h = await call('getSkidHistory', [tk('091626-101')['Skid ID']]);
+  ok('changeover skid: first coil\'s receiver, then the second\'s', h.ok && h.result.skid.receiver === 'R-00011'
+    && h.result.skid.moreReceivers.length === 1 && h.result.skid.moreReceivers[0].receiver === 'R-00118' && h.result.skid.moreReceivers[0].receiverFrom === 'C-8'
+    && h.result.skid.moreReceivers[0].receiverLink === 'https://drive/r118', h.ok ? h.result.skid : h);
+  const h0 = await call('getSkidHistory', [tk('091626-100')['Skid ID']]);
+  ok('a skid off one coil: one receiver', h0.ok && h0.result.skid.receiver === 'R-00011' && h0.result.skid.moreReceivers.length === 0);
+  const h2 = await call('getSkidHistory', [tk('091726-100')['Skid ID']]);
+  ok('first coil has no receiver: the second coil\'s is shown', h2.ok && h2.result.skid.receiver === 'R-00200' && h2.result.skid.moreReceivers.length === 0, h2.ok ? h2.result.skid : h2);
+  const rc = await call('getReceivers', []);
+  const t1 = rc.ok && rc.result.tickets.filter((t) => t.ticket === '091626-101')[0];
+  ok('Receivers screen: the changeover skid takes both', t1 && (t1.receiver || t1.via) === 'R-00011' && t1.alsoVia.map((a) => a.receiver).join() === 'R-00118', t1);
+  const ms = await call('getMasterSheet', []);
+  const m1 = ms.ok && ms.result.rows.filter((t) => t.ticket === '091626-101')[0];
+  ok('Master sheet: both receivers', m1 && m1.receiver === 'R-00011' && m1.moreReceivers[0].receiver === 'R-00118', m1);
+  await call('markUsedDirect', [[tk('091626-101')['Skid ID']], '2026-09-18', 'op-32-u']);
+  const tr = await call('getUseTrace', ['2026-09-18', 'ALL', 1]);
+  const row = tr.ok && tr.result.dayList[1].tickets.filter((t) => t.ticket === '091626-101')[0];
+  ok('Begin trace shows both receivers', row && row.receiver === 'R-00011' && row.moreReceivers.map((r) => r.receiver).join() === 'R-00118', tr.ok ? tr.result.dayList[1] : tr);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
