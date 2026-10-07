@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.63.0</span>
+      <span class="version" id="appVersion">v1.64.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -335,6 +335,26 @@
   // instead of letting it burn the allowance for everyone. Normal use stays well under this.
   var REQ_CAP = 60, REQ_WINDOW_MS = 60000, reqTimes = [];
   var PRINT_TICKETS_URL = 'http://desktop-1o5m8vo:5000/'; // local steel-ticket print service (opens in a new tab; only reachable on the local network)
+  // Tablets (and phones) get the floor version of the app: no Database, Reports, Print New Steel
+  // Tickets, Used in Production or Move To WIP. Computers get everything. A device counts as a tablet
+  // when a finger is its only pointer (no mouse or trackpad); iPads that call themselves a Mac count
+  // too. Any device can be switched by opening the page with ?view=full or ?view=floor (remembered on
+  // that device; ?view=auto goes back to detecting). This only hides buttons; it isn't a lock.
+  var FULL_APP = (function () {
+    var forced = '';
+    try {
+      var m = /[?&]view=(full|floor|auto)\b/i.exec(location.search || '');
+      if (m) { forced = m[1].toLowerCase(); if (forced === 'auto') { localStorage.removeItem('cscView'); forced = ''; } else localStorage.setItem('cscView', forced); }
+      else forced = localStorage.getItem('cscView') || '';
+    } catch (e) { /* no storage: detect every load */ }
+    if (forced === 'full') return true;
+    if (forced === 'floor') return false;
+    var ua = navigator.userAgent || '';
+    if (/iPad|iPhone|iPod|Android|Mobile|Silk|Kindle/i.test(ua)) return false;
+    if (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return false;   // iPadOS asks for desktop sites
+    try { if (window.matchMedia('(pointer: coarse)').matches && !window.matchMedia('(any-pointer: fine)').matches) return false; } catch (e) { /* old browser */ }
+    return true;
+  })();
   (function installHostingShim() {
     if (window.google && window.google.script && window.google.script.run) return; // real Apps Script bridge present
     function makeRunner() {
@@ -880,6 +900,7 @@
     var dl = document.getElementById('operatorNamesList');
     if (dl) dl.innerHTML = LITHO_USERS.map(function (u) { return '<option value="' + esc(u.name) + '">'; }).join('');
     loadRateData();
+    if (!FULL_APP) { var ver = document.getElementById('appVersion'); if (ver) ver.textContent += ' · tablet'; }
     renderLanding();
   }
 
@@ -936,15 +957,17 @@
       '<button class="btn secondary" id="tileSearch" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🔎&nbsp; Search for a Ticket</button>' +
       '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
-      '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' +
+      (FULL_APP ? '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' : '') +
       '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🧮&nbsp; Litho Steel Count</button>' +
-      '<button class="btn secondary" id="tileDatabase" style="width:100%;padding:22px;font-size:18px">🗄️&nbsp; Database</button>';
+      (FULL_APP ? '<button class="btn secondary" id="tileDatabase" style="width:100%;padding:22px;font-size:18px">🗄️&nbsp; Database</button>' : '');
     document.getElementById('tileSearch').onclick = openSearch;
     document.getElementById('tileLitho').onclick = openLithoDept;
     document.getElementById('tileProduction').onclick = openProduction;
-    document.getElementById('tileReports').onclick = openReports;
     document.getElementById('tileCount').onclick = openSteelCount;
-    document.getElementById('tileDatabase').onclick = openDatabase;
+    if (FULL_APP) {
+      document.getElementById('tileReports').onclick = openReports;
+      document.getElementById('tileDatabase').onclick = openDatabase;
+    }
   }
 
   // ---------------- Database (raw table audit / manual edit) ----------------
@@ -956,24 +979,9 @@
   var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
-  var DB_CODE = '1245';                          // passcode to open the Database tab
-  var dbUnlocked = false;                        // in memory only: every page load (refresh) asks for the code again
-  // iOS Safari can restore a page from its back/forward cache without reloading it, which would
-  // otherwise keep the tab unlocked across what looks like a fresh visit. Re-lock in that case too.
-  window.addEventListener('pageshow', function (e) { if (e.persisted) dbUnlocked = false; });
-
+  // No passcode: the Database only shows on computers (see FULL_APP).
   function openDatabase() {
-    if (!dbUnlocked) {
-      showPromptModal({
-        title: 'Database — enter code', message: 'This area is protected.',
-        inputLabel: 'Code', placeholder: '••••', confirmText: 'Unlock', inputType: 'password', inputMode: 'numeric',
-        onConfirm: function (v) {
-          if (String(v) === DB_CODE) { dbUnlocked = true; openDatabase(); }
-          else { toast('Incorrect code'); }
-        }
-      });
-      return;
-    }
+    if (!FULL_APP) { renderLanding(); return; }
     state.view = 'database';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Database');
@@ -2278,13 +2286,10 @@
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Litho');
     document.getElementById('view').innerHTML =
-      // Litho Line is temporarily disabled (greyed out, not clickable) like the unused Metals
-      // departments — all its code stays; remove the `disabled` attribute to turn it back on.
-      '<button class="btn" id="tileLithoLine" disabled style="' + BIG_BTN + '">Litho Line</button>' +
-      '<div class="sub" style="margin:-6px 0 14px;text-align:center">Litho Line is coming soon.</div>' +
-      '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>';
+      '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
+      (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '');
     document.getElementById('tileLithoLine').onclick = openLithoLogin;
-    document.getElementById('tileMoveWip').onclick = openMoveWip;
+    if (FULL_APP) document.getElementById('tileMoveWip').onclick = openMoveWip;
   }
 
   // ---------------- Move To WIP (foreman batch) ----------------
@@ -2297,6 +2302,7 @@
   var mwJobName = '';   // no name field: only one or two foremen use this screen
 
   function openMoveWip() {
+    if (!FULL_APP) { renderLanding(); return; }
     state.view = 'moveWip'; state.skid = null;
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Move To WIP');
@@ -2733,6 +2739,7 @@
   function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
 
   function openReports() {
+    if (!FULL_APP) { renderLanding(); return; }
     state.view = 'reports';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Reports');
@@ -5687,27 +5694,26 @@
     var view = document.getElementById('view');
     view.innerHTML =
       '<div class="sub" style="margin:4px 0 16px;font-size:16px">Which department are you working in?</div>' +
-      // Metal Lines / Press / Slitter are temporarily disabled (greyed out, not clickable) but kept
-      // in place — all their code stays; remove the `disabled` attribute below to turn them back on.
-      '<button class="btn" id="metalsPickLines" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
-      '<button class="btn" id="metalsPickPress" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
-      '<button class="btn" id="metalsPickSlitter" disabled style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
-      '<div class="sub" style="margin:-6px 0 14px;text-align:center">Metal Lines, Press and Slitter are coming soon.</div>' +
-      '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
-      '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
-      '<div class="sub" style="margin:8px 0 0;text-align:center">Opens the steel-ticket printer (local network only).</div>';
-    // Handlers kept for the disabled buttons (they can't fire while disabled) so re-enabling is a
-    // one-line change — just drop the `disabled` attribute above.
+      '<button class="btn" id="metalsPickLines" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
+      '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
+      '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
+      (FULL_APP ?
+        '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
+        '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
+        '<div class="sub" style="margin:8px 0 0;text-align:center">Opens the steel-ticket printer (local network only).</div>' : '');
     document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
-    document.getElementById('metalsPickUsed').onclick = function () { openMetalsSection('used'); };
-    // Print New Steel Tickets -> open the local Flask print service in a new tab.
-    document.getElementById('metalsPrintTickets').onclick = function () { window.open(PRINT_TICKETS_URL, '_blank'); };
+    if (FULL_APP) {
+      document.getElementById('metalsPickUsed').onclick = function () { openMetalsSection('used'); };
+      // Print New Steel Tickets -> open the local Flask print service in a new tab.
+      document.getElementById('metalsPrintTickets').onclick = function () { window.open(PRINT_TICKETS_URL, '_blank'); };
+    }
   }
 
   // Enter a chosen department full-screen. Back from a section home returns to the chooser.
   function openMetalsSection(tab) {
+    if (tab === 'used' && !FULL_APP) { renderMetalsChooser(); return; }
     metalsTab = tab;
     showTabbar(false); showBack(true); setDept('Metals');
     if (tab === 'slitter') { state.view = 'slitterHome'; renderSlitterHome(); }

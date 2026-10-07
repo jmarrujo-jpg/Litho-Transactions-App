@@ -16,8 +16,8 @@ const today = new Date().toISOString().slice(0, 10);
 function ticket(id, t, status, extra) { return Object.assign({ skidId: id, ticket: t, status, qty: 100, weight: 500, bw: '75', type: 'T', temper: 'T4', length: '30', width: '30', endUse: '603X408', litho: status === 'WIP' ? 10 : 0, row: '', countedOn: '' }, extra || {}); }
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--no-sandbox'] });
-async function boot(handlers) {
-  const page = await browser.newPage();
+async function boot(handlers, pageOpts) {
+  const page = await browser.newPage(pageOpts || {});
   const calls = [];
   page.on('pageerror', (e) => calls.push({ fn: '__pageerror', args: [String(e)] }));
   await page.route(API + '**', async (route) => {
@@ -40,7 +40,6 @@ const R = (result) => ({ ok: true, result });
 // Litho Department asks for a name first.
 async function enterLitho(page, name) {
   if (!(await page.$('#tileLithoLine'))) await page.click('#tileLitho');   // Back from Litho lands on the chooser
-  await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; });   // greyed out for now (see 17)
   await page.click('#tileLithoLine');
   await page.waitForSelector('#lithoUserSelect');
   await page.selectOption('#lithoUserSelect', { label: name });
@@ -211,19 +210,11 @@ const base = {
   await page.close();
 }
 
-// ---- 7. Database passcode: masked, numeric keypad, asked again after reload
+// ---- 7. Database opens straight away on a computer (no passcode)
 { const { page } = await boot(base);
-  await page.evaluate(() => openDatabase());
-  await page.waitForSelector('#modalPromptInput');
-  ok('code box is a password field', (await page.$eval('#modalPromptInput', (el) => el.type)) === 'password');
-  ok('code box numeric keypad', (await page.$eval('#modalPromptInput', (el) => el.getAttribute('inputmode'))) === 'numeric');
-  await page.fill('#modalPromptInput', '1245');
-  await page.click('#modalOk');
-  await page.waitForTimeout(150);
-  ok('unlocks with the code', await page.evaluate(() => dbUnlocked === true));
-  await page.reload();
-  await page.waitForTimeout(300);
-  ok('locked again after refresh', await page.evaluate(() => dbUnlocked === false));
+  await page.click('#tileDatabase'); await page.waitForTimeout(200);
+  ok('no code asked', !(await page.$('#modalPromptInput')));
+  ok('database opens', !!(await page.$('[data-dbt="master"]')));
   await page.close();
 }
 
@@ -412,7 +403,6 @@ const base = {
     getOpenJobs: () => R([{ jobId: 'JOB-000004', description: 'Blue run', ticketCount: 2, coatings: 'SIZE' }]),
   }));
   await page.click('#tileLitho');
-  await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; });
   await page.click('#tileLithoLine');
   await page.waitForSelector('#lithoUserSelect');
   const names = await page.$$eval('#lithoUserSelect option', (os) => os.map((o) => o.textContent));
@@ -459,7 +449,7 @@ const base = {
   await page.click('#backBtn'); await page.waitForTimeout(150);
   ok('Back from the chooser goes to the landing screen', !!(await page.$('#tileLitho')));
   await page.reload(); await page.waitForTimeout(300);
-  await page.click('#tileLitho'); await page.evaluate(() => { document.getElementById('tileLithoLine').disabled = false; }); await page.click('#tileLithoLine'); await page.waitForTimeout(150);
+  await page.click('#tileLitho'); await page.click('#tileLithoLine'); await page.waitForTimeout(150);
   ok('after a refresh nobody is pre-selected', (await page.$eval('#lithoUserSelect', (el) => el.value)) === '');
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
@@ -517,9 +507,7 @@ const base = {
   await page.click('#tileLitho'); await page.waitForTimeout(100);
   ok('Litho Department offers Litho Line and Move To WIP', !!(await page.$('#tileLithoLine')) && !!(await page.$('#tileMoveWip')));
   ok('the chooser loads nothing', calls.filter((c) => c.fn === 'getAllTickets').length === 0);
-  ok('Litho Line greyed out and not clickable', await page.$eval('#tileLithoLine', (b) => b.disabled) && (await page.textContent('#view')).includes('coming soon'));
-  await page.click('#tileLithoLine', { force: true }); await page.waitForTimeout(100);
-  ok('tapping Litho Line does nothing', !(await page.$('#lithoUserSelect')) && !!(await page.$('#tileMoveWip')));
+  ok('Litho Line is open (not greyed out)', !(await page.$eval('#tileLithoLine', (b) => b.disabled)) && !(await page.textContent('#view')).includes('coming soon'));
   await page.click('#tileMoveWip'); await page.waitForTimeout(300);
   ok('Move To WIP screen', !!(await page.$('#mwJobName')) && !!(await page.$('#mwAddInput')) && !!(await page.$('#mwGroup')));
   ok('no sheet count or spoilage fields', !(await page.$('#mwListBox input')) && !/spoilage/i.test(await page.$eval('#view', (v) => Array.from(v.querySelectorAll('label')).map((l) => l.textContent).join('|'))));
@@ -670,7 +658,7 @@ const base = {
     getMasterSheet: () => R({ rows: JSON.parse(JSON.stringify(sheet)) }),
     masterEdit: (a) => (saves++ === 0 ? { ok: false, error: 'Sheets API 500' } : R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, status: c.status || c.from })), skipped: [] })),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   ok('Database opens on the Master sheet', !!(await page.$('#msList')) && calls.filter((c) => c.fn === 'getMasterSheet').length === 1 && calls.filter((c) => c.fn === 'getRawTable').length === 0);
   ok('lists the tickets', (await page.textContent('#msList')).includes('501') && (await page.textContent('#msList')).includes('504'));
   ok('Pending is read-only', !(await page.$('[data-msst="SKD-4"]')) && (await page.textContent('#msList')).includes('Review Jobs'));
@@ -750,7 +738,7 @@ const base = {
   ok('trace detail has a Full history button', !!(await page.$('#histRoot')));
   await page.click('#histClose'); await page.waitForTimeout(100);
   // Database: Master sheet and raw Steel Tickets editor
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   ok('Master sheet rows have no History button (the Coatings drop-down covers it)', !(await page.$('#msList [data-hist]')) && !!(await page.$('#msList [data-mscoats]')));
   await page.click('[data-dbt="steel"]'); await page.waitForTimeout(300);
   await page.click('#dbTableBox tbody tr'); await page.waitForTimeout(200);
@@ -792,7 +780,7 @@ const base = {
       receiverLink: 'https://drive.google.com/file/d/xyz/view', receiverFrom: '', coatings: [] }, events: [{ when: '2026-10-01 09:00:00', kind: 'event', what: 'RECEIVER SET', notes: '26-10-01--TCC--R-00008', cost: 0 }],
       parent: null, children: [], loads: [], family: { base: '100126-001', members: [] } }),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   ok('Receivers tab lists receivers', (await page.textContent('#rcvList')).includes('26-09-30--REY--R-00007') && (await page.textContent('#rcvList')).includes('1 ticket'));
   await page.click('#rcvNew'); await page.waitForTimeout(100);
@@ -850,7 +838,7 @@ const base = {
       receivers: [{ id: 'R-00001', name: '26-10-01--TCC--R-00001' }, { id: 'R-00002', name: '26-10-02--CMD--R-00002' }] }),
     masterEdit: (a) => R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, status: c.from, receiver: c.receiver })), skipped: [] }),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   let txt = await page.textContent('#msList');
   ok('rows show PO and receiver (and where an inherited one came from)', txt.includes('PO 7974-DC') && txt.includes('26-10-01--TCC--R-00001') && txt.includes('(from 501)'), txt);
   ok('receiver name links to its file (Drive search when no link is saved)', await page.$eval('#msList a[href*="drive/search"]', (x) => x.target === '_blank' && x.textContent === '26-10-01--TCC--R-00001' && x.href.includes('R-00001')));
@@ -886,7 +874,7 @@ const base = {
       return R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, receiver: c.receiver })), skipped: [] });
     },
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   let k = await page.textContent('#rcvKeep');
   ok('keep: not-saved notice', k.includes('1 ticket is on a receiver') && !!(await page.$('#rcvKeepNow')), k);
@@ -940,7 +928,7 @@ const base = {
         saved: a[0].skidIds.map((x) => ({ skidId: x })), skipped: [] });
     },
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   await page.click('#rcvDrive'); await page.waitForTimeout(300);
   ok('drive view: counts and a Search button', (await page.textContent('#rcvBox')).includes('4 mill numbers on tickets with no receiver') && !!(await page.$('#drvSearch')));
@@ -983,7 +971,7 @@ const base = {
       usedBadDate: ['091126-013 (261340-001)'], usedBadDateCount: 1, usedFutureDate: ['091126-012 (290918-001)'], usedFutureDateCount: 1,
       usedMultiDay: ['081826-007 (3 days)'], usedMultiDayCount: 1, usedAlsoOpen: ['040226-004'], usedAlsoOpenCount: 1, receiversRestored: 0, receiversNotBack: [], receiversNotBackCount: 0, receiverConflicts: [] }),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   ok('import card names the Used in Production tab', (await page.textContent('#dbImportBtn')).includes('Used') && (await page.textContent('#view')).includes('Date Used'));
   await page.click('#dbImportBtn'); await page.waitForSelector('#modalOk');
   ok('confirm says used tickets come in once as Used', (await page.textContent('#modalRoot')).includes('comes in once as Used'));
@@ -1023,7 +1011,7 @@ const base = {
         saved: a[0].skidIds.map((x) => ({ skidId: x })), skipped: [] });
     },
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   await page.click('#rcvDrive'); await page.waitForTimeout(300);
   ok('approve all: button shows the file count', (await page.textContent('#drvApproveAll')).includes('Approve all 6 files'));
@@ -1076,7 +1064,7 @@ const base = {
     getReceivers: () => R(JSON.parse(JSON.stringify(db))),
     masterEdit: (a) => R({ ok: true, saved: a[0].map((c) => ({ skidId: c.skidId, receiver: c.receiver })), skipped: [] }),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   await page.click('[data-rcvopen="R-00001"]'); await page.waitForTimeout(200);
   let txt = await page.textContent('#rcvTickets');
@@ -1117,7 +1105,7 @@ const base = {
     getMasterSheet: () => R({ rows: [], receivers: [] }),
     getReceivers: () => R(JSON.parse(JSON.stringify(db))),
   }));
-  await page.evaluate(() => { dbUnlocked = true; openDatabase(); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   await page.click('[data-dbt="receivers"]'); await page.waitForTimeout(300);
   ok('none: button shows the count (cut pieces with an inherited receiver don\'t count)', (await page.textContent('#rcvNoneBtn')).includes('No receiver (5)'));
   await page.click('#rcvNoneBtn'); await page.waitForTimeout(200);
@@ -1185,6 +1173,42 @@ const base = {
   await page.click('[data-rtab="reports"]'); await page.waitForTimeout(150);
   ok('trace: back to the reports tab', !!(await page.$('#runReportBtn')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 31. Tablet vs computer: a tablet gets the floor version; ?view= switches it and is remembered
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const { page, calls } = await boot(base, { userAgent: IPAD });
+  const ids = async () => page.$$eval('#view button', (bs) => bs.map((b) => b.id));
+  let home = await ids();
+  ok('tablet: no Reports or Database', !home.includes('tileReports') && !home.includes('tileDatabase') && home.includes('tileSearch') && home.includes('tileCount'), home);
+  ok('tablet: version says tablet', (await page.textContent('#appVersion')).includes('tablet'));
+  await page.click('#tileLitho'); await page.waitForTimeout(100);
+  let litho = await ids();
+  ok('tablet: Litho Line but no Move To WIP', litho.includes('tileLithoLine') && !litho.includes('tileMoveWip'), litho);
+  await page.click('#backBtn'); await page.click('#tileProduction'); await page.waitForTimeout(100);
+  let metals = await ids();
+  ok('tablet: Metal Lines, Press and Slitter open; no Used in Production or Print', ['metalsPickLines', 'metalsPickPress', 'metalsPickSlitter'].every((k) => metals.includes(k))
+    && !metals.includes('metalsPickUsed') && !metals.includes('metalsPrintTickets') && !(await page.$eval('#metalsPickLines', (b) => b.disabled)), metals);
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(100);
+  ok('tablet: the Database can\'t be opened another way', !(await page.$('[data-dbt="master"]')) && !!(await page.$('#tileSearch')));
+  await page.evaluate(() => { openReports(); openMoveWip(); openMetalsSection('used'); }); await page.waitForTimeout(100);
+  ok('tablet: nor Reports, Move To WIP or Used in Production', !(await page.$('#runReportBtn')) && !(await page.$('#mwJobName')) && !(await page.$('#metalsPickUsed')));
+  await page.goto(FILE + '?view=full'); await page.waitForTimeout(300);
+  ok('?view=full shows everything on a tablet', !!(await page.$('#tileDatabase')) && !!(await page.$('#tileReports')));
+  await page.goto(FILE); await page.waitForTimeout(300);
+  ok('?view=full is remembered on that device', !!(await page.$('#tileDatabase')));
+  await page.goto(FILE + '?view=auto'); await page.waitForTimeout(300);
+  ok('?view=auto goes back to detecting', !(await page.$('#tileDatabase')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+{ const { page } = await boot(base);
+  const home = await page.$$eval('#view button', (bs) => bs.map((b) => b.id));
+  ok('computer: everything shows', ['tileSearch', 'tileLitho', 'tileProduction', 'tileReports', 'tileCount', 'tileDatabase'].every((k) => home.includes(k)), home);
+  ok('computer: version doesn\'t say tablet', !(await page.textContent('#appVersion')).includes('tablet'));
+  await page.click('#tileProduction'); await page.waitForTimeout(100);
+  ok('computer: Used in Production and Print show', !!(await page.$('#metalsPickUsed')) && !!(await page.$('#metalsPrintTickets')));
   await page.close();
 }
 
