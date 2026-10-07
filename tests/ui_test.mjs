@@ -1365,6 +1365,23 @@ const base = {
   await page.close();
 }
 
+// ---- 33b. Discard an unfinished skid (a test or a mistake)
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const tickets = [ticket('SKD-9', '100726-001', 'Used', { cs: 'C', mill: '12345', carryOver: 725, carryLine: '2', carryDate: '2026-10-07' }), ticket('SKD-8', 'C8', 'Current', { cs: 'C', mill: 'M8' })];
+  const { page, calls } = await boot(Object.assign({}, base, { getAllTickets: () => R(tickets), discardCoilCarry: (a) => R({ ok: true, coilSkidId: a[0], discarded: 725 }) }), { userAgent: IPAD });
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
+  await page.click('[data-coil="SKD-8"]'); await page.selectOption('#crepLine', '2'); await page.waitForTimeout(100);
+  ok('discard: the card has a Discard button', !!(await page.$('#crepCarryDiscard')));
+  await page.click('#crepCarryDiscard'); await page.waitForTimeout(100);
+  ok('discard: asks first, says no skid is made', (await page.textContent('#modalRoot')).includes('725 sheets from coil 100726-001 (left 2026-10-07) are dropped and no skid is made'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const dc = calls.filter((c) => c.fn === 'discardCoilCarry')[0];
+  ok('discard: sends the coil', dc && dc.args[0] === 'SKD-9', dc && dc.args);
+  ok('discard: the card is gone and the first skid is the new coil\'s -200', !(await page.$('#crepCarryUse')) && (await page.textContent('.crep-row .crep-no')).trim() === '-200');
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 // ---- 34. Both receivers of a coil-changeover skid show, each linked to its scan
 { const { page, calls } = await boot(base);
   const out = await page.evaluate(() => {

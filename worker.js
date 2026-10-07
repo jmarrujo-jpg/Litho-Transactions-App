@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'rcv-74', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-75', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -342,6 +342,8 @@ async function handle(fn, args, env) {
       return markUsedDirect(sheets, args[0], args[1], args[2]);
     case 'cutCoil': // (coilSkidId | [coilSkidIds], cutDate, coilLine, skids[{weight,qty,coils?,parts?}], finish, opId, info?)
       return cutCoil(sheets, args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+    case 'discardCoilCarry': // (coilSkidId, operator, opId) drop an unfinished skid left for the next coil-line run
+      return discardCoilCarry(sheets, args[0], args[1], args[2]);
     case 'getRawTable': // (tableKey: 'steel' | 'tx')
       return getRawTable(sheets, args[0]);
     case 'updateRawRow': // (tableKey, rowNum, fields, opId)
@@ -3049,6 +3051,28 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   }
   return { ok: true, created: tickets.length, coilSkidId: coilIds[0], coils: coilIds, coilTicket: coils[0]['Ticket'] || '', coilLine: line,
     finished, usedDate: (finished || coils.length > 1) ? date : '', tickets };
+}
+
+// Throw away an unfinished skid a coil-line run left for the next run (a test, or entered by
+// mistake): its coil's carry is cleared and no skid is made. The coil's status is left alone. The
+// history row says how many sheets were dropped. Retry-safe: once the carry is gone (stamped with
+// this opId) a retry just reports it done.
+async function discardCoilCarry(sheets, coilSkidId, operator, opId) {
+  coilSkidId = String(coilSkidId || '').trim();
+  if (opId && await opAlreadyDone(sheets, opId)) return { ok: true, duplicate: true, coilSkidId };
+  const master = await readTab(sheets, MASTER);
+  const c = master.rows.filter((o) => String(o['Skid ID']).trim() === coilSkidId)[0];
+  if (!c) throw new Error('Coil not found: ' + coilSkidId);
+  const sheetsLeft = num(c['Carry Over']);
+  if (!(sheetsLeft > 0) && !stampedBy(c, opId)) throw new Error('That unfinished skid was already finished or discarded. Refresh and try again.');
+  const line = c['Carry Over Line'] || '', left = toYMD(c['Carry Over Date']);
+  if (sheetsLeft > 0) {
+    await stampCells(sheets, MASTER, c.__row, master.map, { 'Carry Over': '', 'Carry Over Line': '', 'Carry Over Date': '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' });
+  }
+  await eventTx(sheets, { skidId: coilSkidId, ticket: c['Ticket'] || '', itemText: 'UNFINISHED SKID DISCARDED', operator: operator || '',
+    note: (sheetsLeft || 'The') + ' sheets on the unfinished skid' + (left ? ' left on ' + left : '') + (line ? ' (coil line ' + line + ')' : '') + ' were discarded — no skid was made.',
+    timestamp: nowStamp(), runningTotal: 0 }, opId || '');
+  return { ok: true, coilSkidId, discarded: sheetsLeft };
 }
 
 // ================= DATABASE (raw table viewer / manual editor) ======================

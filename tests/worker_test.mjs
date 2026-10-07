@@ -1033,6 +1033,15 @@ await concurrency(envBase, 'in-worker lock');
   const d5 = await call('cutCoil', [['SKD-000012'], '2026-09-14', 1, [{ qty: 1000, coils: [0] }], false, 'op-31-f', { carryOut: 300 }]);
   const d6 = await call('cutCoil', [['SKD-000012', 'SKD-000013'], '2026-09-15', 1, [{ coils: [0, 1], parts: [300, 1000] }], false, 'op-31-g', { carryIn: { skidId: 'SKD-000012', only: true } }]);
   ok('an open coil whose skid is finished on another coil stays open', d5.ok && d6.ok && row('SKD-000012')['Status'] === 'Current' && !row('SKD-000012')['Used At'] && !row('SKD-000012')['Carry Over'], [d6, row('SKD-000012')]);
+  const d7 = await call('cutCoil', [['SKD-000013'], '2026-09-16', 2, [{ qty: 1300, coils: [0] }], true, 'op-31-h', { carryOut: 725 }]);
+  const dd = await call('discardCoilCarry', ['SKD-000013', 'Jonathan', 'op-31-x']);
+  ok('discard: the unfinished skid is dropped, the coil stays Used', d7.ok && dd.ok && dd.result.discarded === 725 && !row('SKD-000013')['Carry Over'] && row('SKD-000013')['Status'] === 'Used', [dd, row('SKD-000013')]);
+  const dtx = fk.rows(SID, 'Transactions').filter((t) => t['Item'] === 'UNFINISHED SKID DISCARDED');
+  ok('discard: history says how many sheets', dtx.length === 1 && /725 sheets on the unfinished skid left on 2026-09-16 \(coil line 2\) were discarded/.test(dtx[0]['Notes']) && dtx[0]['Operator'] === 'Jonathan', dtx.map((t) => t['Notes']));
+  const dd2 = await call('discardCoilCarry', ['SKD-000013', 'Jonathan', 'op-31-x']);
+  ok('discard: retry is a no-op', dd2.ok && dd2.result.duplicate && fk.rows(SID, 'Transactions').filter((t) => t['Item'] === 'UNFINISHED SKID DISCARDED').length === 1, dd2);
+  const dd3 = await call('discardCoilCarry', ['SKD-000013', 'Jonathan', 'op-31-y']);
+  ok('discard: nothing left to discard', !dd3.ok && /already finished or discarded/.test(dd3.error), dd3);
   ok('same coil: the next run finishes it as -100, and the coil is FIN', d4.ok && d4.result.tickets[0].ticket === '091326-100' && row('SKD-000011')['Status'] === 'Used' && !row('SKD-000011')['Carry Over'], d4);
 }
 

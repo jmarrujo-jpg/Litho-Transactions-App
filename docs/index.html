@@ -222,7 +222,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.70.0</span>
+      <span class="version" id="appVersion">v1.71.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -6338,11 +6338,28 @@
       '<div class="sub">from coil ' + esc(cin.ticket || cin.skidId) + (cin.mill ? ' · ' + esc(cin.mill) : '') + '</div>' +
       '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px"><input type="checkbox" id="crepCarryUse" style="width:auto;margin:0"' + (crep.carryUse ? ' checked' : '') + '> Finish it with this run’s first coil' + (sk && sk.parts ? ' — ' + crepFmt(sk.qty) + ' on the skid' : '') + '</label>' +
       (crep.carryUse ? '' : '<div class="sub" style="margin-top:4px">It’s made as it is: ' + esc(crepSkidNo(0)) + ' with ' + crepFmt(cin.sheets) + ' sheets.</div>') +
+      '<button class="btn secondary" id="crepCarryDiscard" style="margin-top:8px;padding:6px 12px;font-size:13px">Discard it (a test or a mistake)</button>' +
     '</div>';
   }
   function wireCrepCarry() {
     var cb = document.getElementById('crepCarryUse');
     if (cb) cb.onchange = function () { crep.carryUse = this.checked; renderCoilReport(); };
+    var dc = document.getElementById('crepCarryDiscard');
+    if (dc) dc.onclick = function () {
+      var cin = crepCarryIn();
+      if (!cin) return;
+      showConfirm('Discard the unfinished skid?', crepFmt(cin.sheets) + ' sheets from coil ' + (cin.ticket || cin.skidId) + (cin.date ? ' (left ' + cin.date + ')' : '') +
+        ' are dropped and no skid is made. The coil stays as it is. Use this for a test or a mistake — to keep the sheets, finish it on this run instead.', function () {
+        dc.disabled = true; dc.textContent = 'Discarding…';
+        runMutation('discardCoilCarry', [cin.skidId, String(crep.operator || lastOperator || '').trim(), newOpId()],
+          function () {
+            allCache.forEach(function (t) { if (t.skidId === cin.skidId) { t.carryOver = 0; t.carryLine = ''; t.carryDate = ''; } });
+            toast('Unfinished skid discarded');
+            renderCoilReport();
+          },
+          function (err) { toast('Error: ' + err.message); dc.disabled = false; dc.textContent = 'Discard it (a test or a mistake)'; });
+      }, 'Discard', 'danger');
+    };
   }
 
   function crepSummaryText(skids, tot, spoil) {
