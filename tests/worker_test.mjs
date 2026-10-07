@@ -993,5 +993,48 @@ await concurrency(envBase, 'in-worker lock');
   ok('a single coil still cuts as before', single.ok && single.result.created === 1 && fake2.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === 'SKD-000007')[0]['Status'] === 'Used', single);
 }
 
+// 31. An unfinished skid at the end of a run is finished by the next run and takes its first number
+{ const fk = makeFake({ [SID]: { 'Steel Tickets': [MASTER_H,
+    skid('C-3', 'SKD-000010', 'Current', '', 13000, { 'C/S': 'C', 'Mill': '26HCD20181', 'End Use': '603 ENDS' }),
+    skid('C-4', 'SKD-000011', 'Current', '', 13000, { 'C/S': 'C', 'Mill': '26HCD20190', 'End Use': '603 ENDS' }),
+    skid('C-5', 'SKD-000012', 'Current', '', 13000, { 'C/S': 'C', 'Mill': '26HCD20200', 'End Use': '603 ENDS' }),
+    skid('C-6', 'SKD-000013', 'Current', '', 13000, { 'C/S': 'C', 'Mill': '26HCD20210', 'End Use': '603 ENDS' }),
+  ], 'Transactions': [TX_H] } });
+  globalThis.fetch = fk.fetchImpl;
+  const row = (id) => fk.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === id)[0];
+  // Day 1: -200, -201 off coil 3, which runs out with 925 sheets on a skid that isn't full.
+  const d1 = await call('cutCoil', [['SKD-000010'], '2026-09-10', 2, [{ qty: 1300, coils: [0] }, { qty: 1300, coils: [0] }], true, 'op-31-a', { operator: 'Giovanni', carryOut: 925 }]);
+  ok('day 1: 2 skids, the unfinished one isn\'t made yet', d1.ok && d1.result.tickets.map((t) => t.ticket).join() === '091026-200,091026-201', d1);
+  ok('day 1: coil 3 is FIN (Used) and holds the 925 for line 2', row('SKD-000010')['Status'] === 'Used' && row('SKD-000010')['Carry Over'] == 925 && row('SKD-000010')['Carry Over Line'] == 2 && row('SKD-000010')['Carry Over Date'] === '2026-09-10', row('SKD-000010'));
+  const all = await call('getAllTickets', []);
+  ok('the page sees the carry-over', all.ok && all.result.filter((t) => t.skidId === 'SKD-000010')[0].carryOver === 925);
+  // Day 2: a new coil's first 375 finish it as the day's -200, then -201 off the new coil.
+  const d2 = await call('cutCoil', [['SKD-000010', 'SKD-000011'], '2026-09-11', 2,
+    [{ coils: [0, 1], parts: [925, 375] }, { qty: 1300, coils: [1] }], false, 'op-31-b', { operator: 'Giovanni', carryIn: { skidId: 'SKD-000010' } }]);
+  ok('day 2 ok', d2.ok, d2);
+  const k2 = fk.rows(SID, 'Steel Tickets').filter((o) => /^091126-2/.test(o['Ticket']));
+  ok('day 2: -200 is 925 + 375 with both mills', k2[0] && k2[0]['Ticket'] === '091126-200' && k2[0]['QTY/LOAD'] == 1300 && k2[0]['Mill'] === '26HCD20181 / 26HCD20190'
+    && k2[0]['Split Of'] === 'SKD-000010' && k2[0]['Also Cut From'] === 'SKD-000011' && /925 sheets from C-3/.test(k2[0]['System Notes']), k2[0]);
+  ok('day 2: -201 off the new coil', k2[1] && k2[1]['Ticket'] === '091126-201' && k2[1]['Mill'] === '26HCD20190');
+  ok('yesterday\'s coil keeps its Used date; its carry is cleared', row('SKD-000010')['Used At'] === '2026-09-10' && !row('SKD-000010')['Carry Over'], row('SKD-000010'));
+  ok('the new coil stays open', row('SKD-000011')['Status'] === 'Current');
+  const tx = fk.rows(SID, 'Transactions').filter((t) => t['Skid ID'] === 'SKD-000010');
+  ok('coil 3 history: cut on day 1 (925 left), finished on day 2', tx.length === 2 && /925 sheets on an unfinished skid/.test(tx[0]['Notes']) && tx[1]['Item'] === 'UNFINISHED SKID FINISHED'
+    && /091126-200 \(925 of 1300/.test(tx[1]['Notes']) && /left unfinished on 2026-09-10/.test(tx[1]['Notes']), tx.map((t) => t['Item'] + ': ' + t['Notes']));
+  const again = await call('cutCoil', [['SKD-000010', 'SKD-000011'], '2026-09-11', 2,
+    [{ coils: [0, 1], parts: [925, 375] }, { qty: 1300, coils: [1] }], false, 'op-31-b', { operator: 'Giovanni', carryIn: { skidId: 'SKD-000010' } }]);
+  ok('retry makes nothing new', again.ok && again.result.duplicate && fk.rows(SID, 'Steel Tickets').length === 8, again);
+  const twice = await call('cutCoil', [['SKD-000010', 'SKD-000012'], '2026-09-12', 2, [{ coils: [0, 1], parts: [925, 375] }], true, 'op-31-c', { carryIn: { skidId: 'SKD-000010' } }]);
+  ok('it can\'t be finished twice', !twice.ok && /already finished/.test(twice.error), twice);
+  // Same coil both days: left open with 500 on a skid; the next run continues on that coil.
+  const d3 = await call('cutCoil', [['SKD-000011'], '2026-09-12', 1, [], false, 'op-31-d', { carryOut: 500 }]);
+  ok('a run can end with only the unfinished skid', d3.ok && d3.result.created === 0 && row('SKD-000011')['Carry Over'] == 500 && row('SKD-000011')['Status'] === 'Current', d3);
+  const d4 = await call('cutCoil', [['SKD-000011'], '2026-09-13', 1, [{ qty: 1300, coils: [0] }], true, 'op-31-e', { carryIn: { skidId: 'SKD-000011' } }]);
+  const d5 = await call('cutCoil', [['SKD-000012'], '2026-09-14', 1, [{ qty: 1000, coils: [0] }], false, 'op-31-f', { carryOut: 300 }]);
+  const d6 = await call('cutCoil', [['SKD-000012', 'SKD-000013'], '2026-09-15', 1, [{ coils: [0, 1], parts: [300, 1000] }], false, 'op-31-g', { carryIn: { skidId: 'SKD-000012', only: true } }]);
+  ok('an open coil whose skid is finished on another coil stays open', d5.ok && d6.ok && row('SKD-000012')['Status'] === 'Current' && !row('SKD-000012')['Used At'] && !row('SKD-000012')['Carry Over'], [d6, row('SKD-000012')]);
+  ok('same coil: the next run finishes it as -100, and the coil is FIN', d4.ok && d4.result.tickets[0].ticket === '091326-100' && row('SKD-000011')['Status'] === 'Used' && !row('SKD-000011')['Carry Over'], d4);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

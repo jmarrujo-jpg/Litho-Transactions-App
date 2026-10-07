@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-72', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-73', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -704,6 +704,7 @@ async function getAllTickets(sheets) {
     bw: o['BW'], testedBw: o['Tested BW'] != null ? o['Tested BW'] : '', type: o['TC'], temper: o['TM'], litho: num(o['Litho']), status: o['Status'] || 'Current',
     row: o['Row'] != null ? o['Row'] : '', mill: o['Mill'] || '', cutType: o['Cut Type'] || '', loadNo: o['Load #'] || '', cost: num(o['Cost']), countedOn: toYMD(o['Counted At']),
     cs: String(o['C/S'] || o['Coil/Sheet'] || '').trim(), splitOf: o['Split Of'] || '', comments: o['Comments'] || '',
+    carryOver: num(o['Carry Over']), carryLine: o['Carry Over Line'] || '', carryDate: toYMD(o['Carry Over Date']),
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
   }));
 }
@@ -2860,6 +2861,13 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
 // second] records how many sheets came off each (like the paper report's "175 + 1,125 = 1,300").
 // Every coil but the last ran out, so it's marked Used; the last one follows `finish` like a single
 // coil. info = { operator, start, end, spoilage: [per coil] } from the report header (all optional).
+//
+// A skid left unfinished at the end of a run isn't made yet: info.carryOut = its sheets, kept on
+// the last coil ('Carry Over' + the line and date). The next run on that line finishes it, and it
+// takes that run's first number (-200): info.carryIn = { skidId } names the coil it came from, sent
+// as coil 0 with the skid's parts = [carried sheets, sheets from today's first coil]. That coil can
+// already be Used (it ran out yesterday); it isn't touched again except to clear its carry. When it
+// isn't Used but today's run started on another coil, carryIn.only = true leaves it as it is too.
 async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opId, info) {
   const coilIds = (Array.isArray(coilSkidId) ? coilSkidId : [coilSkidId]).map((x) => String(x || '').trim()).filter(Boolean);
   const isMine = (o) => coilIds.indexOf(String(o['Split Of'] || '').trim()) !== -1;
@@ -2878,7 +2886,8 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     const qty = num(s && s.qty) || (parts ? parts[0] + parts[1] : 0);
     return { weight: num(s && s.weight), qty, coils: cs, parts };
   });
-  if (!list.length) throw new Error('Add at least one cut skid.');
+  const carryOut = num((info || {}).carryOut);
+  if (!list.length && !carryOut) throw new Error('Add at least one cut skid.');
   list.forEach((s, i) => {
     const ok = s.coils.length && s.coils[0] >= 0 && s.coils[s.coils.length - 1] <= last
       && (s.coils.length === 1 || (s.coils.length === 2 && s.coils[1] === s.coils[0] + 1));
@@ -2890,6 +2899,7 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   const hours = [inf.start, inf.end].map((x) => String(x || '').trim());
   const hoursText = hours[0] || hours[1] ? ' (' + (hours[0] || '?') + '–' + (hours[1] || '?') + ')' : '';
   const spoil = coilIds.map((x, i) => num(Array.isArray(inf.spoilage) ? inf.spoilage[i] : ''));
+  const carryInIdx = inf.carryIn && inf.carryIn.skidId ? coilIds.indexOf(String(inf.carryIn.skidId).trim()) : -1;
   const line = Math.max(1, parseInt(coilLine, 10) || 1);   // coil line number -> first digit of the suffix
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(cutDate || '').trim()) ? String(cutDate).trim() : todayYMD();
   const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
@@ -2903,11 +2913,18 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Last Op ID');
   if (list.some((s) => s.coils.length > 1)) ens = await ensureColumn(sheets, MASTER, ens.headers, 'Also Cut From');
   if (spoil.some((n) => n > 0)) ens = await ensureColumn(sheets, MASTER, ens.headers, 'Spoilage');
+  if (carryOut || carryInIdx !== -1) {
+    for (const h of ['Carry Over', 'Carry Over Line', 'Carry Over Date']) ens = await ensureColumn(sheets, MASTER, ens.headers, h);
+  }
   master = await readTab(sheets, MASTER);
-  const coils = coilIds.map((id) => {
+  const wasUsed = [];
+  const coils = coilIds.map((id, ci) => {
     const c = master.rows.filter((o) => String(o['Skid ID']).trim() === id)[0];
     if (!c) throw new Error('Coil not found: ' + id);
-    if (String(c['Status']) === STATUS.USED && !stampedBy(c, opId)) throw new Error('Coil ' + (c['Ticket'] || id) + ' is already marked Used.');
+    wasUsed[ci] = String(c['Status']) === STATUS.USED;
+    const carrying = ci === carryInIdx && (num(c['Carry Over']) > 0 || stampedBy(c, opId));
+    if (ci === carryInIdx && !carrying) throw new Error('The unfinished skid from coil ' + (c['Ticket'] || id) + ' was already finished. Refresh and try again.');
+    if (wasUsed[ci] && !carrying && !stampedBy(c, opId)) throw new Error('Coil ' + (c['Ticket'] || id) + ' is already marked Used.');
     return c;
   });
   // Children an earlier attempt of this same cut already wrote (it failed part-way): keep them and
@@ -2975,12 +2992,17 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   const made = list.map((s, i) => Object.assign({ coils: s.coils, parts: s.parts }, tickets[i] || {}));
   for (let ci = 0; ci < coils.length; ci++) {
     const c = coils[ci], done1 = ci < last || finished;
-    const fields = done1
+    // Yesterday's coil, when it isn't part of today's run (it ran out, or today started on another
+    // coil): only its carry is cleared; its status and Used date stay as they were.
+    const carryOnly = ci === carryInIdx && (wasUsed[ci] || !!inf.carryIn.only);
+    const fields = carryOnly ? { 'Last Op ID': opId || '' } : done1
       ? { 'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date, 'Last Op ID': opId || '' }   // 'Coil' distinguishes it from the direct quick-mark
       : { 'Last Updated At': date, 'Last Op ID': opId || '' };
-    if (spoil[ci] > 0 && master.map['Spoilage']) fields['Spoilage'] = num(c['Spoilage']) + spoil[ci];   // spoilage adds up if the coil is cut over several days
+    if (!carryOnly && spoil[ci] > 0 && master.map['Spoilage']) fields['Spoilage'] = num(c['Spoilage']) + spoil[ci];   // spoilage adds up if the coil is cut over several days
     if (stampedBy(c, opId)) delete fields['Spoilage'];   // a retry: already added
-    if (operator && done1) fields['Used By'] = operator;
+    if (operator && done1 && !carryOnly) fields['Used By'] = operator;
+    if (ci === carryInIdx) Object.assign(fields, { 'Carry Over': '', 'Carry Over Line': '', 'Carry Over Date': '' });
+    if (ci === last && carryOut) Object.assign(fields, { 'Carry Over': carryOut, 'Carry Over Line': line, 'Carry Over Date': date });
     await stampCells(sheets, MASTER, c.__row, master.map, fields);
     // Each coil's history row carries its own op id; the last coil's is the plain opId, written last,
     // which marks the whole cut done. A retry skips any coil row an earlier attempt already wrote.
@@ -2992,10 +3014,12 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
       const mineIdx = t.coils[0] === ci ? 0 : 1, other = tk(coils[t.coils[1 - mineIdx]]);
       return t.ticket + ' (' + (t.parts ? t.parts[mineIdx] + ' of ' + t.qty + ', ' : '') + 'changeover with ' + other + ')';
     };
+    const carried = carryOnly && c['Carry Over Date'] ? ' (left unfinished on ' + toYMD(c['Carry Over Date']) + ')' : '';
     await eventTx(sheets, { skidId: c['Skid ID'], ticket: c['Ticket'] || '',
-      itemText: done1 ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator,
+      itemText: carryOnly ? 'UNFINISHED SKID FINISHED' : done1 ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator,
       note: 'Cut on coil line ' + line + (operator ? ' by ' + operator : '') + hoursText + ' into ' + mine.length + ' skid(s) on ' + date +
-        (done1 ? '' : ' — coil left open for more cutting') + ': ' + mine.map(part).join(', ') + (spoil[ci] > 0 ? '; spoilage ' + spoil[ci] : ''),
+        (done1 || carryOnly ? '' : ' — coil left open for more cutting') + ': ' + mine.map(part).join(', ') + carried + (spoil[ci] > 0 && !carryOnly ? '; spoilage ' + spoil[ci] : '') +
+        (ci === last && carryOut ? '; ' + carryOut + ' sheets on an unfinished skid, finished on the next run' : ''),
       timestamp: date, runningTotal: 0 }, txOp);
   }
   return { ok: true, created: tickets.length, coilSkidId: coilIds[0], coils: coilIds, coilTicket: coils[0]['Ticket'] || '', coilLine: line,

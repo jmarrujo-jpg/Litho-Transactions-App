@@ -1316,6 +1316,55 @@ const base = {
   await page.close();
 }
 
+// ---- 33. Coil Line: a skid left unfinished at the end of a run is the next run's first skid
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  let tickets = [ticket('SKD-3', 'C3', 'Current', { cs: 'C', mill: '26HCD20181' }), ticket('SKD-4', 'C4', 'Current', { cs: 'C', mill: '26HCD20190' })];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R(tickets),
+    cutCoil: (a) => R({ created: a[3].length, tickets: a[3].map((x, i) => ({ ticket: 'T' + i })) }),
+  }), { userAgent: IPAD });
+  const q = (ci, ri) => `.crep-row[data-crc="${ci}"][data-crr="${ri}"] .crepQty`;
+  const nos = async () => page.$$eval('.crep-row .crep-no', (es) => es.map((e) => e.textContent.trim()));
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  ok('carry: no unfinished skid card when there is none', !(await page.$('#crepCarryUse')));
+  await page.click('[data-coil="SKD-3"]'); await page.selectOption('#crepLine', '2'); await page.fill('#crepOperator', 'Giovanni');
+  await page.fill(q(0, 0), '1300'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '925');
+  await page.click('#crepCarryOut'); await page.waitForTimeout(100);
+  ok('carry: the unfinished skid has no number yet', (await nos()).join('|') === '-200|next ↘', await nos());
+  ok('carry: summary says it waits for the next run', (await page.textContent('#crepSummary')).includes('1 skid (-200) · 1,300 sheets · 925 on an unfinished skid for the next run'), await page.textContent('#crepSummary'));
+  await page.click('#crepCutBtn'); await page.waitForTimeout(100);
+  ok('carry: confirm explains it', (await page.textContent('#modalRoot')).includes('925 sheets stay on an unfinished skid; the next run on Coil Line 2 finishes it'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  let cut = calls.filter((c) => c.fn === 'cutCoil').slice(-1)[0];
+  ok('carry: day 1 sends 1 skid and the 925 to carry', cut.args[3].length === 1 && cut.args[3][0].qty === 1300 && cut.args[6].carryOut === 925, cut.args);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  // Next run (the reload says coil 3 is Used and holds 925 for line 2)
+  tickets = [ticket('SKD-3', 'C3', 'Used', { cs: 'C', mill: '26HCD20181', carryOver: 925, carryLine: '2', carryDate: '2026-09-10' }), ticket('SKD-4', 'C4', 'Current', { cs: 'C', mill: '26HCD20190' })];
+  await page.evaluate(() => { allCache = []; }); await page.click('#backBtn'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
+  ok('carry: next run shows the unfinished skid as its -200', !!(await page.$('#crepCarryUse')) && (await page.textContent('#coilBody')).includes('-200 ↘ 925 sheets') && (await page.textContent('#coilBody')).includes('from coil C3'), await page.textContent('#coilBody'));
+  await page.click('[data-coil="SKD-4"]'); await page.waitForTimeout(100);
+  ok('carry: the new coil\'s first count finishes it', (await nos()).join('|') === '-200 ↳', await nos());
+  await page.fill(q(0, 0), '375'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300');
+  ok('carry: total shown', (await page.textContent('[data-creptot]')).includes('1,300 on the skid (925 from the last run + 375)'), await page.textContent('[data-creptot]'));
+  await page.click('#crepCutBtn'); await page.waitForTimeout(100); await page.click('#modalOk'); await page.waitForTimeout(300);
+  cut = calls.filter((c) => c.fn === 'cutCoil').slice(-1)[0];
+  ok('carry: day 2 sends yesterday\'s coil first, the -200 as 925 + 375', cut.args[0].join() === 'SKD-3,SKD-4' && JSON.stringify(cut.args[3].map((x) => [x.qty, x.coils, x.parts || null])) === JSON.stringify([[1300, [0, 1], [925, 375]], [1300, [1], null]])
+    && cut.args[6].carryIn.skidId === 'SKD-3' && cut.args[6].carryIn.only === true && cut.args[6].spoilage.join() === '0,0', cut.args);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  // Same coil both days: still open, picked again first
+  tickets = [ticket('SKD-4', 'C4', 'Current', { cs: 'C', mill: '26HCD20190', carryOver: 500, carryLine: '1', carryDate: '2026-09-11' })];
+  await page.evaluate(() => { allCache = []; }); await page.click('#backBtn'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
+  await page.click('[data-coil="SKD-4"]'); await page.waitForTimeout(100);
+  await page.selectOption('#crepLine', '1'); await page.waitForTimeout(100);
+  await page.fill('#crepOperator', 'Giovanni'); await page.fill(q(0, 0), '800');
+  await page.click('#crepCutBtn'); await page.waitForTimeout(100); await page.click('#modalOk'); await page.waitForTimeout(300);
+  cut = calls.filter((c) => c.fn === 'cutCoil').slice(-1)[0];
+  ok('carry: same coil — one coil, 500 + 800 on one skid', cut.args[0].join() === 'SKD-4' && cut.args[3][0].qty === 1300 && cut.args[3][0].coils.join() === '0,0' && !cut.args[3][0].parts && cut.args[6].carryIn.only === false, cut.args);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
