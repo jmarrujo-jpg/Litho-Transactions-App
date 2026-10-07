@@ -1227,6 +1227,8 @@ const base = {
   await page.click('#tileProduction'); await page.waitForTimeout(100);
   ok('coil: Coil Line button on the tablet', !!(await page.$('#metalsPickCoil')));
   await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  ok('line: asks which coil line first — nothing else until it\'s tapped', !!(await page.$('#crepLinePick')) && !(await page.$('#coilSearch')));
+  await page.click('[data-crepline="1"]'); await page.waitForTimeout(200);
   ok('coil: opens the production report', !!(await page.$('#coilSearch')) && !(await page.$('[data-usedtab]')));
   let txt = await page.textContent('#coilPicker');
   ok('coil: lists coils only', txt.includes('C1') && !txt.includes('S1'), txt);
@@ -1256,6 +1258,13 @@ const base = {
   ok('coil: needs the operator', !(await page.$('#crepAsk')));
   await page.fill('#crepOperator', 'Giovanni'); await page.fill('#crepStart', '08:00');
   await page.click('#crepCutBtn'); await page.waitForTimeout(100);
+  const reds = async () => page.$$eval('#coilBody input.miss', (es) => es.map((e) => e.closest('.crep-row').querySelector('.crep-no').textContent.trim() + (e.classList.contains('crepWt') ? ' wt' : ' qty')));
+  ok('red: Done with missing weights turns them red and stops', !(await page.$('#crepAsk')) && (await reds()).join('|') === '-200 wt|-201 ↳ wt', await reds());
+  ok('red: the half of a changeover on the old coil needs no weight', !(await reds()).some((x) => x.startsWith('-201 ↘')));
+  await page.fill('.crep-row[data-crc="0"][data-crr="0"] .crepWt', '3800');
+  ok('red: filling one clears it', (await reds()).join('|') === '-201 ↳ wt', await reds());
+  await page.fill('.crep-row[data-crc="1"][data-crr="0"] .crepWt', '4500');
+  await page.click('#crepCutBtn'); await page.waitForTimeout(100);
   ok('coil: Done asks if the last coil is used up (big buttons), end time filled in', !!(await page.$('#crepAsk')) && (await page.textContent('#crepAsk')).includes('Is coil M88 used up?')
     && !!(await page.$('[data-crepyn="fin:1"]')) && /^\d\d:\d\d$/.test(await page.inputValue('#crepEnd')));
   ok('coil: a full last skid isn\'t asked about', !(await page.$('[data-crepyn^="full"]')));
@@ -1266,10 +1275,13 @@ const base = {
   await page.click('#crepGoBtn'); await page.waitForTimeout(300);
   const cut = calls.filter((c) => c.fn === 'cutCoil')[0];
   ok('coil: sends both coils, the sheets from each, operator, hours and spoilage', cut && cut.args[0].join() === 'SKD-C,SKD-D' && cut.args[2] === 2
-    && JSON.stringify(cut.args[3].map((x) => [x.qty, x.coils, x.parts || null, x.weight])) === JSON.stringify([[1100, [0], null, ''], [1300, [0, 1], [175, 1125], ''], [1300, [1], null, '4515']])
+    && JSON.stringify(cut.args[3].map((x) => [x.qty, x.coils, x.parts || null, x.weight])) === JSON.stringify([[1100, [0], null, '3800'], [1300, [0, 1], [175, 1125], '4500'], [1300, [1], null, '4515']])
     && cut.args[4] === true && cut.args[6].operator === 'Giovanni' && cut.args[6].start === '08:00' && cut.args[6].end === '14:30' && cut.args[6].spoilage.join() === '15,0', cut && cut.args);
   await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
-  ok('coil: report clears after the cut', !!(await page.$('#coilSearch')));
+  ok('coil: report clears after the cut and asks the line again', !!(await page.$('#crepLinePick')));
+  ok('line: the line just used is marked, but not picked for them', (await page.textContent('[data-crepline="2"]')).includes('last used on this tablet') && !(await page.$('#coilSearch')));
+  await page.click('[data-crepline="2"]'); await page.waitForTimeout(200);
+  ok('line: then the line shows at the top with Change line', (await page.textContent('#coilBody')).includes('Coil Line 2') && !!(await page.$('#crepLineChange')));
   // The app decides if a coil's last skid finishes on the next coil from the counts; a tap flips it.
   await page.click('[data-coil="SKD-C"]'); await page.fill(q(0, 0), '1300'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300');
   await page.click('#crepNextBtn'); await page.click('[data-coil="SKD-D"]'); await page.waitForTimeout(100);
@@ -1335,10 +1347,13 @@ const base = {
   }), { userAgent: IPAD });
   const q = (ci, ri) => `.crep-row[data-crc="${ci}"][data-crr="${ri}"] .crepQty`;
   const nos = async () => page.$$eval('.crep-row .crep-no', (es) => es.map((e) => e.textContent.trim()));
-  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300); await page.click('[data-crepline="2"]'); await page.waitForTimeout(200);
   ok('carry: no unfinished skid card when there is none', !(await page.$('#crepCarryOpts')));
   await page.click('[data-coil="SKD-3"]'); await page.selectOption('#crepLine', '2'); await page.fill('#crepOperator', 'Giovanni');
-  await page.fill(q(0, 0), '1300'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 2), '925');
+  const w = (ci, ri) => `.crep-row[data-crc="${ci}"][data-crr="${ri}"] .crepWt`;
+  await page.fill(q(0, 0), '1300'); await page.fill(w(0, 0), '4515'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300'); await page.fill(w(0, 1), '4515');
+  await page.click('[data-crepadd="0"]'); await page.fill(q(0, 2), '925');
+  ok('red: a short last skid isn\'t asked for its weight (it may not be finished)', !(await page.$('#coilBody input.miss')));
   await page.click('#crepCutBtn'); await page.waitForTimeout(100);
   ok('carry: a short last skid is asked about in plain words', (await page.textContent('#crepAsk')).includes('The last skid (-202) has 925 sheets. Is it full?'), await page.textContent('#crepAsk'));
   await page.click('[data-crepyn="fin:1"]'); await page.waitForTimeout(100);
@@ -1353,11 +1368,11 @@ const base = {
   await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
   // Next run (the reload says coil 3 is Used and holds 925 for line 2)
   tickets = [ticket('SKD-3', 'C3', 'Used', { cs: 'C', mill: '26HCD20181', carryOver: 925, carryLine: '2', carryDate: '2026-09-10' }), ticket('SKD-4', 'C4', 'Current', { cs: 'C', mill: '26HCD20190' })];
-  await page.evaluate(() => { allCache = []; }); await page.click('#backBtn'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
+  await page.evaluate(() => { allCache = []; }); await page.click('#backBtn'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400); await page.click('[data-crepline="2"]'); await page.waitForTimeout(200);
   ok('carry: next run shows the unfinished skid as its -200, no choices to make', !!(await page.$('#crepCarryOpts')) && (await page.textContent('#coilBody')).includes('-200 continues from the last run: 925 sheets') && (await page.textContent('#coilBody')).includes('from coil C3'), await page.textContent('#coilBody'));
   await page.click('[data-coil="SKD-4"]'); await page.waitForTimeout(100);
   ok('carry: the new coil\'s first count finishes it', (await nos()).join('|') === '-200 ↳', await nos());
-  await page.fill(q(0, 0), '375'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300');
+  await page.fill(q(0, 0), '375'); await page.fill(w(0, 0), '4515'); await page.click('[data-crepadd="0"]'); await page.fill(q(0, 1), '1300'); await page.fill(w(0, 1), '4515');
   ok('carry: total shown', (await page.$$eval('.crep-note', (es) => es.map((e) => e.textContent).join('|'))).includes('1,300 on the skid (925 from the last run + 375)'), await page.$$eval('.crep-note', (es) => es.map((e) => e.textContent).join('|')));
   await page.click('#crepCutBtn'); await page.waitForTimeout(100); await page.click('[data-crepyn="fin:0"]'); await page.waitForTimeout(100);
   await page.click('#crepGoBtn'); await page.waitForTimeout(300);
@@ -1368,9 +1383,18 @@ const base = {
   // Same coil both days: still open, picked again first
   tickets = [ticket('SKD-4', 'C4', 'Current', { cs: 'C', mill: '26HCD20190', carryOver: 500, carryLine: '1', carryDate: '2026-09-11' })];
   await page.evaluate(() => { allCache = []; }); await page.click('#backBtn'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
-  await page.click('[data-coil="SKD-4"]'); await page.waitForTimeout(100);
-  await page.selectOption('#crepLine', '1'); await page.waitForTimeout(100);
-  await page.fill('#crepOperator', 'Giovanni'); await page.fill(q(0, 0), '800');
+  ok('line: opening Coil Line asks the line every time (2 marked as last used)', !!(await page.$('#crepLinePick')) && (await page.textContent('[data-crepline="2"]')).includes('last used'));
+  await page.click('[data-crepline="2"]'); await page.waitForTimeout(100);
+  await page.click('#crepLineChange'); await page.waitForTimeout(100);
+  ok('line: Change line asks again', !!(await page.$('#crepLinePick')));
+  await page.click('[data-crepline="1"]'); await page.waitForTimeout(100);
+  ok('line: the coil is still open, so it asks which coil is on the line — no list yet', !!(await page.$('#crepLineAsk')) && !(await page.$('#coilPicker')) && (await page.textContent('#crepLineAsk')).includes('Skid -100 is waiting with 500 sheets from coil 26HCD20190'), await page.textContent('#coilBody'));
+  await page.click('[data-crepsame="0"]'); await page.waitForTimeout(100);
+  ok('line: "a new coil" shows the list without the old coil', !!(await page.$('#coilPicker')) && !(await page.$('[data-coil="SKD-4"]')) && !!(await page.$('#crepLineBack')));
+  await page.click('#crepLineBack'); await page.waitForTimeout(100);
+  await page.click('[data-crepsame="1"]'); await page.waitForTimeout(100);
+  ok('line: "the same coil" picks it straight away', (await page.textContent('.crep-coil')).includes('26HCD20190') && (await nos()).join('|') === '-100 ↳', await nos());
+  await page.fill('#crepOperator', 'Giovanni'); await page.fill(q(0, 0), '800'); await page.fill(w(0, 0), '4000');
   await page.click('#crepCutBtn'); await page.waitForTimeout(100); await page.click('[data-crepyn="fin:1"]'); await page.waitForTimeout(100);
   await page.click('#crepGoBtn'); await page.waitForTimeout(300);
   cut = calls.filter((c) => c.fn === 'cutCoil').slice(-1)[0];
@@ -1384,7 +1408,7 @@ const base = {
 { const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   const tickets = [ticket('SKD-9', '100726-001', 'Used', { cs: 'C', mill: '12345', carryOver: 725, carryLine: '2', carryDate: '2026-10-07' }), ticket('SKD-8', 'C8', 'Current', { cs: 'C', mill: 'M8' })];
   const { page, calls } = await boot(Object.assign({}, base, { getAllTickets: () => R(tickets), discardCoilCarry: (a) => R({ ok: true, coilSkidId: a[0], discarded: 725 }) }), { userAgent: IPAD });
-  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400);
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(400); await page.click('[data-crepline="2"]'); await page.waitForTimeout(200);
   await page.click('[data-coil="SKD-8"]'); await page.selectOption('#crepLine', '2'); await page.waitForTimeout(100);
   ok('discard: tucked under Options', !(await page.$('#crepCarryDiscard')) && !!(await page.$('#crepCarryOpts')));
   await page.click('#crepCarryOpts'); await page.waitForTimeout(100);
@@ -1447,7 +1471,7 @@ const base = {
   const { page, calls } = await boot(Object.assign({}, base, { getAllTickets: () => R(tickets) }), { userAgent: IPAD });
   const q = (ci, ri) => `.crep-row[data-crc="${ci}"][data-crr="${ri}"] .crepQty`;
   const flip = async () => (await page.textContent('[data-crepflip="0"]')).trim();
-  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  await page.click('#tileProduction'); await page.click('#metalsPickCoil'); await page.waitForTimeout(300); await page.click('[data-crepline="1"]'); await page.waitForTimeout(200);
   // 603 ENDS: the first skid of the day is 1,296 — the past 603 ENDS skids say a full one is 1,300
   await page.click('[data-coil="SKD-E"]'); await page.fill(q(0, 0), '1296');
   await page.click('#crepNextBtn'); await page.click('[data-coil="SKD-F"]'); await page.waitForTimeout(100);

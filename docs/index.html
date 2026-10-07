@@ -147,6 +147,8 @@
   .crep-qt { font-size: 17px; margin-bottom: 8px; }
   .crep-yn { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .crep-yn .btn { padding: 16px 10px; font-size: 17px; margin: 0; }
+  /* a box that still needs filling in: every skid needs its ticket count and weight */
+  input.miss { border: 2px solid #dc2626 !important; background: #fef2f2 !important; }
   .gate h2 { margin-bottom: 4px; }
   .gate p { color: var(--muted); font-size: 14px; margin-top: 0; }
   .modal-overlay {
@@ -231,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.73.0</span>
+      <span class="version" id="appVersion">v1.74.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -5978,6 +5980,7 @@
     if (!view) return;
     nextViewToken();
     coilMode = 'metals';
+    if (!crep.coils.length) crep.lineAsked = false;
     view.innerHTML = '<div id="coilBody"></div>';
     renderCoilLine();
   }
@@ -5994,6 +5997,8 @@
   var coilSel = null;                        // manual: the selected coil { skidId, ticket, mill, weight, qty }
   var coilRows = [{ weight: '', qty: '' }];  // manual: the cut skids being entered
   var coilLineNo = 1;                        // which coil line (1 or 2) — first digit of the ticket suffix
+  try { if (localStorage.getItem('cscCoilLine') === '2') coilLineNo = 2; } catch (e) { /* no storage */ }   // a tablet stays on its line
+  function setCoilLine(n) { coilLineNo = Number(n) === 2 ? 2 : 1; try { localStorage.setItem('cscCoilLine', String(coilLineNo)); } catch (e) { /* no storage */ } }
   // Metals report: the coils in the order they ran, each { skidId, ticket, mill, bw, type, temper,
   // endUse, comments, rows: [{ qty, weight }], spoil, carry } — carry = its last skid continues on
   // the next coil.
@@ -6001,7 +6006,11 @@
   // run's first number); carryUse = finish yesterday's unfinished skid on this run's first coil.
   // asking = the "Almost done" questions are showing; ask = their answers (null = not answered).
   var crep = { coils: [], picking: false, operator: '', start: '', end: '', date: '', carryOut: false, carryUse: true, carryOpts: false,
-    asking: false, ask: { fin: null, full: null } };
+    asking: false, ask: { fin: null, full: null }, checked: false, lineChoice: null, lineAsked: false };
+  // checked = Done was tapped, so every empty box that needs filling turns red; lineChoice = for an
+  // unfinished skid whose coil isn't used up: 'same' coil still on the line, or 'new' coil loaded.
+  // lineAsked = they've said which coil line they're on (asked every time a report starts; the tablet's
+  // last line is marked, but they still tap it).
 
   // Preview the ticket shape for a cut date + coil line, e.g. 2026-08-01 / line 1 -> "080126-1XX".
   function fmtTicketPreview(ymd, line) {
@@ -6061,7 +6070,7 @@
         '</label>' +
         '<button class="btn success" id="coilCutBtn" style="width:100%;margin-top:12px">Cut coil &amp; create skids</button>' +
       '</div>';
-    document.getElementById('coilLineNo').onchange = function () { coilLineNo = Number(this.value) === 2 ? 2 : 1; };
+    document.getElementById('coilLineNo').onchange = function () { setCoilLine(this.value); };
     document.getElementById('coilChangeBtn').onclick = function () { coilSel = null; renderCoilLine(); };
     document.getElementById('coilAddRowBtn').onclick = function () { syncCoilRows(); coilRows.push({ weight: '', qty: '' }); renderCoilRows(); };
     document.getElementById('coilCutBtn').onclick = coilCutSubmit;
@@ -6094,6 +6103,7 @@
     if (!box) return;
     term = (term || '').trim().toLowerCase();
     var taken = coilChosen().map(function (c) { return c.skidId; });
+    if (coilMode === 'metals' && crep.lineChoice === 'new' && !crep.coils.length) { var ci0 = crepCarryIn(); if (ci0) taken.push(ci0.skidId); }   // "a new coil": not the old one
     var rows = coilEligible().filter(function (t) {
       if (taken.indexOf(t.skidId) !== -1) return false;
       if (!term) return true;
@@ -6149,16 +6159,31 @@
     box.innerHTML = html;
     Array.prototype.forEach.call(box.querySelectorAll('[data-crow]'), function (rowEl) {
       var i = Number(rowEl.getAttribute('data-crow'));
-      rowEl.querySelector('.crWeight').oninput = function () { coilRows[i].weight = this.value; };
-      rowEl.querySelector('.crQty').oninput = function () { coilRows[i].qty = this.value; };
+      rowEl.querySelector('.crWeight').oninput = function () { coilRows[i].weight = this.value; coilMarkMissing(); };
+      rowEl.querySelector('.crQty').oninput = function () { coilRows[i].qty = this.value; coilMarkMissing(); };
     });
+    coilMarkMissing();
     Array.prototype.forEach.call(box.querySelectorAll('[data-crdel]'), function (b) {
       b.onclick = function () { syncCoilRows(); coilRows.splice(Number(b.getAttribute('data-crdel')), 1); if (!coilRows.length) coilRows.push({ weight: '', qty: '' }); renderCoilRows(); };
     });
   }
 
+  // Every skid needs both its weight and quantity: a row with one but not the other shows the empty
+  // box red. Returns how many boxes are missing.
+  function coilMarkMissing() {
+    var missing = 0;
+    Array.prototype.forEach.call(document.querySelectorAll('#coilRowsBox [data-crow]'), function (rowEl) {
+      var w = rowEl.querySelector('.crWeight'), q = rowEl.querySelector('.crQty');
+      var hw = String(w.value).trim() !== '', hq = String(q.value).trim() !== '';
+      w.classList.toggle('miss', hq && !hw); q.classList.toggle('miss', hw && !hq);
+      missing += (hq && !hw ? 1 : 0) + (hw && !hq ? 1 : 0);
+    });
+    return missing;
+  }
+
   function coilCutSubmit() {
     syncCoilRows();
+    if (coilMarkMissing()) { toast('Fill in the red boxes — every skid needs its weight and quantity'); return; }
     var dateEl = document.getElementById('coilDate');
     var date = (dateEl && dateEl.value) ? dateEl.value : todayStr();
     var lineEl = document.getElementById('coilLineNo');
@@ -6303,20 +6328,60 @@
     if (!crep.operator) crep.operator = lastOperator || '';
     var cs = crep.coils, cin = crepCarryIn();
     if (!cs.length || crep.picking) {
-      var lastC = cs[cs.length - 1];
-      body.innerHTML = (cs.length ? '' : crepCarryHtml(cin, null)) +
-        '<div class="card">' +
-          '<h3 style="margin-top:0">' + (cs.length ? 'Next coil' : 'Coil Line Production Report') + '</h3>' +
-          '<div class="sub" style="margin-bottom:12px">' + (cs.length
-            ? 'Pick the coil that started when ' + esc(lastC.ticket || lastC.skidId) + ' ran out.'
-            : 'Pick the first coil you ran. Add the next one when it runs out.') + '</div>' +
-          coilPickerHtml() +
-          (cs.length ? '<button class="btn secondary" id="coilPickCancel" style="width:100%;margin-top:8px">Cancel</button>' : '') +
-        '</div>';
+      var lastC = cs[cs.length - 1], start = !cs.length;
+      // Yesterday's unfinished skid, and its coil still has steel: ask which coil is on the line
+      // (two big buttons) instead of making them find the right one in the list.
+      var askLine = start && cin && cin.open && crep.lineChoice === null;
+      var cinName = cin ? (cin.mill || cin.ticket || cin.skidId) : '';
+      if (start && !crep.lineAsked) {
+        body.innerHTML = '<div class="card" id="crepLinePick" style="border:2px solid var(--accent)"><div class="crep-qt" style="margin-bottom:10px">Which coil line are you on?</div><div class="crep-yn">' +
+          [1, 2].map(function (n) {
+            return '<button class="btn secondary" data-crepline="' + n + '" style="padding:22px 10px;font-size:20px' + (coilLineNo === n ? ';border:2px solid var(--accent)' : '') + '">Coil Line ' + n +
+              (coilLineNo === n ? '<br><span style="font-size:13px;font-weight:400">last used on this tablet</span>' : '') + '</button>';
+          }).join('') + '</div></div>';
+        Array.prototype.forEach.call(body.querySelectorAll('[data-crepline]'), function (b) {
+          b.onclick = function () { setCoilLine(b.getAttribute('data-crepline')); crep.lineAsked = true; crep.lineChoice = null; renderCoilReport(); };
+        });
+        ensureAllCache(function () {});
+        return;
+      }
+      body.innerHTML = (start
+          ? '<div class="card" style="display:flex;align-items:center;gap:10px;padding:10px 14px"><div style="flex:1;font-size:17px;font-weight:700">Coil Line ' + coilLineNo + '</div>' +
+              '<button class="btn secondary" id="crepLineChange" style="padding:6px 12px;font-size:13px">Change line</button></div>' +
+            crepCarryHtml(cin, null)
+          : '') +
+        (askLine
+          ? '<div class="card" id="crepLineAsk" style="border:2px solid var(--accent)"><div class="crep-qt">Which coil is on the line now?</div>' +
+              '<div class="sub" style="margin-bottom:10px">Skid ' + esc(crepSkidNo(0)) + ' is waiting with ' + crepFmt(cin.sheets) + ' sheets from coil <b>' + esc(cinName) + '</b>. The first count you type finishes it.</div>' +
+              '<div class="crep-yn"><button class="btn secondary" data-crepsame="1">The same coil<br><span style="font-size:14px;font-weight:400">' + esc(cinName) + ' — still on the line</span></button>' +
+              '<button class="btn secondary" data-crepsame="0">A new coil<br><span style="font-size:14px;font-weight:400">I loaded a different one</span></button></div></div>'
+          : '<div class="card">' +
+              '<h3 style="margin-top:0">' + (cs.length ? 'Next coil' : 'Pick the coil on the line') + '</h3>' +
+              '<div class="sub" style="margin-bottom:12px">' + (cs.length
+                ? 'Pick the coil that started when ' + esc(lastC.mill || lastC.ticket || lastC.skidId) + ' ran out.'
+                : cin && crep.carryUse ? 'Pick the new coil you loaded. Its first count finishes skid ' + esc(crepSkidNo(0)) + ' (' + crepFmt(cin.sheets) + ' sheets from the last run).'
+                : 'Pick the first coil you ran. Add the next one when it runs out.') + '</div>' +
+              coilPickerHtml() +
+              (cs.length ? '<button class="btn secondary" id="coilPickCancel" style="width:100%;margin-top:8px">Cancel</button>'
+                : crep.lineChoice === 'new' ? '<button class="btn secondary" id="crepLineBack" style="width:100%;margin-top:8px">&larr; It’s the same coil after all</button>' : '') +
+            '</div>');
       var cancel = document.getElementById('coilPickCancel');
       if (cancel) cancel.onclick = function () { crep.picking = false; renderCoilReport(); };
+      var lc = document.getElementById('crepLineChange');
+      if (lc) lc.onclick = function () { crep.lineAsked = false; crep.lineChoice = null; renderCoilReport(); };
+      Array.prototype.forEach.call(body.querySelectorAll('[data-crepsame]'), function (b) {
+        b.onclick = function () {
+          if (b.getAttribute('data-crepsame') === '0') { crep.lineChoice = 'new'; renderCoilReport(); return; }
+          var t = allCache.filter(function (x) { return x.skidId === cin.skidId; })[0];
+          crep.lineChoice = 'same';
+          if (t) crepAddCoil(t);
+        };
+      });
+      var lb = document.getElementById('crepLineBack');
+      if (lb) lb.onclick = function () { crep.lineChoice = null; renderCoilReport(); };
       wireCrepCarry();
-      wireCoilPicker();
+      if (!askLine) wireCoilPicker();
+      else ensureAllCache(function () {});
       return;
     }
     // Number each row: a row is either a whole skid, the first part of a changeover (continues ↘),
@@ -6367,6 +6432,7 @@
       html += crepAskHtml(skids);
     }
     body.innerHTML = html;
+    crepMarkMissing(skids, at);
     wireCoilReport();
     if (crep.asking) { var a2 = document.getElementById('crepAsk'); if (a2 && a2.scrollIntoView) a2.scrollIntoView({ block: 'nearest' }); }
   }
@@ -6385,6 +6451,33 @@
     }
     return v;
   }
+  // Every skid needs its ticket count and weight. A row with anything typed in (or one that's half of
+  // a changeover) shows its empty boxes red at once; after Done, every row that counts does. Returns
+  // how many boxes are still empty (red or not yet shown).
+  function crepMarkMissing(skids, at) {
+    var cs = crep.coils, missing = 0;
+    // The day's last skid, when it's short: it may not be finished (they're asked at Done), so it isn't
+    // weighed yet — its weight is only needed once they say it's done.
+    var lastC = cs[cs.length - 1], qs = lastC ? crepAskQs() : null;
+    var noWtKey = qs && qs.askFull && crep.ask.full !== true ? (cs.length - 1) + ':' + (lastC.rows.length - 1) : '';
+    Array.prototype.forEach.call(document.querySelectorAll('.crep-row'), function (el) {
+      var ci = Number(el.getAttribute('data-crc')), ri = Number(el.getAttribute('data-crr')), r = cs[ci] && cs[ci].rows[ri];
+      if (!r) return;
+      var a = at[ci + ':' + ri], v = crepRowView(ci, ri, skids, at);
+      var hasQ = String(r.qty).trim() !== '', hasW = String(r.weight).trim() !== '';
+      var active = hasQ || (hasW && v.showWt) || !a || a.part !== -1;
+      var mq = active && !hasQ, mw = active && v.showWt && !hasW && ci + ':' + ri !== noWtKey, show = crep.checked || hasQ || hasW;
+      el.querySelector('.crepQty').classList.toggle('miss', mq && show);
+      el.querySelector('.crepWt').classList.toggle('miss', mw && show);
+      missing += (mq ? 1 : 0) + (mw ? 1 : 0);
+    });
+    return missing;
+  }
+  function crepAtMap(skids) {
+    var at = {};
+    skids.forEach(function (sk, k) { sk.rows.forEach(function (p, j) { at[p[0] + ':' + p[1]] = { k: k, part: sk.rows.length > 1 ? j : -1 }; }); });
+    return at;
+  }
   // Re-number and re-label the rows in place as counts are typed (no redraw, so a tap isn't lost).
   function crepRelabel() {
     var skids = crepSkids(), at = {};
@@ -6397,6 +6490,7 @@
       var f = el.querySelector('.crep-flip');
       if (f && v.flip) { f.className = 'crep-flip' + (v.flip.on ? ' on' : ''); f.innerHTML = v.flip.html; }
     });
+    crepMarkMissing(skids, at);
     var sum = document.getElementById('crepSummary');
     if (sum) sum.innerHTML = crepSummaryText(skids);
   }
@@ -6457,7 +6551,7 @@
         runMutation('discardCoilCarry', [cin.skidId, String(crep.operator || lastOperator || '').trim(), newOpId()],
           function () {
             allCache.forEach(function (t) { if (t.skidId === cin.skidId) { t.carryOver = 0; t.carryLine = ''; t.carryDate = ''; } });
-            crep.carryOpts = false; crep.carryUse = true;
+            crep.carryOpts = false; crep.carryUse = true; crep.lineChoice = null;
             toast('Unfinished skid discarded');
             renderCoilReport();
           },
@@ -6483,7 +6577,7 @@
     var cs = crep.coils;
     var op = document.getElementById('crepOperator');
     op.oninput = function () { crep.operator = this.value; };
-    document.getElementById('crepLine').onchange = function () { coilLineNo = Number(this.value) === 2 ? 2 : 1; renderCoilReport(); };
+    document.getElementById('crepLine').onchange = function () { setCoilLine(this.value); renderCoilReport(); };
     document.getElementById('crepDate').onchange = function () { crep.date = this.value || todayStr(); renderCoilReport(); };
     document.getElementById('crepStart').onchange = function () { crep.start = this.value; };
     document.getElementById('crepEnd').onchange = function () { crep.end = this.value; };
@@ -6492,7 +6586,7 @@
       var qi = el.querySelector('.crepQty');
       qi.oninput = function () { r.qty = this.value; crepRelabel(); };
       var wt = el.querySelector('.crepWt');
-      if (wt) wt.oninput = function () { r.weight = this.value; };
+      if (wt) wt.oninput = function () { r.weight = this.value; crepRelabel(); };
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-crepdel]'), function (b) {
       b.onclick = function () {
@@ -6524,7 +6618,7 @@
     if (rm) rm.onclick = function () {
       cs.pop();
       if (cs.length) cs[cs.length - 1].carryMode = null;
-      else crep.picking = false;
+      else { crep.picking = false; crep.lineChoice = null; }
       crep.asking = false;
       renderCoilReport();
     };
@@ -6542,6 +6636,13 @@
   function crepFinish() {
     var cs = crep.coils, skids = crepSkids(), nm = function (c) { return c.ticket || c.skidId; };
     if (!String(crep.operator || '').trim()) { toast('Enter the operator'); var o = document.getElementById('crepOperator'); if (o) o.focus(); return; }
+    crep.checked = true;
+    if (crepMarkMissing(skids, crepAtMap(skids))) {
+      var first = document.querySelector('#coilBody input.miss');
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' });
+      toast('Fill in the red boxes — every skid needs its ticket count and weight');
+      return;
+    }
     var bad = skids.filter(function (s) { return s.parts && (!s.parts[0] || !s.parts[1]); })[0];
     if (bad) { toast('Skid ' + crepSkidNo(skids.indexOf(bad)) + ' finishes on the next coil: enter its count on both coils'); return; }
     var open = skids.filter(function (s) { return s.open; })[0];
@@ -6559,6 +6660,12 @@
     var cs = crep.coils, skids = crepSkids(), line = coilLineNo, date = crep.date || todayStr(), finish = crep.ask.fin === true;
     var qs = crepAskQs();
     if (crep.ask.fin === null || (qs.askFull && crep.ask.full === null)) { toast('Tap an answer first'); return; }
+    if (crepMarkMissing(skids, crepAtMap(skids))) {
+      var first = document.querySelector('#coilBody input.miss');
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' });
+      toast('Fill in the red box — a finished skid needs its weight');
+      return;
+    }
     var keep = skids.filter(function (s) { return s.qty > 0 || String(s.weight || '').trim(); });
     var carryOut = crepCarryOutQty(), cin = crepCarryIn();
     if (!keep.length && !carryOut) { toast('Enter the ticket count of at least one skid'); return; }
@@ -6590,6 +6697,7 @@
         });
         fetchTickets();  // pull the new skids + coil state
         crep.coils = []; crep.picking = false; crep.asking = false; crep.start = ''; crep.end = ''; crep.carryOut = false; crep.carryUse = true; crep.carryOpts = false;
+        crep.checked = false; crep.lineChoice = null; crep.lineAsked = false;
         showInfo('Report saved', made + ' skid' + (made === 1 ? '' : 's') + ' created' + (list ? ': ' + list : '') + '.' +
           (multi || finish ? ' ' + (finish ? (multi ? 'All ' + cs.length + ' coils are' : 'The coil is') : 'The first ' + (cs.length - 1) + ' coil' + (cs.length === 2 ? ' is' : 's are')) + ' marked used (FIN COIL).' : '') +
           (finish ? '' : ' ' + (lastC.ticket || lastC.skidId) + ' stays available — pick it again next time.') +
