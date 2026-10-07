@@ -215,7 +215,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.64.0</span>
+      <span class="version" id="appVersion">v1.65.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -936,7 +936,7 @@
       case 'lithoLogin': case 'moveWip': openLithoDept(); return;
       case 'lithoDept': renderLanding(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
-      case 'prodHome': case 'slitterHome': case 'usedHome': openProduction(); return; // a section home -> chooser
+      case 'prodHome': case 'slitterHome': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
       case 'prodAdd': case 'prodReview': openMetalsSection(metalsTab); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
@@ -5670,7 +5670,11 @@
   var runAddedSkids = [];    // running display list of skids loaded this session
   var prodReviewDate = '';   // yyyy-MM-dd; '' means today
   var runSwapSkid = null;    // when set, the next picked skid replaces this one on the run
-  var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter'
+  var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter' | 'coil' | 'used'
+  // The machines on the floor, picked from a list (no typing). Stored as shown, e.g. 'Press 13'.
+  var PRESS_MACHINES = ['A Liner', 'Press 2', 'Press 3', 'Press 13', 'Press 14', 'Press 15', 'Press 16', 'Press 17', 'Press 18', 'Press 19', 'Press 20'];
+  var SLITTER_MACHINES = ['1 H', '2 H', '7 A', '9 A'];
+  var SCROLL_MACHINES = ['2 SS', '3 SS'];
   var currentSlitter = null; // { sessionId, slitter, kind, operator } — the cutting session being logged
   var slitKind = 'Slitter';  // Slitter Department sub-tab: 'Slitter' | 'Scroll'
   var reviewRunMachineType = null; // machine type of the run open in Review (scopes its picker)
@@ -5697,6 +5701,7 @@
       '<button class="btn" id="metalsPickLines" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Metal Lines</button>' +
       '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
       '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
+      '<button class="btn" id="metalsPickCoil" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🧵&nbsp; Coil Line</button>' +
       (FULL_APP ?
         '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
         '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
@@ -5704,6 +5709,7 @@
     document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
+    document.getElementById('metalsPickCoil').onclick = function () { openMetalsSection('coil'); };
     if (FULL_APP) {
       document.getElementById('metalsPickUsed').onclick = function () { openMetalsSection('used'); };
       // Print New Steel Tickets -> open the local Flask print service in a new tab.
@@ -5718,6 +5724,7 @@
     showTabbar(false); showBack(true); setDept('Metals');
     if (tab === 'slitter') { state.view = 'slitterHome'; renderSlitterHome(); }
     else if (tab === 'used') { state.view = 'usedHome'; renderUsedHome(); }
+    else if (tab === 'coil') { openCoilLine(); }
     else { state.view = 'prodHome'; renderProductionHome(tab === 'press' ? 'Press' : 'Line'); }
   }
 
@@ -5728,22 +5735,15 @@
   // 'USED IN PRODUCTION (DIRECT)' audit entry and shows up in the Reports "Used in Production
   // (direct)" section.
   var usedBatch = [];   // [{ skidId, ticket, mill }] pending this session
-  var usedTab = 'skids'; // Used-in-Production sub-tab: 'skids' (quick mark) | 'coil' (Coil Line)
 
-  // Used in Production is two sub-tabs: the quick skid mark, and Coil Line (cut a coil into skids).
+  // Used in Production: the quick skid mark. (Coil Line is its own Metals button now.)
   function renderUsedHome() {
     state.view = 'usedHome';
     var view = document.getElementById('view');
     if (!view) return;
     nextViewToken();
-    var chips = [['skids', '✅ Mark Skids Used'], ['coil', '🧵 Coil Line']].map(function (c) {
-      return '<button data-usedtab="' + c[0] + '"' + (usedTab === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
-    }).join('');
-    view.innerHTML = '<div class="tabbar">' + chips + '</div><div id="usedBody"></div>';
-    Array.prototype.forEach.call(view.querySelectorAll('[data-usedtab]'), function (b) {
-      b.onclick = function () { usedTab = b.getAttribute('data-usedtab'); renderUsedHome(); };
-    });
-    if (usedTab === 'coil') renderCoilLine(); else renderUsedSkids();
+    view.innerHTML = '<div id="usedBody"></div>';
+    renderUsedSkids();
   }
 
   function renderUsedSkids() {
@@ -5940,8 +5940,18 @@
     });
   }
 
+  // Metals → Coil Line: the manual coil entry, on its own screen (tablets too).
+  function openCoilLine() {
+    state.view = 'coilHome';
+    var view = document.getElementById('view');
+    if (!view) return;
+    nextViewToken();
+    view.innerHTML = '<div id="coilBody"></div>';
+    renderCoilLine();
+  }
+
   function renderCoilLine() {
-    var body = document.getElementById('usedBody');
+    var body = document.getElementById('coilBody');
     if (!body) return;
     if (!coilSel) {
       body.innerHTML =
@@ -6105,7 +6115,8 @@
         '<div class="sub" style="margin-bottom:12px">Start a work session on a ' + esc(machineType.toLowerCase()) + ', then load the skids you run. Submit for review when the day is done.</div>' +
         '<div class="row">' +
           operatorFieldHtml('runOperator') +
-          '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" inputmode="numeric" id="runMachineNum" min="1" placeholder="e.g. 4"></div>' +
+          (machineType === 'Press' ? selectField('runMachineSel', 'Press', PRESS_MACHINES, null)
+            : '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" inputmode="numeric" id="runMachineNum" min="1" placeholder="e.g. 4"></div>') +
         '</div>' +
         '<div class="field"><label>Notes (optional)</label><input id="runNotes" placeholder="e.g. day shift"></div>' +
         '<button class="btn success" id="startRunBtn">+ Start Work</button>' +
@@ -6117,11 +6128,12 @@
     document.getElementById('reviewWorkBtn').onclick = openProductionReview;
     document.getElementById('startRunBtn').onclick = function () {
       var operator = document.getElementById('runOperator').value.trim();
-      var numv = document.getElementById('runMachineNum').value.trim();
+      var isPress = machineType === 'Press';
+      var numv = (isPress ? document.getElementById('runMachineSel') : document.getElementById('runMachineNum')).value.trim();
       var notes = document.getElementById('runNotes').value;
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!numv) { toast('Enter the ' + machineType.toLowerCase() + ' number'); return; }
-      var machine = machineType + ' ' + numv;
+      if (!numv) { toast(isPress ? 'Pick the press' : 'Enter the ' + machineType.toLowerCase() + ' number'); return; }
+      var machine = isPress ? numv : machineType + ' ' + numv;
       var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
       runMutation('createRun', [machine, operator, notes, newOpId()],
         function (result) {
@@ -6422,6 +6434,7 @@
   }
 
   function machineParts(machine) {
+    if (/^\s*A\s*Liner\b/i.test(String(machine || ''))) return { type: 'Press', num: 'A Liner' };   // the one press without a number
     var m = /^(Line|Press)\s*(\d+)/i.exec(String(machine || ''));
     return m ? { type: m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase(), num: m[2] } : { type: '', num: '' };
   }
@@ -6454,7 +6467,7 @@
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Run details</h3>' +
         '<div class="row">' +
           selectField('runEditType', 'Line / Press', ['Line', 'Press'], mp.type) +
-          '<div class="field"><label>Number</label><input type="number" inputmode="numeric" id="runEditNum" min="1" value="' + esc(mp.num) + '"></div>' +
+          '<div id="runEditNumBox" style="flex:1"></div>' +
         '</div>' +
         '<button class="btn secondary" id="saveRunBtn">Save details</button></div>';
     }
@@ -6519,13 +6532,23 @@
     if (opField && run.operator) opField.value = run.operator; // the run's operator wins over the session default
 
     // Save run details
+    // A press is picked from the list; a line is a number.
+    var editType = document.getElementById('runEditType');
+    function renderRunEditNum() {
+      var box = document.getElementById('runEditNumBox');
+      if (!box) return;
+      var isPress = editType.value === 'Press';
+      box.innerHTML = isPress ? selectField('runEditNum', 'Press', PRESS_MACHINES, mp.type === 'Press' ? (mp.num === 'A Liner' ? 'A Liner' : 'Press ' + mp.num) : null)
+        : '<div class="field"><label>Number</label><input type="number" inputmode="numeric" id="runEditNum" min="1" value="' + esc(mp.type === 'Line' ? mp.num : '') + '"></div>';
+    }
+    if (editType) { editType.onchange = renderRunEditNum; renderRunEditNum(); }
     var saveBtn = document.getElementById('saveRunBtn');
     if (saveBtn) saveBtn.onclick = function () {
       var operator = currentRunOperator();
       var type = document.getElementById('runEditType').value;
       var numv = document.getElementById('runEditNum').value.trim();
-      if (!type || !numv) { toast('Pick Line/Press and a number'); return; }
-      var fields = { Machine: type + ' ' + numv };
+      if (!type || !numv) { toast(type === 'Press' ? 'Pick the press' : 'Pick Line/Press and a number'); return; }
+      var fields = { Machine: type === 'Press' ? numv : type + ' ' + numv };
       if (operator) fields.Operator = operator;
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
       runMutation('updateRun', [state.runId, fields, operator, newOpId()],
@@ -6650,7 +6673,7 @@
   }
 
   // ---------------- Slitter Department (Slitters + Scrolls; mixed-mill cutting log) --------
-  // Two sub-tabs: Slitters (typed #) and Scrolls (1-SS/2-SS/3-SS dropdown) — operators move
+  // Two sub-tabs: Slitters (1 H, 2 H, 7 A, 9 A) and Scrolls (2 SS, 3 SS), picked from a list — operators move
   // between those machines in the same area. Each output pallet becomes a runnable "Cut" skid
   // carrying its mill composition, so slit pallets run on the Metal Lines and scroll pallets on
   // the Press. Source skids are not drawn down yet (value tracking deferred).
@@ -6675,8 +6698,8 @@
     var tok = nextViewToken();
     var isScroll = slitKind === 'Scroll';
     var machineField = isScroll
-      ? selectField('slitMachineSel', 'Scroll machine', ['1-SS', '2-SS', '3-SS'], null)
-      : '<div class="field"><label>Slitter #</label><input type="number" inputmode="numeric" id="slitNum" min="1" placeholder="e.g. 2"></div>';
+      ? selectField('slitMachineSel', 'Scroll machine', SCROLL_MACHINES, null)
+      : selectField('slitMachineSel', 'Slitter', SLITTER_MACHINES, null);
     var feeds = isScroll ? 'Press' : 'Metal Lines';
     body.innerHTML =
       '<div class="card">' +
@@ -6691,11 +6714,10 @@
 
     document.getElementById('startSlitBtn').onclick = function () {
       var operator = document.getElementById('slitOperator').value.trim();
-      var machine = isScroll ? (document.getElementById('slitMachineSel').value) : ('Slitter ' + document.getElementById('slitNum').value.trim());
-      var picked = isScroll ? document.getElementById('slitMachineSel').value : document.getElementById('slitNum').value.trim();
+      var machine = document.getElementById('slitMachineSel').value;
       var notes = document.getElementById('slitNotes').value;
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!picked) { toast(isScroll ? 'Pick a scroll machine' : 'Enter the slitter number'); return; }
+      if (!machine) { toast(isScroll ? 'Pick a scroll machine' : 'Pick a slitter'); return; }
       var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
       runMutation('createSlitterSession', [slitKind, machine, operator, notes, newOpId()],
         function (result) {

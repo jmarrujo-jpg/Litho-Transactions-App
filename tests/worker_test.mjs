@@ -936,5 +936,23 @@ await concurrency(envBase, 'in-worker lock');
   ok('trace: needs a date', !bad.ok && /date/.test(bad.error), bad);
 }
 
+// 29. A Liner is a press: its runs land in the Press report, not Metal Lines
+{ const f = fresh();
+  const run = await call('createRun', ['A Liner', 'Ann', '', 'op-29-r']);
+  ok('run on A Liner', run.ok && run.result.machine === 'A Liner', run);
+  const id = run.result.runId;
+  const add = await call('runAddSkid', [id, 'SKD-000001', 'Ann', 'op-29-a']);
+  ok('skid loaded', add.ok, add);
+  const sub = await call('submitRun', [id, 'Ann', 'op-29-s']);
+  ok('submitted', sub.ok, sub);
+  const fin = await call('finishRun', [id, { 'SKD-000001': 1000 }, 'Ann', 'op-29-f']);
+  ok('finished', fin.ok && skidRow(f, 'SKD-000001')['Status'] === 'Used', fin);
+  const d0 = '2000-01-01', d1 = '2100-01-01';
+  const rep = await call('getDepartmentReport', [d0, d1, 'all']);
+  const sec = (k) => ((rep.result && rep.result.sections) || []).filter((x) => x.key === k)[0] || { rows: [] };
+  ok('A Liner run is in the Press report', rep.ok && sec('press').rows.some((r) => r.machine === 'A Liner'), rep.ok ? sec('press') : rep);
+  ok('and not in Metal Lines', !sec('lines').rows.some((r) => r.machine === 'A Liner'));
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

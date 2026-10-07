@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'trace-69', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'machines-70', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3759,6 +3759,7 @@ async function getMetalsReport(sheets, start, end) {
 }
 
 function classifyMachine(machine) {
+  if (/^\s*A\s*Liner\b/i.test(String(machine || ''))) return 'Press';   // the one press without a number
   const m = /^\s*(Line|Press)\b/i.exec(String(machine || ''));
   return m ? (m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()) : '';
 }

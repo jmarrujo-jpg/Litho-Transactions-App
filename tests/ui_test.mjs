@@ -1212,6 +1212,65 @@ const base = {
   await page.close();
 }
 
+// ---- 32. Metals: Coil Line has its own button (tablets too); Press and Slitter machines come from a list
+{ const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-C', 'C1', 'Current', { cs: 'C', mill: 'M77', weight: 4000 }), ticket('SKD-S', 'S1', 'Current', { cs: 'S' })]),
+    getProductionRuns: () => R([{ runId: 'RUN-000001', machine: 'A Liner', operator: 'Ann', status: 'Open', skidCount: 0, createdOn: '2026-10-07' },
+      { runId: 'RUN-000002', machine: 'Line 4', operator: 'Bo', status: 'Open', skidCount: 0, createdOn: '2026-10-07' }]),
+    createRun: (a) => R({ runId: 'RUN-000009', machine: a[0], operator: a[1], status: 'Open' }),
+    getSlitterSessions: () => R([]),
+    createSlitterSession: (a) => R({ sessionId: 'SLT-000001', slitter: a[1], kind: a[0], operator: a[2], status: 'Open' }),
+    cutCoil: (a) => R({ created: a[3].length, tickets: [{ ticket: '100726-101' }] }),
+  }), { userAgent: IPAD });
+  await page.click('#tileProduction'); await page.waitForTimeout(100);
+  ok('coil: Coil Line button on the tablet', !!(await page.$('#metalsPickCoil')));
+  await page.click('#metalsPickCoil'); await page.waitForTimeout(300);
+  ok('coil: opens the manual coil entry', !!(await page.$('#coilSearch')) && !(await page.$('[data-usedtab]')));
+  let txt = await page.textContent('#coilPicker');
+  ok('coil: lists coils only', txt.includes('C1') && !txt.includes('S1'), txt);
+  await page.click('[data-coil="SKD-C"]'); await page.waitForTimeout(100);
+  await page.fill('.crWeight', '1000'); await page.fill('.crQty', '250');
+  await page.click('#coilCutBtn'); await page.waitForTimeout(100); await page.click('#modalOk'); await page.waitForTimeout(300);
+  const cut = calls.filter((c) => c.fn === 'cutCoil')[0];
+  ok('coil: cuts the coil', cut && cut.args[0] === 'SKD-C' && cut.args[3].length === 1 && String(cut.args[3][0].weight) === '1000', cut && cut.args);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  ok('coil: Back returns to Metals', !!(await page.$('#metalsPickCoil')));
+
+  await page.click('#metalsPickPress'); await page.waitForTimeout(300);
+  const presses = await page.$$eval('#runMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
+  ok('press: the 11 presses from a list', presses.join() === 'A Liner,Press 2,Press 3,Press 13,Press 14,Press 15,Press 16,Press 17,Press 18,Press 19,Press 20', presses);
+  ok('press: A Liner\'s open run shows on Press, the Line run doesn\'t', (await page.textContent('#openRunsList')).includes('A Liner') && !(await page.textContent('#openRunsList')).includes('Line 4'));
+  await page.fill('#runOperator', 'Ann');
+  await page.click('#startRunBtn'); await page.waitForTimeout(100);
+  ok('press: must pick one', !calls.some((c) => c.fn === 'createRun'));
+  await page.selectOption('#runMachineSel', 'Press 13');
+  await page.click('#startRunBtn'); await page.waitForTimeout(300);
+  ok('press: starts on Press 13', calls.filter((c) => c.fn === 'createRun')[0].args[0] === 'Press 13');
+  ok('A Liner counts as a press', await page.evaluate(() => machineParts('A Liner').type === 'Press' && machineParts('Press 13').num === '13'));
+
+  await page.evaluate(() => { openProduction(); }); await page.waitForTimeout(100);
+  await page.click('#metalsPickSlitter'); await page.waitForTimeout(300);
+  const slitters = await page.$$eval('#slitMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
+  ok('slitter: 1 H, 2 H, 7 A, 9 A', slitters.join() === '1 H,2 H,7 A,9 A', slitters);
+  await page.fill('#slitOperator', 'Ann'); await page.selectOption('#slitMachineSel', '9 A');
+  await page.click('#startSlitBtn'); await page.waitForTimeout(300);
+  ok('slitter: starts on 9 A', calls.filter((c) => c.fn === 'createSlitterSession')[0].args.slice(0, 2).join() === 'Slitter,9 A');
+  await page.evaluate(() => { openProduction(); }); await page.waitForTimeout(100);
+  await page.click('#metalsPickSlitter'); await page.waitForTimeout(200);
+  await page.click('[data-slkind="Scroll"]'); await page.waitForTimeout(200);
+  const scrolls = await page.$$eval('#slitMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
+  ok('scrolls: 2 SS, 3 SS', scrolls.join() === '2 SS,3 SS', scrolls);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+{ const { page } = await boot(base);
+  await page.click('#tileProduction'); await page.click('#metalsPickUsed'); await page.waitForTimeout(200);
+  ok('Used in Production is just the skid mark now', !!(await page.$('#usedAddInput')) && !(await page.$('[data-usedtab]')));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
