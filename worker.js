@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'machines-70', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-71', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1713,10 +1713,13 @@ async function getSkidHistory(sheets, skidId) {
   events.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : (num(b.pass) - num(a.pass))));
   const brief = (r) => ({ skidId: r['Skid ID'] || '', ticket: r['Ticket'] || '', status: r['Status'] || '', qty: r['QTY/LOAD'] != null ? r['QTY/LOAD'] : '', weight: r['Weight'] != null ? r['Weight'] : '' });
   const parentRow = o['Split Of'] ? ctx.skids[String(o['Split Of']).trim()] : null;
-  const children = master.rows.filter((r) => String(r['Split Of'] || '').trim() === skidId).map(brief);
+  // A coil-changeover skid is cut from two coils: Split Of is the first, Also Cut From the second.
+  const children = master.rows.filter((r) => String(r['Split Of'] || '').trim() === skidId || String(r['Also Cut From'] || '').trim() === skidId).map(brief);
+  const alsoId = String(o['Also Cut From'] || '').trim(), alsoRow = alsoId ? ctx.skids[alsoId] : null;
   return {
     skid: Object.assign(traceOf(o, ctx), { skidId, ticket: o['Ticket'] || '', litho: num(o['Litho']), row: o['Row'] != null ? o['Row'] : '' }),
     events, parent: parentRow ? brief(parentRow) : (o['Split Of'] ? { skidId: o['Split Of'], ticket: '' } : null), children, loads,
+    alsoParent: alsoRow ? brief(alsoRow) : (alsoId ? { skidId: alsoId, ticket: '' } : null),
     family: familyOf(master.rows, o['Ticket']),
   };
 }
@@ -2848,17 +2851,36 @@ async function markUsedDirect(sheets, skidIds, usedDate, opId) {
 // 3-char suffix whose first digit is the coil line (1 or 2) and last two are that line's running
 // cut number for the day — e.g. 080126-101, 080126-102 on line 1; 080126-201 on line 2. Children
 // start as Current stock with Split Of = the coil. Date-only, no operator. skids = [{ weight, qty }].
+//
+// Metals → Coil Line can run several coils back to back: coilSkidId is then a list in the order they
+// ran, and each skid says which coil(s) it came from (skid.coils = [i], or [i, i+1] for the changeover
+// skid that holds the end of one coil and the start of the next). A changeover skid takes its specs
+// from the first coil, lists both mills in Mill ("M1 / M2"), and links to the second coil in
+// 'Also Cut From' (Split Of is the first). Every coil but the last ran out, so it's marked Used; the
+// last one follows `finish` like a single coil.
 async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opId) {
-  coilSkidId = String(coilSkidId || '').trim();
+  const coilIds = (Array.isArray(coilSkidId) ? coilSkidId : [coilSkidId]).map((x) => String(x || '').trim()).filter(Boolean);
+  const isMine = (o) => coilIds.indexOf(String(o['Split Of'] || '').trim()) !== -1;
+  const brief = (o) => ({ skidId: o['Skid ID'], ticket: o['Ticket'], weight: num(o['Weight']), qty: num(o['QTY/LOAD']), mill: o['Mill'] || '' });
   if (opId && await opAlreadyDone(sheets, opId)) {   // already finished: report what that cut made
-    const made = (await readTab(sheets, MASTER)).rows.filter((o) => stampedBy(o, opId) && String(o['Split Of']).trim() === coilSkidId)
-      .map((o) => ({ skidId: o['Skid ID'], ticket: o['Ticket'], weight: num(o['Weight']), qty: num(o['QTY/LOAD']) }));
-    return { ok: true, duplicate: true, created: made.length, coilSkidId, finished: finish !== false, tickets: made };
+    const made = (await readTab(sheets, MASTER)).rows.filter((o) => stampedBy(o, opId) && isMine(o)).map(brief);
+    return { ok: true, duplicate: true, created: made.length, coilSkidId: coilIds[0], coils: coilIds, finished: finish !== false, tickets: made };
   }
-  if (!coilSkidId) throw new Error('Pick a coil to cut.');
-  const list = (skids || []).map((s) => ({ weight: num(s && s.weight), qty: num(s && s.qty) }));
+  if (!coilIds.length) throw new Error('Pick a coil to cut.');
+  if (coilIds.filter((x, i, a) => a.indexOf(x) !== i).length) throw new Error('The same coil is listed twice.');
+  const last = coilIds.length - 1;
+  const list = (skids || []).map((s) => {
+    let cs = Array.isArray(s && s.coils) && s.coils.length ? s.coils.map((n) => parseInt(n, 10)) : [last];
+    cs = cs.filter((n, i, a) => !isNaN(n) && a.indexOf(n) === i).sort((a, b) => a - b);
+    return { weight: num(s && s.weight), qty: num(s && s.qty), coils: cs };
+  });
   if (!list.length) throw new Error('Add at least one cut skid.');
-  const finished = finish === false ? false : true;        // false = more to cut later; keep the coil open
+  list.forEach((s, i) => {
+    const ok = s.coils.length && s.coils[0] >= 0 && s.coils[s.coils.length - 1] <= last
+      && (s.coils.length === 1 || (s.coils.length === 2 && s.coils[1] === s.coils[0] + 1));
+    if (!ok) throw new Error('Skid ' + (i + 1) + ': pick one coil, or two coils next to each other (a changeover).');
+  });
+  const finished = finish === false ? false : true;        // false = more to cut later; keep the last coil open
   const line = Math.max(1, parseInt(coilLine, 10) || 1);   // coil line number -> first digit of the suffix
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(cutDate || '').trim()) ? String(cutDate).trim() : todayYMD();
   const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
@@ -2870,22 +2892,26 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Used Via');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');   // cut-from-coil note lands here, not Comments
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Last Op ID');
+  if (list.some((s) => s.coils.length > 1)) ens = await ensureColumn(sheets, MASTER, ens.headers, 'Also Cut From');
   master = await readTab(sheets, MASTER);
-  const coil = master.rows.filter((o) => String(o['Skid ID']).trim() === coilSkidId)[0];
-  if (!coil) throw new Error('Coil not found: ' + coilSkidId);
+  const coils = coilIds.map((id) => {
+    const c = master.rows.filter((o) => String(o['Skid ID']).trim() === id)[0];
+    if (!c) throw new Error('Coil not found: ' + id);
+    if (String(c['Status']) === STATUS.USED && !stampedBy(c, opId)) throw new Error('Coil ' + (c['Ticket'] || id) + ' is already marked Used.');
+    return c;
+  });
   // Children an earlier attempt of this same cut already wrote (it failed part-way): keep them and
   // only write the rest, so a retry can't create a second set of skids.
-  const done = master.rows.filter((o) => stampedBy(o, opId) && String(o['Split Of']).trim() === coilSkidId);
-  if (String(coil['Status']) === STATUS.USED && !stampedBy(coil, opId)) throw new Error('That coil is already marked Used.');
-  const coilTicket = coil['Ticket'] || '';
-  const coilMill = coil['Mill'] || '';
+  const done = master.rows.filter((o) => stampedBy(o, opId) && isMine(o));
+  const tk = (c) => c['Ticket'] || c['Skid ID'];
+  const millNote = (c) => tk(c) + (c['Mill'] ? ' [mill ' + c['Mill'] + ']' : '');
   // Next Skid ID and next running cut number for THIS date + line (existing MMDDYY-<line>NN tickets).
   let nextN = maxIdNumber(master.rows, 'Skid ID', 'SKD-');
   const seqRe = new RegExp('^' + prefix + '(\\d+)$');
   let seq = 0;
   master.rows.forEach((o) => { const m = seqRe.exec(String(o['Ticket'] || '').trim()); if (m) { const n = parseInt(m[1], 10); if (!isNaN(n) && n > seq) seq = n; } });
   // Columns that must NOT carry over to a fresh child (identity / lifecycle / the ones that change).
-  const RESET = ['Row', 'Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Comments', 'System Notes', 'Used At', 'Used By', 'Used Via',
+  const RESET = ['Row', 'Skid ID', 'Status', 'Ticket', 'Weight', 'QTY/LOAD', 'C/S', 'Coil/Sheet', 'Split Of', 'Also Cut From', 'Comments', 'System Notes', 'Used At', 'Used By', 'Used Via',
     'Run ID', 'Loaded On', 'Finished On', 'Counted At', 'Counted By', 'First Coated At', 'First Coated By',
     'Approved At', 'Approved By', 'Missing At', 'Missing By', 'Job ID', 'Spoilage', 'Cut Type', 'Load #', 'Last Updated At', 'Last Updated By'];
   const hasCS = master.headers.indexOf('C/S') !== -1;
@@ -2899,22 +2925,30 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     const need = writeRow + list.length - 1;             // last row we'll touch
     if (grid && grid.rowCount && need > grid.rowCount) await sheets.appendRows(grid.sheetId, need - grid.rowCount);
   } catch (e) { /* best-effort grow; the write below surfaces any real grid error */ }
-  const tickets = done.map((o) => ({ skidId: o['Skid ID'], ticket: o['Ticket'], weight: num(o['Weight']), qty: num(o['QTY/LOAD']) }));
+  const tickets = done.map(brief);
   for (const s of list.slice(done.length)) {
     nextN += 1; seq += 1;
     const skidId = fmtId('SKD-', nextN);
     const ticket = prefix + (seq < 10 ? '0' + seq : String(seq));   // MMDDYY-<line>NN (2-digit min)
+    const src = coils[s.coils[0]], also = s.coils.length > 1 ? coils[s.coils[1]] : null;
     const row = {};
-    master.headers.forEach((h) => { if (h && RESET.indexOf(h) === -1 && coil[h] != null && coil[h] !== '') row[h] = coil[h]; });   // retain every spec
+    master.headers.forEach((h) => { if (h && RESET.indexOf(h) === -1 && src[h] != null && src[h] !== '') row[h] = src[h]; });   // retain every spec
     row['Skid ID'] = skidId;
     row['Ticket'] = ticket;
     row['Status'] = STATUS.CURRENT;
     row['Weight'] = s.weight || '';
     row['QTY/LOAD'] = s.qty || '';
     if (hasCS) row['C/S'] = 'S';                 // a cut skid is a sheet, not a coil
-    row['Split Of'] = coilSkidId;
-    row['Comments'] = coil['Comments'] || '';                 // carry the coil's human comment (who it's for)
-    row['System Notes'] = 'Cut from coil ' + coilTicket + (coilMill ? ' [mill ' + coilMill + ']' : '') + ' on ' + date + ' (coil line ' + line + ')';
+    row['Split Of'] = src['Skid ID'];
+    row['Comments'] = src['Comments'] || '';                  // carry the coil's human comment (who it's for)
+    if (also) {
+      const mills = [src['Mill'], also['Mill']].map((m) => String(m || '').trim()).filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
+      row['Mill'] = mills.join(' / ');
+      row['Also Cut From'] = also['Skid ID'];
+      row['System Notes'] = 'Coil changeover: cut from coils ' + millNote(src) + ' and ' + millNote(also) + ' on ' + date + ' (coil line ' + line + ')';
+    } else {
+      row['System Notes'] = 'Cut from coil ' + millNote(src) + ' on ' + date + ' (coil line ' + line + ')';
+    }
     row['Last Updated At'] = date; row['Last Updated By'] = 'coil line';
     row['Last Op ID'] = opId || '';
     // Header-aligned row written at an exact position (A<writeRow>), so it lands in the same columns
@@ -2922,23 +2956,33 @@ async function cutCoil(sheets, coilSkidId, cutDate, coilLine, skids, finish, opI
     const rowArr = master.headers.map((h) => (row.hasOwnProperty(h) ? row[h] : ''));
     await sheets.update("'" + MASTER + "'!A" + writeRow, [rowArr]);
     writeRow += 1;
-    tickets.push({ skidId, ticket, weight: s.weight, qty: s.qty });
+    tickets.push({ skidId, ticket, weight: s.weight, qty: s.qty, mill: row['Mill'] || '' });
   }
-  // Only mark the coil Used when it's FINISHED. If there's more to cut later, leave it available
-  // (Status untouched) so it can be selected again the next day and resume — the running tickets
-  // just continue under that day's date. Either way, stamp when it was last touched.
-  if (finished) {
-    await stampCells(sheets, MASTER, coil.__row, master.map, {
-      'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date, 'Last Op ID': opId || '' });   // 'Coil' distinguishes it from the direct quick-mark
-  } else {
-    await stampCells(sheets, MASTER, coil.__row, master.map, { 'Last Updated At': date, 'Last Op ID': opId || '' });
+  // Only mark a coil Used when it's FINISHED: every coil before the last ran out (that's why the next
+  // one started); the last one is Used unless there's more to cut later. A coil left open keeps its
+  // Status, so it can be selected again the next day — the running tickets continue under that date.
+  const made = list.map((s, i) => Object.assign({ coils: s.coils }, tickets[i] || {}));
+  for (let ci = 0; ci < coils.length; ci++) {
+    const c = coils[ci], done1 = ci < last || finished;
+    if (done1) {
+      await stampCells(sheets, MASTER, c.__row, master.map, {
+        'Status': STATUS.USED, 'Used At': date, 'Used Via': 'Coil', 'Last Updated At': date, 'Last Op ID': opId || '' });   // 'Coil' distinguishes it from the direct quick-mark
+    } else {
+      await stampCells(sheets, MASTER, c.__row, master.map, { 'Last Updated At': date, 'Last Op ID': opId || '' });
+    }
+    // Each coil's history row carries its own op id; the last coil's is the plain opId, written last,
+    // which marks the whole cut done. A retry skips any coil row an earlier attempt already wrote.
+    const txOp = opId ? (ci < last ? opId + '#' + ci : opId) : '';
+    if (txOp && ci < last && await opAlreadyDone(sheets, txOp)) continue;
+    const mine = made.filter((t) => t.coils.indexOf(ci) !== -1);
+    await eventTx(sheets, { skidId: c['Skid ID'], ticket: c['Ticket'] || '',
+      itemText: done1 ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator: '',
+      note: 'Cut on coil line ' + line + ' into ' + mine.length + ' skid(s) on ' + date +
+        (done1 ? '' : ' — coil left open for more cutting') + ': ' + mine.map((t) => t.ticket + (t.coils.length > 1 ? ' (changeover with ' + tk(coils[t.coils[t.coils[0] === ci ? 1 : 0]]) + ')' : '')).join(', '),
+      timestamp: date, runningTotal: 0 }, txOp);
   }
-  await eventTx(sheets, { skidId: coilSkidId, ticket: coilTicket,
-    itemText: finished ? 'COIL CUT — USED' : 'COIL PARTIALLY CUT', operator: '',
-    note: 'Cut on coil line ' + line + ' into ' + tickets.length + ' skid(s) on ' + date +
-      (finished ? '' : ' — coil left open for more cutting') + ': ' + tickets.map((t) => t.ticket).join(', '),
-    timestamp: date, runningTotal: 0 }, opId || '');
-  return { ok: true, created: tickets.length, coilSkidId, coilTicket, coilLine: line, finished, usedDate: finished ? date : '', tickets };
+  return { ok: true, created: tickets.length, coilSkidId: coilIds[0], coils: coilIds, coilTicket: coils[0]['Ticket'] || '', coilLine: line,
+    finished, usedDate: (finished || coils.length > 1) ? date : '', tickets };
 }
 
 // ================= DATABASE (raw table viewer / manual editor) ======================

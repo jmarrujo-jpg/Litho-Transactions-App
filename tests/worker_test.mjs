@@ -954,5 +954,36 @@ await concurrency(envBase, 'in-worker lock');
   ok('and not in Metal Lines', !sec('lines').rows.some((r) => r.machine === 'A Liner'));
 }
 
+// 30. Coil changeover: two coils back to back, the skid across the change carries both mills
+{ const fake2 = makeFake({ [SID]: { 'Steel Tickets': [MASTER_H,
+    skid('C-1', 'SKD-000006', 'Current', '', 20000, { 'C/S': 'C', 'Mill': 'M77', 'End Use': '603X700' }),
+    skid('C-2', 'SKD-000007', 'Current', '', 18000, { 'C/S': 'C', 'Mill': 'M88', 'End Use': '603X700' }),
+  ], 'Transactions': [TX_H] } });
+  globalThis.fetch = fake2.fetchImpl;
+  const skids = [{ weight: 1000, qty: 250, coils: [0] }, { weight: 900, qty: 240, coils: [0, 1] }, { weight: 1100, qty: 260, coils: [1] }];
+  const r = await call('cutCoil', [['SKD-000006', 'SKD-000007'], '2026-10-07', 1, skids, false, 'op-30-c']);
+  ok('changeover cut ok', r.ok && r.result.created === 3, r);
+  const kids = fake2.rows(SID, 'Steel Tickets').filter((o) => /^100726-1/.test(o['Ticket']));
+  ok('3 skids, tickets in order', kids.map((o) => o['Ticket']).join() === '100726-101,100726-102,100726-103', kids.map((o) => o['Ticket']));
+  ok('mills: first coil, both, second coil', kids.map((o) => o['Mill']).join('|') === 'M77|M77 / M88|M88', kids.map((o) => o['Mill']));
+  ok('changeover skid links both coils', kids[1]['Split Of'] === 'SKD-000006' && kids[1]['Also Cut From'] === 'SKD-000007' && /changeover/i.test(kids[1]['System Notes']), kids[1]);
+  ok('skid after the change belongs to the second coil', kids[2]['Split Of'] === 'SKD-000007' && !kids[2]['Also Cut From']);
+  const c1 = fake2.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === 'SKD-000006')[0];
+  const c2 = fake2.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === 'SKD-000007')[0];
+  ok('first coil ran out -> Used; last coil left open', c1['Status'] === 'Used' && c1['Used Via'] === 'Coil' && c2['Status'] === 'Current', [c1['Status'], c2['Status']]);
+  const txs = fake2.rows(SID, 'Transactions');
+  ok('a history row for each coil, naming the changeover', txs.length === 2 && txs.every((t) => /changeover with/.test(t['Notes'])), txs.map((t) => t['Notes']));
+  const again = await call('cutCoil', [['SKD-000006', 'SKD-000007'], '2026-10-07', 1, skids, false, 'op-30-c']);
+  ok('retry makes nothing new', again.ok && again.result.duplicate && fake2.rows(SID, 'Steel Tickets').length === 5 && fake2.rows(SID, 'Transactions').length === 2, again);
+  const h = await call('getSkidHistory', ['SKD-000007']);
+  ok('second coil\'s history lists the changeover skid and its own', h.ok && h.result.children.map((c) => c.ticket).sort().join() === '100726-102,100726-103', h.ok ? h.result.children : h);
+  const h2 = await call('getSkidHistory', [kids[1]['Skid ID']]);
+  ok('changeover skid shows both coils it came from', h2.ok && h2.result.parent.skidId === 'SKD-000006' && h2.result.alsoParent.skidId === 'SKD-000007', h2.ok ? [h2.result.parent, h2.result.alsoParent] : h2);
+  const bad = await call('cutCoil', [['SKD-000006', 'SKD-000007'], '2026-10-07', 1, [{ weight: 1, qty: 1, coils: [0, 2] }], true, 'op-30-x']);
+  ok('a changeover must join coils next to each other', !bad.ok && /next to each other/.test(bad.error), bad);
+  const single = await call('cutCoil', ['SKD-000007', '2026-10-08', 1, [{ weight: 500, qty: 100 }], true, 'op-30-s']);
+  ok('a single coil still cuts as before', single.ok && single.result.created === 1 && fake2.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === 'SKD-000007')[0]['Status'] === 'Used', single);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

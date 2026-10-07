@@ -1215,7 +1215,8 @@ const base = {
 // ---- 32. Metals: Coil Line has its own button (tablets too); Press and Slitter machines come from a list
 { const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   const { page, calls } = await boot(Object.assign({}, base, {
-    getAllTickets: () => R([ticket('SKD-C', 'C1', 'Current', { cs: 'C', mill: 'M77', weight: 4000 }), ticket('SKD-S', 'S1', 'Current', { cs: 'S' })]),
+    getAllTickets: () => R([ticket('SKD-C', 'C1', 'Current', { cs: 'C', mill: 'M77', weight: 4000 }), ticket('SKD-D', 'D1', 'Current', { cs: 'C', mill: 'M88', weight: 4000 }),
+      ticket('SKD-S', 'S1', 'Current', { cs: 'S' })]),
     getProductionRuns: () => R([{ runId: 'RUN-000001', machine: 'A Liner', operator: 'Ann', status: 'Open', skidCount: 0, createdOn: '2026-10-07' },
       { runId: 'RUN-000002', machine: 'Line 4', operator: 'Bo', status: 'Open', skidCount: 0, createdOn: '2026-10-07' }]),
     createRun: (a) => R({ runId: 'RUN-000009', machine: a[0], operator: a[1], status: 'Open' }),
@@ -1233,7 +1234,30 @@ const base = {
   await page.fill('.crWeight', '1000'); await page.fill('.crQty', '250');
   await page.click('#coilCutBtn'); await page.waitForTimeout(100); await page.click('#modalOk'); await page.waitForTimeout(300);
   const cut = calls.filter((c) => c.fn === 'cutCoil')[0];
-  ok('coil: cuts the coil', cut && cut.args[0] === 'SKD-C' && cut.args[3].length === 1 && String(cut.args[3][0].weight) === '1000', cut && cut.args);
+  ok('coil: cuts the coil', cut && cut.args[0].join() === 'SKD-C' && cut.args[3].length === 1 && String(cut.args[3][0].weight) === '1000', cut && cut.args);
+  await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
+  // A changeover: C1 runs out partway through skid 2, D1 finishes it, then D1 alone.
+  await page.click('[data-coil="SKD-C"]'); await page.waitForTimeout(100);
+  ok('coil: one coil = no "from" picker', !(await page.$('.crFrom')));
+  await page.fill('.crWeight', '1000'); await page.fill('.crQty', '250');
+  await page.click('#coilNextBtn'); await page.waitForTimeout(100);
+  txt = await page.textContent('#coilPicker');
+  ok('coil: next coil picker leaves out the coil already picked', txt.includes('D1') && !txt.includes('C1'), txt);
+  await page.click('[data-coil="SKD-D"]'); await page.waitForTimeout(100);
+  let froms = await page.$$eval('.crFrom', (ss) => ss.map((x) => x.value));
+  ok('coil: adds a changeover skid after the typed one', froms.join('|') === '0|0,1', froms);
+  ok('coil: changeover option names both coils', (await page.textContent('#coilRowsBox')).includes('Changeover — coil 1 + coil 2 (2 mills)'));
+  await page.fill('[data-crow="1"] .crWeight', '900'); await page.fill('[data-crow="1"] .crQty', '240');
+  await page.click('#coilAddRowBtn'); await page.waitForTimeout(100);
+  froms = await page.$$eval('.crFrom', (ss) => ss.map((x) => x.value));
+  ok('coil: the skid after a changeover is the new coil', froms.join('|') === '0|0,1|1', froms);
+  await page.fill('[data-crow="2"] .crWeight', '1100'); await page.fill('[data-crow="2"] .crQty', '260');
+  await page.click('#coilCutBtn'); await page.waitForTimeout(100);
+  const conf = await page.textContent('#modalRoot');
+  ok('coil: confirm says the first coil ran out and the changeover has both mills', conf.includes('Cut 2 coils into 3 skids') && conf.includes('C1 ran out') && conf.includes('1 changeover skid carries both'), conf);
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const cut2 = calls.filter((c) => c.fn === 'cutCoil')[1];
+  ok('coil: sends both coils and which coil each skid came from', cut2 && cut2.args[0].join() === 'SKD-C,SKD-D' && cut2.args[3].map((x) => x.coils.join('+')).join() === '0,0+1,1', cut2 && cut2.args);
   await page.click('#modalOk').catch(() => {}); await page.waitForTimeout(100);
   await page.click('#backBtn'); await page.waitForTimeout(100);
   ok('coil: Back returns to Metals', !!(await page.$('#metalsPickCoil')));
@@ -1265,9 +1289,19 @@ const base = {
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
-{ const { page } = await boot(base);
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-C', 'C1', 'Current', { cs: 'C', mill: 'M77' })]),
+    cutCoil: (a) => R({ created: a[3].length, tickets: [{ ticket: '100726-101' }] }),
+  }));
   await page.click('#tileProduction'); await page.click('#metalsPickUsed'); await page.waitForTimeout(200);
-  ok('Used in Production is just the skid mark now', !!(await page.$('#usedAddInput')) && !(await page.$('[data-usedtab]')));
+  ok('Used in Production keeps its manual Coil Line tab', !!(await page.$('#usedAddInput')) && !!(await page.$('[data-usedtab="coil"]')));
+  await page.click('[data-usedtab="coil"]'); await page.waitForTimeout(300);
+  await page.click('[data-coil="SKD-C"]'); await page.waitForTimeout(100);
+  ok('manual Coil Line: one coil, no Next coil or changeover', !(await page.$('#coilNextBtn')) && !(await page.$('.crFrom')));
+  await page.fill('.crWeight', '1000'); await page.fill('.crQty', '250');
+  await page.click('#coilCutBtn'); await page.waitForTimeout(100); await page.click('#modalOk'); await page.waitForTimeout(300);
+  const cut = calls.filter((c) => c.fn === 'cutCoil')[0];
+  ok('manual Coil Line: cuts one coil as before', cut && cut.args[0] === 'SKD-C' && !('coils' in cut.args[3][0]), cut && cut.args);
   await page.close();
 }
 
