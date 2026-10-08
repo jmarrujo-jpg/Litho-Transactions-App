@@ -233,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.75.0</span>
+      <span class="version" id="appVersion">v1.76.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -621,6 +621,18 @@
     "Find a coil (ticket / skid / mill)": "Buscar una bobina (ticket / tarima / Mill)",
     "Find a receiver": "Buscar un recibo",
     "Find a skid to load": "Buscar una tarima para cargar",
+    "Save this work session?": "¿Guardar esta sesión de trabajo?",
+    "Keep working": "Seguir trabajando",
+    "Delete this work session?": "¿Borrar esta sesión de trabajo?",
+    "Nothing was loaded on it.": "No se cargó nada en ella.",
+    "Work session deleted": "Sesión de trabajo borrada",
+    "Scan or type a ticket number to load it": "Escanee o escriba un número de ticket para cargarlo",
+    "Scan the ticket, or type its number.": "Escanee el ticket, o escriba su número.",
+    "No Current or WIP skids match.": "Ninguna tarima Current o WIP coincide.",
+    "Already marked Used": "Ya marcadas como usadas",
+    "Not used — load it": "No se usó — cargarla",
+    "Load a ticket marked Used?": "¿Cargar un ticket marcado como usado?",
+    "Yes, load it": "Sí, cargarlo",
     "Find a ticket": "Buscar un ticket",
     "Find receivers in Drive": "Buscar recibos en Drive",
     "Finish Current count →": "Terminar conteo actual →",
@@ -1608,11 +1620,12 @@
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     var iconHtml = opts.icon ? '<div class="modal-icon">' + esc(opts.icon) + '</div>' : '';
-    var cancelHtml = opts.cancelText ? '<button class="btn secondary" id="modalCancel">' + esc(opts.cancelText) + '</button>' : '';
+    var cancelHtml = opts.cancelText ? '<button class="btn ' + (opts.cancelVariant || 'secondary') + '" id="modalCancel">' + esc(opts.cancelText) + '</button>' : '';
+    var altHtml = opts.altText ? '<button class="btn secondary" id="modalAlt">' + esc(opts.altText) + '</button>' : '';
     overlay.innerHTML = '<div class="modal">' + iconHtml +
       '<h3>' + esc(opts.title || '') + '</h3>' +
       '<p>' + esc(opts.message || '') + '</p>' +
-      '<div class="modal-actions">' + cancelHtml +
+      '<div class="modal-actions">' + altHtml + cancelHtml +
         '<button class="btn ' + (opts.variant || '') + '" id="modalOk">' + esc(opts.confirmText || 'OK') + '</button>' +
       '</div></div>';
     root.appendChild(overlay);
@@ -1620,6 +1633,8 @@
     overlay.querySelector('#modalOk').onclick = function () { close(); if (opts.onConfirm) opts.onConfirm(); };
     var c = overlay.querySelector('#modalCancel');
     if (c) c.onclick = function () { close(); if (opts.onCancel) opts.onCancel(); };
+    var a = overlay.querySelector('#modalAlt');
+    if (a) a.onclick = function () { close(); if (opts.onAlt) opts.onAlt(); };
     overlay.onclick = function (e) { if (e.target === overlay && opts.cancelText) close(); };
   }
 
@@ -1861,7 +1876,8 @@
       case 'lithoDept': renderLanding(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
       case 'prodHome': case 'slitterHome': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
-      case 'prodAdd': case 'prodReview': openMetalsSection(metalsTab); return;
+      case 'prodAdd': askLeaveRun(); return;              // save the work session or delete it
+      case 'prodReview': openMetalsSection(metalsTab); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
       case 'slitterSession': openMetalsSection('slitter'); return; // slitter detail -> slitter home
@@ -7733,9 +7749,9 @@
     view.innerHTML =
       '<div class="card"><div class="sub">Run <strong>' + esc(currentRun.runId) + '</strong> &middot; ' + esc(currentRun.machine) +
         (currentRun.operator ? ' &middot; ' + esc(currentRun.operator) : '') + '</div></div>' +
-      '<div class="card"><h3 style="margin-top:0;font-size:15px">Find a skid to load</h3>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Scan or type a ticket number to load it</h3>' +
         searchBarHtml('runSkidSearch') +
-        '<div id="runSkidPicker" style="margin-top:10px"><div class="loading">Loading&hellip;</div></div></div>' +
+        '<div id="runSkidPicker" style="margin-top:10px"></div></div>' +
       '<div class="card">' +
         '<h4 style="margin-bottom:6px;font-size:13px;color:var(--muted)">Skids loaded this session (<span id="runAddedCount">0</span>)</h4>' +
         '<div id="runAddedList" class="sub">None yet.</div></div>' +
@@ -7745,7 +7761,19 @@
 
     var search = document.getElementById('runSkidSearch');
     search.oninput = function () { renderRunSkidPicker(search.value); };
-    ensureAllCache(function () { renderRunSkidPicker(''); });
+    // A scanner types the ticket and presses Enter: one exact match loads straight away.
+    search.onkeydown = function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var lc = search.value.trim().toLowerCase();
+      if (!lc) return;
+      var hit = runPickable().filter(function (q) { return String(q.ticket).toLowerCase() === lc || String(q.skidId).toLowerCase() === lc; });
+      if (hit.length === 1) loadRunSkid(hit[0].skidId, null, false);
+      else renderRunSkidPicker(search.value);
+    };
+    search.focus();   // ready for a scan without tapping the box first
+    ensureAllCache(function () { var si = document.getElementById('runSkidSearch'); renderRunSkidPicker(si ? si.value : ''); });
+    renderRunSkidPicker('');
     renderRunAddedList();
 
     document.getElementById('submitRunBtn').onclick = function () {
@@ -7757,6 +7785,41 @@
         onCancel: function () { doSubmitRun(); }
       });
     };
+  }
+
+  // Back from a work session: keep it (it stays open — Resume picks it up) or throw it away (every
+  // skid on it goes back to stock). Tapping outside or "Keep working" stays put.
+  function askLeaveRun() {
+    var run = currentRun, n = runAddedSkids.length;
+    if (!run) { openMetalsSection(metalsTab); return; }
+    showModal({
+      title: 'Save this work session?',
+      message: L('Run ' + run.runId + ' on ' + run.machine + ' has ' + n + ' skid' + (n === 1 ? '' : 's') + ' loaded. Save it to come back to it later, or delete it.',
+        'La corrida ' + run.runId + ' en ' + run.machine + ' tiene ' + n + ' tarima' + (n === 1 ? '' : 's') + ' cargada' + (n === 1 ? '' : 's') + '. Guárdela para volver después, o bórrela.'),
+      confirmText: 'Save', variant: 'success',
+      cancelText: 'Delete', cancelVariant: 'danger',
+      altText: 'Keep working',
+      onConfirm: function () { openMetalsSection(metalsTab); },
+      onCancel: function () {
+        showConfirm('Delete this work session?',
+          n ? L('The ' + n + ' skid' + (n === 1 ? '' : 's') + ' on it go back to stock, as if never loaded.',
+                'La' + (n === 1 ? '' : 's') + ' ' + n + ' tarima' + (n === 1 ? '' : 's') + ' regresa' + (n === 1 ? '' : 'n') + ' al inventario, como si nunca se hubiera' + (n === 1 ? '' : 'n') + ' cargado.')
+            : 'Nothing was loaded on it.',
+          function () { doDeleteRun(run); }, 'Delete', 'danger');
+      }
+    });
+  }
+
+  function doDeleteRun(run) {
+    runMutation('deleteRun', [run.runId, run.operator, newOpId()],
+      function () {
+        runAddedSkids.forEach(function (r) { markCacheStatus(r.skidId, r.wasStatus || 'Current'); });
+        fetchTickets();   // the real statuses (WIP / Cut) catch up
+        currentRun = null; runAddedSkids = [];
+        toast('Work session deleted');
+        openMetalsSection(metalsTab);
+      },
+      function (err) { showModal({ title: 'Could not delete', message: err.message, confirmText: 'OK' }); });
   }
 
   function doSubmitRun() {
@@ -7842,38 +7905,75 @@
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px" ' + pickAttr + '="' + esc(q.skidId) + '">Select</button></div>';
   }
 
+  function runPickable() { return prodPickList(currentRun ? machineParts(currentRun.machine).type : null); }
+  function runSkidMatch(q, term) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; }
+
+  // Nothing is listed until they scan or type: then the Current / WIP skids (and this machine's cut
+  // pallets) that match. Under them, a few matching tickets already marked Used — so they can see
+  // what they marked, and load one that was marked by mistake. Cut coils never come back.
   function renderRunSkidPicker(term) {
     var c = document.getElementById('runSkidPicker');
     if (!c) return;
     term = (term || '').trim().toLowerCase();
-    var list = prodPickList(currentRun ? machineParts(currentRun.machine).type : null);
-    var rows = term
-      ? list.filter(function (q) { return String(q.ticket).toLowerCase().indexOf(term) !== -1 || String(q.skidId).toLowerCase().indexOf(term) !== -1; })
-      : list.slice(0, 15);
-    if (!rows.length) { c.innerHTML = '<div class="sub">No skids match.</div>'; return; }
+    if (!term) { c.innerHTML = '<div class="sub">Scan the ticket, or type its number.</div>'; return; }
+    var rows = runPickable().filter(function (q) { return runSkidMatch(q, term); }).slice(0, 15);
+    var used = allCache.filter(function (q) {
+      return q.status === 'Used' && String(q.cs || '').toUpperCase() !== 'C' && runSkidMatch(q, term);
+    }).sort(function (a, b) { return String(b.usedOn || '').localeCompare(String(a.usedOn || '')); }).slice(0, 5);
+    if (!rows.length && !used.length) {
+      var checking = recheckOnMiss(term, function () { var i = document.getElementById('runSkidSearch'); if (i) renderRunSkidPicker(i.value); });
+      c.innerHTML = '<div class="sub">No skids match.' + (checking ? CHECKING_HTML : '') + '</div>'; return;
+    }
     var html = '';
+    if (!rows.length) html += '<div class="sub">No Current or WIP skids match.</div>';
     rows.forEach(function (q) { html += skidRowHtml(q, 'data-pick'); });
+    if (used.length) {
+      html += '<div id="runUsedHits" style="margin-top:12px;padding-top:8px;border-top:1px dashed var(--border, #ccc)">' +
+        '<div class="sub" style="font-weight:600;margin-bottom:2px">Already marked Used</div>';
+      used.forEach(function (q) {
+        html += '<div class="queue-item" style="padding:6px 0"><div style="min-width:0">' +
+          '<span class="ticket-id" style="font-size:14px">' + esc(q.ticket) + '</span> ' +
+          '<span class="badge ' + badgeClassFor(q.status) + '">Used</span> ' +
+          '<span class="sub">' + (q.usedOn ? esc(q.usedOn) + ' &middot; ' : '') + esc(q.endUse) + ' &middot; ' + esc(q.qty || 0) + ' sheets</span></div>' +
+          '<button class="btn warn" style="padding:6px 10px;font-size:13px" data-pickused="' + esc(q.skidId) + '">Not used — load it</button></div>';
+      });
+      html += '</div>';
+    }
     c.innerHTML = html;
     // One tap: selecting a skid loads it straight onto the run (nothing else is entered here —
     // usage is captured later at Finish), matching the Review screen's picker.
     Array.prototype.forEach.call(c.querySelectorAll('[data-pick]'), function (btn) {
+      btn.onclick = function () { loadRunSkid(btn.getAttribute('data-pick'), btn, false); };
+    });
+    Array.prototype.forEach.call(c.querySelectorAll('[data-pickused]'), function (btn) {
       btn.onclick = function () {
-        var sk = btn.getAttribute('data-pick');
-        btn.disabled = true;
-        runMutation('runAddSkid', [currentRun.runId, sk, currentRun.operator, newOpId()],
-          function (result) {
-            if (result && result.duplicate) { toast('Already loaded'); btn.disabled = false; return; }
-            runAddedSkids.push(result);
-            toast('Loaded ' + (result.ticket || sk));
-            markCacheStatus(sk, 'In Production'); // drop it from the picker right away
-            var si = document.getElementById('runSkidSearch');
-            renderRunSkidPicker(si ? si.value : ''); // keep the search context
-            renderRunAddedList();
-            fetchTickets();
-          },
-          function (err) { toast('Error: ' + err.message); btn.disabled = false; });
+        var sk = btn.getAttribute('data-pickused');
+        var t = allCache.filter(function (x) { return x.skidId === sk; })[0] || {};
+        showConfirm('Load a ticket marked Used?',
+          L('Ticket ' + (t.ticket || sk) + ' was marked Used' + (t.usedOn ? ' on ' + t.usedOn : '') + '. If it wasn\'t really used, it comes back and goes on this run.',
+            'El ticket ' + (t.ticket || sk) + ' se marcó como usado' + (t.usedOn ? ' el ' + t.usedOn : '') + '. Si en realidad no se usó, regresa y se carga en esta corrida.'),
+          function () { loadRunSkid(sk, btn, true); }, 'Yes, load it', 'warn');
       };
     });
+  }
+
+  function loadRunSkid(sk, btn, fromUsed) {
+    if (btn) btn.disabled = true;
+    var was = (allCache.filter(function (x) { return x.skidId === sk; })[0] || {}).status;
+    runMutation('runAddSkid', [currentRun.runId, sk, currentRun.operator, newOpId(), !!fromUsed],
+      function (result) {
+        if (result && result.duplicate) { toast('Already loaded'); if (btn) btn.disabled = false; return; }
+        result.wasStatus = fromUsed ? 'Current' : was;
+        runAddedSkids.push(result);
+        toast('Loaded ' + (result.ticket || sk));
+        markCacheStatus(sk, 'In Production'); // drop it from the picker right away
+        var si = document.getElementById('runSkidSearch');
+        if (si) { si.value = ''; si.focus(); }   // ready for the next scan
+        renderRunSkidPicker('');
+        renderRunAddedList();
+        fetchTickets();
+      },
+      function (err) { toast('Error: ' + err.message); if (btn) btn.disabled = false; });
   }
 
   function renderRunAddedList() {

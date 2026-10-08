@@ -1084,5 +1084,55 @@ await concurrency(envBase, 'in-worker lock');
   ok('Begin trace shows both receivers', row && row.receiver === 'R-00011' && row.moreReceivers.map((r) => r.receiver).join() === 'R-00118', tr.ok ? tr.result.dayList[1] : tr);
 }
 
+// 33. Back out of a work session: Delete puts its skids back; a skid marked Used by mistake can be loaded
+{ const f = fresh();
+  const run = await call('createRun', ['Press 13', 'Ann', '', 'op-33-r']);
+  const id = run.result.runId;
+  await call('runAddSkid', [id, 'SKD-000001', 'Ann', 'op-33-a']);
+  await call('runAddSkid', [id, 'SKD-000003', 'Ann', 'op-33-b']);
+  ok('two skids on the run', skidRow(f, 'SKD-000001')['Status'] === 'In Production' && skidRow(f, 'SKD-000003')['Status'] === 'In Production');
+  const d = await call('deleteRun', [id, 'Ann', 'op-33-d']);
+  ok('deleted: both skids back', d.ok && d.result.returned === 2 && skidRow(f, 'SKD-000001')['Status'] === 'Current' && skidRow(f, 'SKD-000003')['Status'] === 'WIP'
+    && !skidRow(f, 'SKD-000001')['Run ID'], d);
+  const runRow = f.rows(SID, 'Production Runs').filter((r) => r['Run ID'] === id)[0];
+  ok('the run is marked Deleted and leaves the open list', runRow['Status'] === 'Deleted');
+  const open = await call('getProductionRuns', ['', 'open']);
+  ok('not listed as open', open.ok && !open.result.some((r) => r.runId === id));
+  const txs = f.rows(SID, 'Transactions').filter((r) => /deleted/.test(r['Notes'] || ''));
+  ok('each skid logs why it came off', txs.length === 2, txs.length);
+  const d2 = await call('deleteRun', [id, 'Ann', 'op-33-d']);
+  ok('a retry is harmless', d2.ok && f.rows(SID, 'Transactions').filter((r) => /deleted/.test(r['Notes'] || '')).length === 2, d2);
+
+  const run2 = await call('createRun', ['Press 13', 'Ann', '', 'op-33-r2']);
+  const id2 = run2.result.runId;
+  await call('runAddSkid', [id2, 'SKD-000002', 'Ann', 'op-33-c']);
+  await call('submitRun', [id2, 'Ann', 'op-33-s']);
+  const d3 = await call('deleteRun', [id2, 'Ann', 'op-33-d3']);
+  ok('a submitted run can\'t be deleted', !d3.ok && /submitted/.test(d3.error) && skidRow(f, 'SKD-000002')['Status'] === 'In Production', d3);
+
+  const run3 = await call('createRun', ['Press 14', 'Ann', '', 'op-33-r3']);
+  const id3 = run3.result.runId;
+  await call('runAddSkid', [id3, 'SKD-000004', 'Ann', 'op-33-e']);
+  await call('runSkidPartial', [id3, 'SKD-000004', 100, 'Ann', 'op-33-p']);
+  const d4 = await call('deleteRun', [id3, 'Ann', 'op-33-d4']);
+  ok('a run with a partial already split off can\'t be deleted', !d4.ok && /partial/.test(d4.error), d4);
+
+  await call('markUsedDirect', [['SKD-000005'], '2026-10-01', 'op-33-u']);
+  const run4 = await call('createRun', ['Press 15', 'Ann', '', 'op-33-r4']);
+  const id4 = run4.result.runId;
+  const n1 = await call('runAddSkid', [id4, 'SKD-000005', 'Ann', 'op-33-f']);
+  ok('a Used skid needs the screen to say so', !n1.ok && /already marked Used/.test(n1.error), n1);
+  const n2 = await call('runAddSkid', [id4, 'SKD-000005', 'Ann', 'op-33-g', true]);
+  const r5 = skidRow(f, 'SKD-000005');
+  ok('"Not used — load it": back on the run, the Used mark cleared and noted', n2.ok && r5['Status'] === 'In Production' && r5['Run ID'] === id4 && !r5['Used At'] && !r5['Used Via']
+    && /Was marked Used 2026-10-01 but wasn't used/.test(r5['System Notes'] || ''), r5);
+  ok('and logged', txFor(f, 'SKD-000005').some((r) => r['Item'] === 'USED UNDONE — ADDED TO PRODUCTION'));
+  await call('cutCoil', ['SKD-000006', '2026-10-01', 1, [{ qty: 1300, weight: 5000 }], true, 'op-33-k']);
+  const n3 = await call('runAddSkid', [id4, 'SKD-000006', 'Ann', 'op-33-h', true]);
+  ok('a cut coil can\'t come back', !n3.ok && /coil line/.test(n3.error), n3);
+  const all = await call('getAllTickets', []);
+  ok('tickets carry the day they were used', all.ok && all.result.filter((t) => t.skidId === 'SKD-000006')[0].usedOn === '2026-10-01', all.ok && all.result.filter((t) => t.skidId === 'SKD-000006')[0]);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

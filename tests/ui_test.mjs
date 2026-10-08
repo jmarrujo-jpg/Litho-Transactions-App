@@ -1533,6 +1533,59 @@ const base = {
   await page.close();
 }
 
+// 38. Work sessions: the skid finder lists nothing until a scan; Back asks Save / Delete / Keep working
+{ const { page, calls } = await boot(Object.assign({}, base, {
+    getAllTickets: () => R([ticket('SKD-1', '5001', 'Current'), ticket('SKD-2', '5002', 'WIP'), ticket('SKD-3', '9999', 'Current'),
+      ticket('SKD-4', '5003', 'Used', { usedOn: '2026-10-06' }), ticket('SKD-5', '5004', 'Used', { cs: 'C' })]),
+    getProductionRuns: () => R([]),
+    createRun: (a) => R({ runId: 'RUN-00009', machine: a[0], operator: a[1], status: 'Open' }),
+    runAddSkid: (a) => R({ runId: a[0], skidId: a[1], ticket: { 'SKD-1': '5001', 'SKD-2': '5002', 'SKD-4': '5003' }[a[1]], loadedOn: '2026-10-08' }),
+    deleteRun: (a) => R({ runId: a[0], deleted: true, returned: 1 }),
+  }));
+  const startPress = async () => {
+    if (await page.$('#metalsPickPress')) { await page.click('#metalsPickPress'); await page.waitForTimeout(300); }
+    await page.fill('#runOperator', 'Ann'); await page.selectOption('#runMachineSel', 'Press 13');
+    await page.click('#startRunBtn'); await page.waitForTimeout(300);
+  };
+  await page.click('#tileProduction'); await page.waitForTimeout(100);
+  await startPress();
+  ok('finder: nothing listed before a scan', !(await page.$('#runSkidPicker [data-pick]')) && (await page.textContent('#runSkidPicker')).includes('Scan the ticket'));
+  await page.fill('#runSkidSearch', '500'); await page.waitForTimeout(100);
+  const picks = await page.$$eval('#runSkidPicker [data-pick]', (bs) => bs.map((b) => b.getAttribute('data-pick')));
+  ok('finder: typing shows the Current and WIP matches', picks.join() === 'SKD-1,SKD-2', picks);
+  ok('finder: and, apart, the ones already marked Used (not cut coils)', (await page.textContent('#runUsedHits')).includes('5003') && (await page.textContent('#runUsedHits')).includes('2026-10-06')
+    && !(await page.textContent('#runUsedHits')).includes('5004'));
+  await page.fill('#runSkidSearch', '5001'); await page.press('#runSkidSearch', 'Enter'); await page.waitForTimeout(300);
+  const add1 = calls.filter((c) => c.fn === 'runAddSkid')[0];
+  ok('finder: a scan (exact + Enter) loads it at once', add1 && add1.args[1] === 'SKD-1' && !add1.args[4], add1 && add1.args);
+  ok('finder: the box clears for the next scan', (await page.inputValue('#runSkidSearch')) === '' && (await page.textContent('#runAddedCount')) === '1');
+  await page.fill('#runSkidSearch', '5003'); await page.waitForTimeout(100);
+  await page.click('[data-pickused="SKD-4"]'); await page.waitForTimeout(100);
+  ok('used: asks before loading one marked Used', (await page.textContent('#modalRoot')).includes('was marked Used on 2026-10-06'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const add2 = calls.filter((c) => c.fn === 'runAddSkid')[1];
+  ok('used: loads it, telling the server it was marked Used', add2 && add2.args[1] === 'SKD-4' && add2.args[4] === true, add2 && add2.args);
+
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  ok('back: asks to save or delete', (await page.textContent('#modalRoot')).includes('Save this work session?') && (await page.textContent('#modalRoot')).includes('has 2 skids loaded')
+    && !!(await page.$('#modalAlt')) && !!(await page.$('#modalCancel')));
+  await page.click('#modalAlt'); await page.waitForTimeout(100);
+  ok('back: Keep working stays put', !!(await page.$('#runSkidSearch')));
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('back: Save leaves it open and goes back to Press', !!(await page.$('#startRunBtn')) && !calls.some((c) => c.fn === 'deleteRun'));
+
+  await startPress();
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#modalCancel'); await page.waitForTimeout(100);
+  ok('delete: asks once more', (await page.textContent('#modalRoot')).includes('Delete this work session?'));
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  const del = calls.filter((c) => c.fn === 'deleteRun')[0];
+  ok('delete: deletes that run and goes back to Press', del && del.args[0] === 'RUN-00009' && del.args[1] === 'Ann' && !!(await page.$('#startRunBtn')), del && del.args);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

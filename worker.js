@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'coil-75', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'run-76', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -322,8 +322,10 @@ async function handle(fn, args, env) {
       return getRunDetail(sheets, args[0]);
     case 'createRun': // (machine, operator, notes, opId)
       return createRun(sheets, args[0], args[1], args[2], args[3]);
-    case 'runAddSkid': // (runId, skidId, operator, opId)
-      return runAddSkid(sheets, args[0], args[1], args[2], args[3]);
+    case 'runAddSkid': // (runId, skidId, operator, opId, fromUsed) fromUsed: it was marked Used but wasn't
+      return runAddSkid(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'deleteRun': // (runId, operator, opId) drop an open work session; its skids go back to stock
+      return deleteRun(sheets, args[0], args[1], args[2]);
     case 'runRemoveSkid': // (runId, skidId, operator, opId)
       return runRemoveSkid(sheets, args[0], args[1], args[2], args[3]);
     case 'updateRun': // (runId, fields, operator, opId)
@@ -708,6 +710,7 @@ async function getAllTickets(sheets) {
     cs: String(o['C/S'] || o['Coil/Sheet'] || '').trim(), splitOf: o['Split Of'] || '', comments: o['Comments'] || '',
     carryOver: num(o['Carry Over']), carryLine: o['Carry Over Line'] || '', carryDate: toYMD(o['Carry Over Date']),
     missingOn: toYMD(o['Missing At']), missingBy: o['Missing By'] || '',
+    usedOn: toYMD(usedAt(o)),
   }));
 }
 
@@ -2552,7 +2555,7 @@ async function getProductionRuns(sheets, dateStr, scope) {
     if (scope === 'open') return st === 'Open';                                   // open runs always visible (ignore date)
     if (scope === 'submitted') return st === 'Submitted' && toYMD(o['Created On']) === target;
     if (scope === 'finished') return st === 'Finished' && toYMD(o['Created On']) === target;
-    return toYMD(o['Created On']) === target;
+    return st !== 'Deleted' && toYMD(o['Created On']) === target;
   }).map((o) => ({
     runId: o['Run ID'], createdOn: toYMD(o['Created On']), operator: o['Operator'], machine: o['Machine'],
     status: o['Status'] || 'Open', skidCount: o['Skid Count'], notes: o['Notes'],
@@ -2596,7 +2599,13 @@ async function recountRun(sheets, runId, runRow, runsMap) {
   return count;
 }
 
-async function runAddSkid(sheets, runId, skidId, operator, opId) {
+// Where a skid goes back to when it comes off a run: a cut pallet stays Cut, coated steel WIP, raw Current.
+function stockStatusOf(obj) {
+  if (String(obj['Cut Type'] || '').trim()) return STATUS.CUT;
+  return num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT;
+}
+
+async function runAddSkid(sheets, runId, skidId, operator, opId, fromUsed) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId, runId };
   await normalizeMasterRows(sheets);
   const runs = await readTab(sheets, PRODUCTION);
@@ -2610,17 +2619,29 @@ async function runAddSkid(sheets, runId, skidId, operator, opId) {
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
   const st = obj['Status'] || STATUS.CURRENT;
-  if (st === STATUS.USED) throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already marked Used.');
+  // fromUsed: the floor marked it Used by mistake and it's on the machine now — load it anyway.
+  // A cut coil can't come back (it's skids now), and a skid only says so when the screen asked.
+  const wasUsed = st === STATUS.USED;
+  if (wasUsed && !fromUsed) throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already marked Used.');
+  if (wasUsed && String(obj['C/S'] || '').trim().toUpperCase() === 'C') throw new Error('Coil ' + (obj['Ticket'] || skidId) + ' was cut on the coil line, so it can\'t be loaded.');
   const onRun = String(obj['Run ID'] || '').trim();
   if (onRun) {
     if (onRun === String(runId).trim()) throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already on this run.');
     throw new Error('Skid ' + (obj['Ticket'] || skidId) + ' is already on run ' + onRun + '.');
   }
-  await stampCells(sheets, MASTER, obj.__row, master.map, {
+  const usedNote = wasUsed ? 'Was marked Used' + (usedAt(obj) ? ' ' + toYMD(usedAt(obj)) : '') + ' but wasn\'t used; loaded on run ' + runId + ' ' + todayYMD() : '';
+  const changes = {
     'Status': STATUS.IN_PRODUCTION, 'Run ID': runId, 'Loaded On': todayYMD(), 'Row': '',   // loaded onto a run -> off its storage row
-    'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
-  await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'ADDED TO PRODUCTION', operator,
-    note: 'Loaded on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, opId);
+    'Last Updated At': nowStamp(), 'Last Updated By': operator || '' };
+  if (wasUsed) {
+    ens = await ensureColumn(sheets, MASTER, master.headers, 'System Notes');
+    master.map = ens.map;
+    Object.assign(changes, { 'Used At': '', 'Used By': '', 'Used Via': '',
+      'System Notes': (obj['System Notes'] ? obj['System Notes'] + ' | ' : '') + usedNote });
+  }
+  await stampCells(sheets, MASTER, obj.__row, master.map, changes);
+  await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: wasUsed ? 'USED UNDONE — ADDED TO PRODUCTION' : 'ADDED TO PRODUCTION', operator,
+    note: (wasUsed ? usedNote + '. ' : '') + 'Loaded on ' + (run['Machine'] || '') + ' (run ' + runId + ')', runningTotal: num(obj['Litho']) }, opId);
   await recountRun(sheets, runId, run.__row, runs.map);
   return { runId, skidId, ticket: obj['Ticket'], status: STATUS.IN_PRODUCTION, loadedOn: todayYMD(),
     qty: num(obj['QTY/LOAD']), bw: obj['BW'], type: obj['TC'], temper: obj['TM'], endUse: obj['End Use'] };
@@ -2636,13 +2657,54 @@ async function runRemoveSkid(sheets, runId, skidId, operator, opId) {
   const obj = master.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
   if (!obj) throw new Error('Skid not found: ' + skidId);
   if (String(obj['Run ID']).trim() !== String(runId).trim()) throw new Error('Skid is not on this run.');
-  const restore = num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT;   // coated skids return to WIP, raw ones to Current
+  const restore = stockStatusOf(obj);   // coated skids return to WIP, raw ones to Current, cut pallets to Cut
   await stampCells(sheets, MASTER, obj.__row, master.map, {
     'Status': restore, 'Run ID': '', 'Loaded On': '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '' });
   await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'REMOVED FROM PRODUCTION', operator,
     note: 'Removed from run ' + runId + ' (back to ' + restore + ')', runningTotal: num(obj['Litho']) }, opId);
   await recountRun(sheets, runId, run.__row, runs.map);
   return getRunDetail(sheets, runId);
+}
+
+// Back out of an open work session and throw it away: every skid on it goes back to stock (as if it
+// had never been loaded) and the run is marked Deleted, so it leaves the open list. Only an Open run —
+// once it's submitted the review screen owns it. Refused when a partial was already split off on
+// this run (that leftover is its own skid now); save the run and finish it instead.
+// Retry-safe per skid: "<opId>#<skidId>" stamps the row and its log line.
+async function deleteRun(sheets, runId, operator, opId) {
+  if (await opAlreadyDone(sheets, opId)) return { runId, deleted: true, duplicate: true };
+  const runs = await readTab(sheets, PRODUCTION);
+  const run = runs.rows.filter((o) => String(o['Run ID']).trim() === String(runId).trim())[0];
+  if (!run) throw new Error('Run not found: ' + runId);
+  const st = String(run['Status'] || 'Open');
+  if (st === 'Finished') throw new Error('Run ' + runId + ' is finished and locked.');
+  if (st === 'Submitted') throw new Error('Run ' + runId + ' was already submitted for review.');
+  let master = await readTab(sheets, MASTER);
+  const ens = await ensureColumn(sheets, MASTER, master.headers, 'Last Op ID');
+  if (ens.headers.length !== master.headers.length) master = await readTab(sheets, MASTER);
+  const rid = String(runId).trim();
+  const onRun = master.rows.filter((o) => String(o['Run ID'] || '').trim() === rid ||
+    stampedBy(o, subOp(opId, String(o['Skid ID'] || '').trim())));
+  const ids = {};
+  onRun.forEach((o) => { ids[String(o['Skid ID']).trim()] = true; });
+  const partial = master.rows.filter((o) => ids[String(o['Split Of'] || '').trim()] && /partial run:/.test(String(o['System Notes'] || '')))[0];
+  if (partial) throw new Error('A partial skid was already recorded on run ' + runId + ', so it can\'t be deleted. Save it and finish it in Review.');
+  let back = 0;
+  for (const obj of onRun) {
+    const skidId = String(obj['Skid ID']).trim();
+    const step = subOp(opId, skidId);
+    if (step && await opAlreadyDone(sheets, step)) { back++; continue; }
+    const restore = stockStatusOf(obj);
+    if (!stampedBy(obj, step)) {
+      await stampCells(sheets, MASTER, obj.__row, master.map, {
+        'Status': restore, 'Run ID': '', 'Loaded On': '', 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': step });
+    }
+    await eventTx(sheets, { skidId, ticket: obj['Ticket'], itemText: 'REMOVED FROM PRODUCTION', operator,
+      note: 'Work session ' + runId + ' on ' + (run['Machine'] || '') + ' deleted (back to ' + restore + ')', runningTotal: num(obj['Litho']) }, step);
+    back++;
+  }
+  await stampCells(sheets, PRODUCTION, run.__row, runs.map, { 'Status': 'Deleted', 'Skid Count': 0 });
+  return { runId, deleted: true, returned: back };
 }
 
 async function updateRun(sheets, runId, fields, operator, opId) {
