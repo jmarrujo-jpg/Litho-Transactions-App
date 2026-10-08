@@ -233,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.76.0</span>
+      <span class="version" id="appVersion">v1.77.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -621,6 +621,7 @@
     "Find a coil (ticket / skid / mill)": "Buscar una bobina (ticket / tarima / Mill)",
     "Find a receiver": "Buscar un recibo",
     "Find a skid to load": "Buscar una tarima para cargar",
+    "Slitters or Scrolls?": "¿Slitters o Scrolls?",
     "Save this work session?": "¿Guardar esta sesión de trabajo?",
     "Keep working": "Seguir trabajando",
     "Delete this work session?": "¿Borrar esta sesión de trabajo?",
@@ -1875,12 +1876,13 @@
       case 'lithoLogin': case 'moveWip': openLithoDept(); return;
       case 'lithoDept': renderLanding(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
-      case 'prodHome': case 'slitterHome': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
+      case 'prodHome': case 'slitterPick': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
+      case 'slitterHome': openMetalsSection('slitter'); return;   // Slitters / Scrolls -> the two big buttons
       case 'prodAdd': askLeaveRun(); return;              // save the work session or delete it
       case 'prodReview': openMetalsSection(metalsTab); return;
       case 'prodPartials': renderRunAddSkids(); return;
       case 'run': openProductionReview(); return;
-      case 'slitterSession': openMetalsSection('slitter'); return; // slitter detail -> slitter home
+      case 'slitterSession': openSlitterKind(slitKind); return;  // session -> its Slitters / Scrolls home
       case 'database': renderLanding(); return;            // database home -> landing
       case 'databaseEdit': renderDatabaseHome(); return;   // row editor -> database home
       default: renderLanding(); return;
@@ -6695,7 +6697,7 @@
     if (tab === 'used' && !FULL_APP) { renderMetalsChooser(); return; }
     metalsTab = tab;
     showTabbar(false); showBack(true); setDept('Metals');
-    if (tab === 'slitter') { state.view = 'slitterHome'; renderSlitterHome(); }
+    if (tab === 'slitter') { renderSlitterChooser(); }
     else if (tab === 'used') { state.view = 'usedHome'; renderUsedHome(); }
     else if (tab === 'coil') { openCoilLine(); }
     else { state.view = 'prodHome'; renderProductionHome(tab === 'press' ? 'Press' : 'Line'); }
@@ -8302,18 +8304,35 @@
   // between those machines in the same area. Each output pallet becomes a runnable "Cut" skid
   // carrying its mill composition, so slit pallets run on the Metal Lines and scroll pallets on
   // the Press. Source skids are not drawn down yet (value tracking deferred).
+  // Slitter Department opens on two big buttons — Slitters or Scrolls — so nobody logs on the wrong one.
+  function renderSlitterChooser() {
+    state.view = 'slitterPick';
+    var view = document.getElementById('view');
+    if (!view) return;
+    nextViewToken();
+    view.innerHTML =
+      '<div class="sub" style="margin:4px 0 16px;font-size:16px">Slitters or Scrolls?</div>' +
+      '<button class="btn" id="slitPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitters' +
+        '<div style="font-size:14px;font-weight:400;margin-top:6px;opacity:.85">' + esc(SLITTER_MACHINES.join(' · ')) + '</div></button>' +
+      '<button class="btn" id="slitPickScroll" style="width:100%;padding:30px;font-size:22px">🌀&nbsp; Scrolls' +
+        '<div style="font-size:14px;font-weight:400;margin-top:6px;opacity:.85">' + esc(SCROLL_MACHINES.join(' · ')) + '</div></button>';
+    document.getElementById('slitPickSlitter').onclick = function () { openSlitterKind('Slitter'); };
+    document.getElementById('slitPickScroll').onclick = function () { openSlitterKind('Scroll'); };
+  }
+
+  function openSlitterKind(kind) {
+    slitKind = kind === 'Scroll' ? 'Scroll' : 'Slitter';
+    metalsTab = 'slitter';
+    showTabbar(false); showBack(true); setDept('Metals');
+    renderSlitterHome();
+  }
+
   function renderSlitterHome() {
     state.view = 'slitterHome';
     var view = document.getElementById('view');
     if (!view) return;
     nextViewToken();
-    var chips = [['Slitter', 'Slitters'], ['Scroll', 'Scrolls']].map(function (k) {
-      return '<button data-slkind="' + k[0] + '"' + (slitKind === k[0] ? ' class="active"' : '') + '>' + esc(k[1]) + '</button>';
-    }).join('');
-    view.innerHTML = '<div class="tabbar" id="slitKindTabs">' + chips + '</div><div id="slitBody"></div>';
-    Array.prototype.forEach.call(document.querySelectorAll('#slitKindTabs button'), function (btn) {
-      btn.onclick = function () { slitKind = btn.getAttribute('data-slkind'); renderSlitterHome(); };
-    });
+    view.innerHTML = '<div id="slitBody"></div>';
     renderSlitterKindBody();
   }
 
@@ -8522,7 +8541,7 @@
     document.getElementById('finishSlitBtn').onclick = function () {
       showConfirm('Finish session', 'Finish ' + currentSlitter.sessionId + '? Any pallet still being cut is not saved.', function () {
         runMutation('finishSlitterSession', [currentSlitter.sessionId, currentSlitter.operator, newOpId()],
-          function () { toast('Session finished'); openMetalsSection('slitter'); },
+          function () { toast('Session finished'); openSlitterKind(slitKind); },
           function (err) { toast('Error: ' + err.message); });
       }, 'Finish');
     };

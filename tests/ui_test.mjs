@@ -1308,7 +1308,10 @@ const base = {
   ok('A Liner counts as a press', await page.evaluate(() => machineParts('A Liner').type === 'Press' && machineParts('Press 13').num === '13'));
 
   await page.evaluate(() => { openProduction(); }); await page.waitForTimeout(100);
-  await page.click('#metalsPickSlitter'); await page.waitForTimeout(300);
+  await page.click('#metalsPickSlitter'); await page.waitForTimeout(200);
+  ok('slitter dept: two big buttons, Slitters and Scrolls', !!(await page.$('#slitPickSlitter')) && !!(await page.$('#slitPickScroll')) && !(await page.$('#slitMachineSel')));
+  await page.click('#slitPickSlitter'); await page.waitForTimeout(300);
+  ok('slitters: no Scroll tab on the screen', !(await page.$('[data-slkind]')) && (await page.textContent('#view')).includes('Slitters — Log'));
   const slitters = await page.$$eval('#slitMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
   ok('slitter: 1 H, 2 H, 7 A, 9 A', slitters.join() === '1 H,2 H,7 A,9 A', slitters);
   await page.fill('#slitOperator', 'Ann'); await page.selectOption('#slitMachineSel', '9 A');
@@ -1316,9 +1319,13 @@ const base = {
   ok('slitter: starts on 9 A', calls.filter((c) => c.fn === 'createSlitterSession')[0].args.slice(0, 2).join() === 'Slitter,9 A');
   await page.evaluate(() => { openProduction(); }); await page.waitForTimeout(100);
   await page.click('#metalsPickSlitter'); await page.waitForTimeout(200);
-  await page.click('[data-slkind="Scroll"]'); await page.waitForTimeout(200);
+  await page.click('#slitPickScroll'); await page.waitForTimeout(200);
   const scrolls = await page.$$eval('#slitMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
   ok('scrolls: 2 SS, 3 SS', scrolls.join() === '2 SS,3 SS', scrolls);
+  await page.click('#backBtn'); await page.waitForTimeout(150);
+  ok('back from Scrolls: the two buttons again', !!(await page.$('#slitPickScroll')));
+  await page.click('#backBtn'); await page.waitForTimeout(150);
+  ok('back again: Metals', !!(await page.$('#metalsPickSlitter')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
