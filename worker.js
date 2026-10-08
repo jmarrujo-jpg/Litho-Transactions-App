@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'run-76', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'load-78', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -1880,6 +1880,21 @@ function receiverOut(o) {
     createdAt: String(o['Created At'] || ''), createdBy: String(o['Created By'] || ''),
     mills: keptList(o['Mill Numbers']), keptTickets: keptList(o['Tickets']), row: o.__row };
 }
+// {cut load's Skid ID: [source Skid IDs]} from the Slitter Pallets compositions (one read).
+async function cutFromMap(sheets) {
+  const map = {};
+  try {
+    (await readObjects(sheets, SLITTER_PALLETS)).rows.forEach((p) => {
+      const id = String(p['Skid ID'] || '').trim();
+      if (!id) return;
+      parseComposition(p['Composition']).forEach((c) => {
+        const src = String((c && c.skidId) || '').trim();
+        if (src && (map[id] = map[id] || []).indexOf(src) === -1) map[id].push(src);
+      });
+    });
+  } catch (e) { /* no Slitter Pallets tab yet */ }
+  return map;
+}
 async function receiverMap(sheets) {
   const map = {};
   try {
@@ -1892,9 +1907,27 @@ async function receiverMap(sheets) {
 // A coil-changeover skid (or a piece cut from one) holds steel from two coils, so it has every
 // receiver those coils came in on: the first comes back as receiver/receiverName/…, the others in
 // moreReceivers [{ receiver, receiverName, receiverLink, receiverFrom }].
-function receiverTrace(o, ctx) {
-  const first = receiverTraceOne(o, ctx), more = [], seen = {};
+// A slitter / scroll LOAD is cut from one or more skids, and each of those can have its own
+// receiver(s) — so a load has every receiver of every skid it was cut from (a mixed load, several).
+// Its sources: the 'Cut From' column (Skid IDs) or, for loads made before that, the Slitter Pallets
+// composition (ctx.cutFrom).
+function cutSourcesOf(o, ctx) {
+  const ids = String(o['Cut From'] || '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  const sid = String(o['Skid ID'] || '').trim();
+  ((ctx.cutFrom && ctx.cutFrom[sid]) || []).forEach((x) => { if (ids.indexOf(x) === -1) ids.push(x); });
+  return ids.filter((x) => x !== sid);
+}
+function receiverTrace(o, ctx, depth) {
+  depth = depth || 0;
+  let first = receiverTraceOne(o, ctx);
+  const more = [], seen = {};
   if (first.receiver) seen[first.receiver] = 1;
+  const add = (r, fromName) => {
+    if (!r.receiver || seen[r.receiver]) return;
+    seen[r.receiver] = 1;
+    const x = { receiver: r.receiver, receiverName: r.receiverName, receiverLink: r.receiverLink, receiverFrom: r.receiverFrom || fromName };
+    if (!first.receiver) first = x; else more.push(x);
+  };
   let cur = o;
   const walked = {};
   for (let i = 0; i < 25 && cur; i++) {
@@ -1904,6 +1937,17 @@ function receiverTrace(o, ctx) {
       walked['a' + also] = 1;
       const r = receiverTraceOne(p, ctx);
       if (r.receiver && !seen[r.receiver]) { seen[r.receiver] = 1; more.push(Object.assign({}, r, { receiverFrom: r.receiverFrom || p['Ticket'] || also })); }
+    }
+    if (depth < 4) {
+      cutSourcesOf(cur, ctx).forEach((id) => {
+        const src = ctx.skids ? ctx.skids[id] : null;
+        if (!src || walked['c' + id]) return;
+        walked['c' + id] = 1;
+        const name = String(src['Ticket'] || id);
+        const r = receiverTrace(src, ctx, depth + 1);   // the source may be a changeover skid with two
+        add(r, name);
+        (r.moreReceivers || []).forEach((m) => add(m, name));
+      });
     }
     const sp = String(cur['Split Of'] || '').trim();
     if (!sp || walked['s' + sp]) break;
@@ -2030,7 +2074,7 @@ async function keepReceiverNumbers(sheets) {
 async function getReceivers(sheets) {
   const master = await readTab(sheets, MASTER);
   const receivers = await receiverMap(sheets);
-  const ctx = { skids: {}, tickets: {}, receivers };
+  const ctx = { skids: {}, tickets: {}, receivers, cutFrom: await cutFromMap(sheets) };
   master.rows.forEach((o) => {
     if (o['Skid ID']) ctx.skids[String(o['Skid ID']).trim()] = o;
     const t = String(o['Ticket'] || '').trim(); if (t && !ctx.tickets[t]) ctx.tickets[t] = o;
@@ -2099,8 +2143,8 @@ function driveError(e) {
 // Tickets not on any receiver (own, inherited or by a kept number) — what Find in Drive looks for.
 // A mill made of several ("A / B", slitter pallets) isn't searched: those come from tickets that
 // have receivers of their own.
-function driveTickets(masterRows, receivers) {
-  const ctx = { skids: {}, tickets: {}, receivers };
+function driveTickets(masterRows, receivers, cutFrom) {
+  const ctx = { skids: {}, tickets: {}, receivers, cutFrom: cutFrom || {} };
   masterRows.forEach((o) => {
     if (o['Skid ID']) ctx.skids[String(o['Skid ID']).trim()] = o;
     const t = String(o['Ticket'] || '').trim(); if (t && !ctx.tickets[t]) ctx.tickets[t] = o;
@@ -2145,7 +2189,7 @@ async function driveSearchMills(sheets, env, again) {
   const master = await readTab(sheets, MASTER);
   const receivers = await receiverMap(sheets);
   const want = {};
-  driveTickets(master.rows, receivers).forEach((t) => { if (t.searchable) want[t.mill] = 1; });
+  driveTickets(master.rows, receivers, await cutFromMap(sheets)).forEach((t) => { if (t.searchable) want[t.mill] = 1; });
   await ensureTab(sheets, DRIVE_SEARCH, DRIVE_SEARCH_HEADERS);
   let hdr = (await readTab(sheets, DRIVE_SEARCH)).headers;
   for (const col of DRIVE_SEARCH_HEADERS) hdr = (await ensureColumn(sheets, DRIVE_SEARCH, hdr, col)).headers;
@@ -2198,7 +2242,7 @@ async function driveSearchMills(sheets, env, again) {
 async function getDriveMatches(sheets, env) {
   const master = await readTab(sheets, MASTER);
   const receivers = await receiverMap(sheets);
-  const tickets = driveTickets(master.rows, receivers);
+  const tickets = driveTickets(master.rows, receivers, await cutFromMap(sheets));
   const log = await driveSearchLog(sheets, driveScope(env));
   const dest = receiverFolderId(env);
   const brief = (t) => ({ skidId: t.skidId, ticket: t.ticket, status: t.status, mill: t.mill, po: t.po, supplier: t.supplier, qty: t.qty });
@@ -3542,6 +3586,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cost');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Litho');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut From');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
   const loadNo = nextLoadNumber(master.rows);
@@ -3568,6 +3613,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const row = {
     'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'Status': STATUS.CUT, 'QTY/LOAD': num(outputCount),
     'Mill': mills.join(' / '), 'Cut Type': cutType,
+    'Cut From': parentRows.map((p) => String(p['Skid ID']).trim()).filter((x, i, a) => a.indexOf(x) === i).join(', '),   // its receivers come from these
     'System Notes': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
   };
@@ -3988,7 +4034,8 @@ async function traceContext(sheets, masterRows) {
     const t = String(o['Ticket'] || '').trim(); if (t && !tickets[t]) tickets[t] = o;
   });
   const receivers = await receiverMap(sheets);
-  return { bySkid, byTicket, jobs, skids, tickets, receivers };
+  const cutFrom = await cutFromMap(sheets);
+  return { bySkid, byTicket, jobs, skids, tickets, receivers, cutFrom };
 }
 function traceOf(o, ctx) {
   const sid = String(o['Skid ID'] || '').trim();

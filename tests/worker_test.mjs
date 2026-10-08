@@ -1134,5 +1134,43 @@ await concurrency(envBase, 'in-worker lock');
   ok('tickets carry the day they were used', all.ok && all.result.filter((t) => t.skidId === 'SKD-000006')[0].usedOn === '2026-10-01', all.ok && all.result.filter((t) => t.skidId === 'SKD-000006')[0]);
 }
 
+// 34. A slitter / scroll LOAD keeps every receiver of the skids it was cut from
+{ const RH = ['Receiver ID', 'File Name', 'Date Received', 'Supplier', 'POs', 'Drive Link', 'Source File ID', 'Notes', 'Mill Numbers', 'Tickets', 'Created At', 'Created By', 'Last Updated At', 'Op ID'];
+  const H = MASTER_H.concat(['Receiver', 'Also Cut From', 'Split Of']);
+  const sk = (t, id, status, extra) => { const o = Object.assign({ 'Ticket': t, 'Skid ID': id, 'Status': status, 'QTY/LOAD': 500 }, extra); return H.map((h) => (o[h] == null ? '' : o[h])); };
+  const fk = makeFake({ [SID]: { 'Steel Tickets': [H,
+    sk('A-1', 'SKD-000030', 'Current', { 'Mill': 'MA', 'Receiver': 'R-00011' }),
+    sk('B-1', 'SKD-000031', 'Current', { 'Mill': 'MB', 'Receiver': 'R-00118' }),
+    sk('X-1', 'SKD-000032', 'Current', { 'Mill': 'MX / MY', 'Receiver': 'R-00011', 'Also Cut From': 'SKD-000033' }),   // a coil-changeover skid
+    sk('Y-1', 'SKD-000033', 'Used', { 'Mill': 'MY', 'Receiver': 'R-00200' }),
+    sk('1001', 'SKD-000040', 'Cut', { 'Mill': 'MA / MB', 'Cut Type': 'Slit', 'Load #': 1001 }),   // an older load: sources only in Slitter Pallets
+  ], 'Transactions': [TX_H], 'Receivers': [RH,
+    ['R-00011', '26-01-01--KG--R-00011', '2026-01-01', 'KG', '', 'https://drive/r11', '', '', '', '', '', '', '', ''],
+    ['R-00118', '26-06-12--TCC--R-00118', '2026-06-12', 'TCC', '', 'https://drive/r118', '', '', '', '', '', '', '', ''],
+    ['R-00200', '26-07-01--TCC--R-00200', '2026-07-01', 'TCC', '', '', '', '', '', '', '', '', '', ''],
+  ], 'Slitter Pallets': [['Pallet ID', 'Session ID', 'Created On', 'Output Count', 'Composition', 'Skid ID', 'Load #', 'Notes', 'Op ID'],
+    ['PAL-00001', 'SLT-00001', '2026-10-01', 50, JSON.stringify([{ skidId: 'SKD-000030', ticket: 'A-1', mill: 'MA', strips: 20 }, { skidId: 'SKD-000031', ticket: 'B-1', mill: 'MB', strips: 30 }]), 'SKD-000040', 1001, '', 'op-x'],
+  ] } });
+  globalThis.fetch = fk.fetchImpl;
+  const h = await call('getSkidHistory', ['SKD-000040']);
+  ok('older load: both source skids\' receivers', h.ok && h.result.skid.receiver === 'R-00011' && h.result.skid.receiverFrom === 'A-1'
+    && h.result.skid.moreReceivers.map((r) => r.receiver + '<' + r.receiverFrom).join() === 'R-00118<B-1', h.ok ? h.result.skid : h);
+  // A new load cut from B-1, then (mid-pallet) the changeover skid X-1: three receivers in all.
+  const sess = await call('createSlitterSession', ['Scroll', '2 SS', 'Ann', '', 'op-34-s']);
+  const sid = sess.result.sessionId;
+  await call('slitterLoadSkid', [sid, 'SKD-000031', 'Ann', 'op-34-l']);
+  await call('slitterSwitchSkid', [sid, 20, 'SKD-000032', 'Ann', 'op-34-w']);
+  const fin = await call('slitterFinishPallet', [sid, 50, '', 'Ann', 'op-34-f']);
+  ok('pallet made', fin.ok && fin.result.newLoadNo, fin);
+  const load = fk.rows(SID, 'Steel Tickets').filter((o) => o['Cut Type'] && o['Skid ID'] !== 'SKD-000040')[0];
+  ok('the new load records what it was cut from', load && load['Cut From'] === 'SKD-000031, SKD-000032', load);
+  const h2 = await call('getSkidHistory', [load['Skid ID']]);
+  const all = h2.ok ? [h2.result.skid.receiver].concat(h2.result.skid.moreReceivers.map((r) => r.receiver)) : [];
+  ok('new load: every receiver, the changeover skid\'s two included', all.join() === 'R-00118,R-00011,R-00200', h2.ok ? h2.result.skid : h2);
+  const rc = await call('getReceivers', []);
+  const t = rc.ok && rc.result.tickets.filter((x) => x.skidId === load['Skid ID'])[0];
+  ok('Receivers screen: the load sits under all three', t && t.via === 'R-00118' && t.alsoVia.map((a) => a.receiver).join() === 'R-00011,R-00200', t);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

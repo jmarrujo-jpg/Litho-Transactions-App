@@ -233,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.77.0</span>
+      <span class="version" id="appVersion">v1.78.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2241,7 +2241,8 @@
       (link ? 'Open file' : 'Search Drive') + '</a>';
   }
   // A receiver's name as a link straight to its scan (the saved link, else a Drive search).
-  // The other receivers of a skid cut from two coils (a coil changeover): " + R-00012 (from 090326-005)".
+  // The other receivers of a skid made from several sources — a coil changeover, or a slitter / scroll
+  // LOAD cut from several skids: " + R-00012 (from 090326-005)".
   function rcvMoreHtml(t, style) {
     return (t.moreReceivers || []).map(function (r) {
       return ' + ' + rcvNameLink(r.receiver, r.receiverName, r.receiverLink, style) + (r.receiverFrom ? ' <span class="sub">(from ' + esc(r.receiverFrom) + ')</span>' : '');
@@ -2874,7 +2875,7 @@
         : (adding.length ? '' : '<div class="sub">None yet. Find them below.</div>')) +
       (pieces.length ? '<div class="sub" style="margin-top:8px">Pieces that take it from the ticket they were cut from:</div>' + pieces.map(function (t) {
         var a = t.via === id ? null : (t.alsoVia || []).filter(function (x) { return x.receiver === id; })[0];
-        return rcvTicketLine(t, '', 'from ' + (a ? a.from + ' (coil changeover)' : t.viaFrom));
+        return rcvTicketLine(t, '', 'from ' + (a ? a.from : t.viaFrom));   // a changeover skid or a mixed slitter / scroll load
       }).join('') : '') +
       (found.length ? '<div class="row" style="align-items:center;gap:8px;margin-top:10px"><div class="sub" style="flex:1;color:var(--accent);font-weight:600">Found by a saved number (not on it yet):</div>' +
         (foundNotYet.length ? '<button class="btn secondary" id="rcvAddFound" style="padding:6px 10px;font-size:13px">Add all ' + foundNotYet.length + '</button>' : '') + '</div>' +
