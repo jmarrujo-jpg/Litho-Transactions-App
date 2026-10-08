@@ -233,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.79.0</span>
+      <span class="version" id="appVersion">v1.80.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -8513,7 +8513,10 @@
           runMutation('slitterFinishPallet', [currentSlitter.sessionId, strips, '', currentSlitter.operator, newOpId()],
             function (updated) {
               if (updated && updated.newLoadNo) {
-                showInfo('Pallet done — LOAD ' + updated.newLoadNo, 'Write "LOAD ' + updated.newLoadNo + '" on the pallet. That is now its ticket number.');
+                showInfo('Pallet done — LOAD ' + updated.newLoadNo, L('Write "LOAD ' + updated.newLoadNo + '" on the pallet. That is now its ticket number.' +
+                    (updated.newLoadWeight ? ' Estimated weight: about ' + updated.newLoadWeight + ' lb.' : ''),
+                  'Escriba "LOAD ' + updated.newLoadNo + '" en la tarima. Ese es ahora su número de ticket.' +
+                    (updated.newLoadWeight ? ' Peso estimado: unas ' + updated.newLoadWeight + ' lb.' : '')));
               } else if (updated && updated.duplicate) { toast('Already saved'); }
               slitPickMode = null; slitPendingStrips = 0;
               // Refresh the shared cache so the new runnable Cut skid appears in the Line/Press picker.

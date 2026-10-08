@@ -12,12 +12,15 @@
  *   ALLOWED_ORIGIN      (var)     e.g. https://jmarrujo-jpg.github.io  (optional; default *)
  *   API_TOKEN           (secret)  optional shared token; if set, the client must send it
  *   SNAPSHOT_SHEET_ID   (var)     spreadsheet id of the "Steel Snapshot" archive
+ *   SPEC_SHEET_ID       (var)     spreadsheet with the CanSpecs / EndSpecs tabs (optional; defaults
+ *                                 to the known one). Share it with the service account (Viewer is enough).
  *   WRITE_LOCK          (Durable Object binding -> class WriteLock)  recommended: makes every
  *                       write run one at a time across all devices (see "write lock" below).
  *                       Optional — without it the app still works, with a weaker per-server lock.
  */
 
 const DEFAULT_SHEET_ID = '12Irb-isWOO14SrlGglcgnHc8oi0mLwW54LNo7pBHKjg';
+const DEFAULT_SPEC_SHEET_ID = '1NVCx-n9_Zha9u1HPyi3hGLBQ4EyWHx7AbA4zs36hbYc';   // CanSpecs + EndSpecs
 const TZ = 'America/Los_Angeles';
 const SHEETS_TIMEOUT_MS = 30000;   // one Google call that hangs longer than this counts as failed
 const MASTER = 'Steel Tickets';
@@ -149,7 +152,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'load-79', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'weight-80', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -364,7 +367,7 @@ async function handle(fn, args, env) {
     case 'slitterSwitchSkid': // (sessionId, stripsOnPalletNow, newSkidId, operator, opId)
       return slitterSwitchSkid(sheets, args[0], args[1], args[2], args[3], args[4]);
     case 'slitterFinishPallet': // (sessionId, stripsOnPalletNow, notes, operator, opId)
-      return slitterFinishPallet(sheets, args[0], args[1], args[2], args[3], args[4]);
+      return slitterFinishPallet(sheets, args[0], args[1], args[2], args[3], args[4], env);
     case 'removeSlitterPallet': // (sessionId, palletId, operator, opId)
       return removeSlitterPallet(sheets, args[0], args[1], args[2], args[3]);
     case 'finishSlitterSession': // (sessionId, operator, opId)
@@ -3571,6 +3574,83 @@ function nextLoadNumber(rows) {
   return max + 1;
 }
 
+// ---- Load weight estimate (for the costing app's  Cost × (Weight ÷ BW)) ----
+// The slitter / scroll only counts pieces, so when a pallet is saved its weight is estimated from the
+// skids it was cut from:  pieces × (skid Weight ÷ skid sheets) ÷ pieces per sheet.
+// Pieces per sheet come from the spec sheet (SPEC_SHEET_ID), by the source skid's End Use:
+//   - a can body (End Use like 603X700): CanSpecs #OUT = body blanks per sheet;
+//   - an end (End Use like 603 ENDS): EndSpecs #OUT is ends per sheet, so strips per sheet =
+//     #OUT ÷ ends per strip, where ends per strip = ⌊strip length ÷ cut edge⌋, ×2 when the strip is
+//     wide enough for two staggered rows (double die).
+// The row is the one whose sheet size matches the ticket's Width × Length (either way round, within
+// 0.1"); several rows → the highest #OUT. No size match → the highest #OUT for that End Use (rough
+// is fine — it's for an estimate). Unknown End Use, or a skid without weight / sheets → no estimate.
+async function loadSpecs(sheets, env) {
+  const id = (env && env.SPEC_SHEET_ID) || DEFAULT_SPEC_SHEET_ID;
+  const out = { cans: {}, ends: {}, ok: false };
+  const grab = async (tab, first) => {
+    let v;
+    try { v = await sheets.readFrom(id, "'" + tab + "'!A1:T500"); } catch (e) { return []; }
+    const hi = v.findIndex((r) => String((r || [])[0] || '').trim().toLowerCase() === first);
+    if (hi === -1) return [];
+    const h = v[hi].map((x) => String(x || '').trim());
+    return v.slice(hi + 1).filter((r) => r && String(r[0] || '').trim()).map((r) => { const o = {}; h.forEach((k, i) => { o[k] = r[i]; }); return o; });
+  };
+  (await grab('CanSpecs', 'can size')).forEach((r) => {
+    const code = specCode(r['Can Size']); const outN = num(r['#OUT']);
+    if (code && code.kind === 'can' && outN > 0) (out.cans[code.code] = out.cans[code.code] || []).push({ a: num(r['Sheet Dia']), b: num(r['Coil Width']), per: outN, name: String(r['Can Size']) });
+  });
+  (await grab('EndSpecs', 'end size')).forEach((r) => {
+    const code = specCode(r['End Size']); const outN = num(r['#OUT']);
+    const len = num(r['Strip Length (in)']), edge = num(r['Cut Edge (in)']), wid = num(r['Strip Width (in)']);
+    if (!code || code.kind !== 'end' || !(outN > 0)) return;
+    const perStrip = edge > 0 && len > 0 ? Math.floor(len / edge) * (wid >= 1.8 * edge ? 2 : 1) : 0;
+    const strips = perStrip > 0 ? Math.round(outN / perStrip) : 0;
+    if (strips > 0) (out.ends[code.code] = out.ends[code.code] || []).push({ a: num(r['Sheet Dim 1']), b: num(r['Sheet Dim 2']), per: strips, name: String(r['End Size']) });
+  });
+  out.ok = Object.keys(out.cans).length > 0 || Object.keys(out.ends).length > 0;
+  return out;
+}
+// "603X700 S/S" / "603X700" -> can 603X700 · "603 ENDS" / "603 END SCROLL" / "507 SF" / "507 S/F PLUG" -> end 603 / 507
+function specCode(v) {
+  const t = String(v || '').trim().toUpperCase();
+  let m = t.match(/^(\d{3})\s*X\s*(\d{3})/);
+  if (m) return { kind: 'can', code: m[1] + 'X' + m[2] };
+  m = t.match(/^(\d{3})\s*(ENDS?|SF|S\/F)\b/);
+  if (m) return { kind: 'end', code: m[1] };
+  return null;
+}
+// Pieces per sheet for one source skid: { per, how: 'spec' | 'spec (size not listed)', name } or null.
+function piecesPerSheet(src, specs) {
+  if (!specs || !specs.ok) return null;
+  const code = specCode(src['End Use']);
+  if (!code) return null;
+  const rows = (code.kind === 'can' ? specs.cans : specs.ends)[code.code];
+  if (!rows || !rows.length) return null;
+  const w = num(src['Width']), l = num(src['Length']), near = (x, y) => Math.abs(x - y) <= 0.1;
+  const hit = rows.filter((r) => w > 0 && l > 0 && ((near(r.a, w) && near(r.b, l)) || (near(r.a, l) && near(r.b, w))));
+  const best = (list) => list.reduce((a, r) => (r.per > a.per ? r : a));
+  if (hit.length) { const r = best(hit); return { per: r.per, how: 'spec', name: r.name }; }
+  const r = best(rows);
+  return { per: r.per, how: 'spec (size not listed)', name: r.name };
+}
+// The estimate for a new load from its composition [{skidId, strips}] and the parent rows.
+function estimateLoadWeight(comp, parentsById, specs) {
+  let lbs = 0, rough = false;
+  for (const c of comp) {
+    const src = parentsById[String((c && c.skidId) || '').trim()];
+    const n = num(c && c.strips != null ? c.strips : (c && c.qty));
+    if (!src || !(n > 0)) continue;
+    const pps = piecesPerSheet(src, specs);
+    const wt = num(src['Weight']), sheets = num(src['QTY/LOAD']);
+    if (!pps || !(wt > 0) || !(sheets > 0)) return { weight: '', basis: 'No estimate (' + (!pps ? 'End Use ' + (src['End Use'] || '?') + ' not on the spec sheet' : 'skid ' + (src['Ticket'] || '') + ' has no weight / sheets') + ')' };
+    if (pps.how !== 'spec') rough = true;
+    lbs += n * (wt / sheets) / pps.per;
+  }
+  if (!(lbs > 0)) return { weight: '', basis: 'No estimate' };
+  return { weight: Math.round(lbs), basis: rough ? 'Estimated (sheet size not on spec — used the highest #OUT)' : 'Estimated from spec' };
+}
+
 // Mint a runnable Steel Tickets skid for a cut pallet. It takes its parent skids' status: WIP when
 // any was coated (WIP / litho cost), else Current — so it counts as stock like any skid. Its Cut Type
 // keeps it off the Litho screens and on the right machines (slit loads on Lines, scroll loads on
@@ -3579,7 +3659,7 @@ function nextLoadNumber(rows) {
 // Pallets row. Cost and Litho are carried down as the simple average of the parent skids' values
 // (two independent averages — never combined; blanks/zeros skipped). Weight is deferred. Returns
 // { skidId, loadNo }.
-async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machine) {
+async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machine, specs) {
   let master = await readTab(sheets, MASTER);
   let ens = await ensureColumn(sheets, MASTER, master.headers, 'Mill');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut Type');
@@ -3588,6 +3668,8 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Litho');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'System Notes');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut From');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Weight');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'Weight Basis');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
   const loadNo = nextLoadNumber(master.rows);
@@ -3619,6 +3701,11 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
     'System Notes': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
   };
+  const byId = {};
+  parentRows.forEach((p) => { byId[String(p['Skid ID']).trim()] = p; });
+  const est = estimateLoadWeight(comp, byId, specs);
+  row['Weight'] = est.weight;                            // estimated: pieces × weight per sheet ÷ pieces per sheet
+  row['Weight Basis'] = est.basis;
   if (costAvg != null) row['Cost'] = costAvg;            // averaged steel cost of the parents
   if (lithoAvg != null) row['Litho'] = lithoAvg;         // averaged litho cost of the parents (kept separate)
   if (src) {
@@ -3634,7 +3721,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const updRange = res && res.updates && res.updates.updatedRange ? String(res.updates.updatedRange) : '';
   const rm = updRange.match(/(\d+)\s*$/);
   if (rm) await stampCells(sheets, MASTER, parseInt(rm[1], 10), master.map, row);   // stamp every field by column name
-  return { skidId: skidId, loadNo: loadNo };
+  return { skidId: skidId, loadNo: loadNo, weight: est.weight, weightBasis: est.basis };
 }
 
 // Read a session row, making sure the in-progress-pallet state columns exist and the session is open.
@@ -3712,7 +3799,7 @@ async function slitterSwitchSkid(sheets, sessionId, stripsOnPalletNow, newSkidId
 // PALLET FULL: record the final piece count, mint the runnable LOAD Cut skid with the exact
 // per-ticket strip split, and start the next pallet already loaded with the still-running skid
 // (the finished skids auto-drop — they belonged to the pallet just closed).
-async function slitterFinishPallet(sheets, sessionId, stripsOnPalletNow, notes, operator, opId) {
+async function slitterFinishPallet(sheets, sessionId, stripsOnPalletNow, notes, operator, opId, env) {
   await ensureTab(sheets, SLITTER_PALLETS, SLITTER_PALLET_HEADERS);
   const p0 = await readTab(sheets, SLITTER_PALLETS);
   if (opId && p0.headers.indexOf('Op ID') !== -1) {
@@ -3738,7 +3825,8 @@ async function slitterFinishPallet(sheets, sessionId, stripsOnPalletNow, notes, 
   let n = existing.length + 1;
   while (existing.some((o) => String(o['Pallet ID']).trim() === sessionId + '-P' + n)) n++;
   const palletId = sessionId + '-P' + n;
-  const cut = await createCutSkid(sheets, palletId, cutType, total, finalComp, s['Slitter']);
+  const specs = await loadSpecs(sheets, env);
+  const cut = await createCutSkid(sheets, palletId, cutType, total, finalComp, s['Slitter'], specs);
   let ens = await ensureColumn(sheets, SLITTER_PALLETS, p0.headers, 'Skid ID');
   ens = await ensureColumn(sheets, SLITTER_PALLETS, ens.headers, 'Load #');
   ens = await ensureColumn(sheets, SLITTER_PALLETS, ens.headers, 'Op ID');
@@ -3754,6 +3842,8 @@ async function slitterFinishPallet(sheets, sessionId, stripsOnPalletNow, notes, 
   await recountSlitter(sheets, sessionId);
   const detail = await getSlitterDetail(sheets, sessionId);
   detail.newLoadNo = cut.loadNo;
+  detail.newLoadWeight = cut.weight;
+  detail.newLoadWeightBasis = cut.weightBasis;
   return detail;
 }
 

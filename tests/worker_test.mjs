@@ -1182,5 +1182,58 @@ await concurrency(envBase, 'in-worker lock');
   ok('off a run, a load goes back to its own status', fk.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === load2['Skid ID'])[0]['Status'] === 'WIP');
 }
 
+// 35. A new load's weight is estimated from the spec sheet (CanSpecs / EndSpecs), highest #OUT wins
+{ const SPEC = '1NVCx-n9_Zha9u1HPyi3hGLBQ4EyWHx7AbA4zs36hbYc';
+  const H = MASTER_H.concat(['Cut From']);
+  const sk = (t, id, extra) => { const o = Object.assign({ 'Ticket': t, 'Skid ID': id, 'Status': 'Current', 'QTY/LOAD': 1000 }, extra); return H.map((h) => (o[h] == null ? '' : o[h])); };
+  const CH = ['Can Size', 'Customer', 'Sheet Dia', 'Coil Width', '#OUT', 'Blank Dia', 'Blank Height', 'Basis Weight'];
+  const EH = ['End Size', 'Customer', 'Sheet Dim 1', 'Sheet Dim 2', '#OUT', 'Strip Length (in)', 'Cut Edge (in)', 'Strip Width (in)'];
+  const fk = makeFake({ [SID]: { 'Steel Tickets': [H,
+      sk('A-1', 'SKD-000050', { 'End Use': '603X700', 'Width': 36, 'Length': 38.281, 'Weight': 5000 }),
+      sk('B-1', 'SKD-000051', { 'End Use': '603 ENDS', 'Width': 30.6875, 'Length': 34.005, 'Weight': 2500 }),
+      sk('C-1', 'SKD-000052', { 'End Use': '401X508', 'Width': 34, 'Length': 97.093, 'Weight': 3600 }),
+      sk('D-1', 'SKD-000053', { 'End Use': '211 DIA', 'Width': 32.125, 'Length': 32.75, 'Weight': 4000 }),
+    ], 'Transactions': [TX_H] },
+    [SPEC]: {
+      'CanSpecs': [['CAN BODY SCRAP — all sizes & sheet combinations'], ['Body blanks are rectangles'], CH,
+        ['603X700 S/S', 'ALL', 38.281, 36, 10, 19.015, 7.165, '85-100'],
+        ['603X700 S/S', 'OTHER', 38.281, 36, 9, 19.015, 7.165, '85-100'],
+        ['603X700 S/S 8-OUT', 'ALL', 38.281, 28.87, 8, 19.015, 7.165, '85-100'],
+        ['401X508 S/S', 'COFFEE', 37.093, 34, 18, 12.282, 5.645, '75']],
+      'EndSpecs': [['CAN END SCRAP — all sizes & sheet combinations'], ['Offset (in):', 0.339], EH,
+        ['603 END RECT.', 'STOCK', 27.75, 34.005, 20, 34.005, 6.769, 6.869],
+        ['603 END SCROLL', 'STOCK', 34.005, 30.6875, 25, 34.005, 6.769, 6.869],
+        ['401 END SCROLL', 'STOCK', 32.163, 32.6875, 56, 32.163, 4.540, 8.600]],
+    } });
+  globalThis.fetch = fk.fetchImpl;
+  const loadOf = (r) => fk.rows(SID, 'Steel Tickets').filter((o) => String(o['Ticket']) === String(r.result.newLoadNo))[0];
+  const s1 = await call('createSlitterSession', ['Slitter', '9 A', 'Ann', '', 'op-35-s1']);
+  await call('slitterLoadSkid', [s1.result.sessionId, 'SKD-000050', 'Ann', 'op-35-l1']);
+  const p1 = await call('slitterFinishPallet', [s1.result.sessionId, 300, '', 'Ann', 'op-35-f1']);
+  ok('body blanks: 300 × (5 lb a sheet ÷ 10 out, the higher of the 36" rows) = 150 lb', p1.ok && p1.result.newLoadWeight === 150 && loadOf(p1)['Weight'] === 150 && loadOf(p1)['Weight Basis'] === 'Estimated from spec', p1.ok ? loadOf(p1) : p1);
+  const s2 = await call('createSlitterSession', ['Scroll', '2 SS', 'Ann', '', 'op-35-s2']);
+  await call('slitterLoadSkid', [s2.result.sessionId, 'SKD-000051', 'Ann', 'op-35-l2']);
+  const p2 = await call('slitterFinishPallet', [s2.result.sessionId, 600, '', 'Ann', 'op-35-f2']);
+  ok('scroll strips: 25 ends ÷ 5 a strip = 5 strips a sheet; 600 × 2.5 ÷ 5 = 300 lb', p2.ok && p2.result.newLoadWeight === 300, p2.ok ? loadOf(p2) : p2);
+  await call('slitterLoadSkid', [s1.result.sessionId, 'SKD-000052', 'Ann', 'op-35-l3']);
+  const p3 = await call('slitterFinishPallet', [s1.result.sessionId, 100, '', 'Ann', 'op-35-f3']);
+  ok('sheet size not on the spec: highest #OUT for that End Use (100 × 3.6 ÷ 18 = 20 lb), and it says so', p3.ok && p3.result.newLoadWeight === 20 && /not on spec/.test(loadOf(p3)['Weight Basis']), p3.ok ? loadOf(p3) : p3);
+  await call('slitterLoadSkid', [s1.result.sessionId, 'SKD-000053', 'Ann', 'op-35-l4']);
+  const p4 = await call('slitterFinishPallet', [s1.result.sessionId, 50, '', 'Ann', 'op-35-f4']);
+  ok('End Use not on the spec sheet: no weight, and the reason is saved', p4.ok && !p4.result.newLoadWeight && /211 DIA not on the spec sheet/.test(loadOf(p4)['Weight Basis']), p4.ok ? loadOf(p4) : p4);
+  // A pallet that ran out mid-way: each skid's share adds up (A-1 for 100, then B-1 for 50 more).
+  await call('slitterLoadSkid', [s2.result.sessionId, 'SKD-000050', 'Ann', 'op-35-l5']);
+  await call('slitterSwitchSkid', [s2.result.sessionId, 100, 'SKD-000051', 'Ann', 'op-35-w5']);
+  const p5 = await call('slitterFinishPallet', [s2.result.sessionId, 150, '', 'Ann', 'op-35-f5']);
+  ok('a two-skid pallet: 100 × 0.5 + 50 × 0.5 = 75 lb', p5.ok && p5.result.newLoadWeight === 75, p5.ok ? loadOf(p5) : p5);
+}
+// 35b. The spec sheet not shared with the Worker: pallets still save, just without a weight
+{ const f = fresh();
+  const s1 = await call('createSlitterSession', ['Slitter', '9 A', 'Ann', '', 'op-35b-s']);
+  await call('slitterLoadSkid', [s1.result.sessionId, 'SKD-000001', 'Ann', 'op-35b-l']);
+  const p = await call('slitterFinishPallet', [s1.result.sessionId, 40, '', 'Ann', 'op-35b-f']);
+  ok('no spec sheet: the pallet is still made', p.ok && p.result.newLoadNo && !p.result.newLoadWeight, p);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
