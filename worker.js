@@ -149,7 +149,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'load-78', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'load-79', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -2643,9 +2643,9 @@ async function recountRun(sheets, runId, runRow, runsMap) {
   return count;
 }
 
-// Where a skid goes back to when it comes off a run: a cut pallet stays Cut, coated steel WIP, raw Current.
+// Where a skid goes back to when it comes off a run: coated steel (a load cut from coated steel too)
+// WIP, raw Current.
 function stockStatusOf(obj) {
-  if (String(obj['Cut Type'] || '').trim()) return STATUS.CUT;
   return num(obj['Litho']) > 0 ? STATUS.WIP : STATUS.CURRENT;
 }
 
@@ -3465,7 +3465,7 @@ async function importStaging(sheets, opId) {
 // machine. One source skid is "loaded" (Active Skid) at a time and cut into the in-progress child
 // pallet. When it runs out mid-pallet the operator switches to the next skid (that source flips to
 // Used, and its piece count is closed onto the pallet's 'Pallet Coils'); when the pallet is full it
-// becomes a runnable Steel Tickets skid (Status 'Cut') carrying the exact per-ticket strip split, so
+// becomes a runnable Steel Tickets skid (Current, or WIP when cut from coated steel) carrying the exact per-ticket strip split, so
 // slit pallets run on the Metal Lines and scroll pallets on the Press. The still-running skid carries
 // over to the next pallet. Source sheet counts are NOT tracked — only the child output (cut pieces:
 // 'Body Blanks' on slitters, 'Strips' on scrolls).
@@ -3571,9 +3571,10 @@ function nextLoadNumber(rows) {
   return max + 1;
 }
 
-// Mint a runnable Steel Tickets skid for a cut pallet. Status 'Cut' keeps it out of the Litho /
-// Count / Job screens (which only look at Current/WIP/Pending) while making it selectable in the
-// metals run picker. Its Ticket IS the app-generated Load # — the primary, writable pallet number;
+// Mint a runnable Steel Tickets skid for a cut pallet. It takes its parent skids' status: WIP when
+// any was coated (WIP / litho cost), else Current — so it counts as stock like any skid. Its Cut Type
+// keeps it off the Litho screens and on the right machines (slit loads on Lines, scroll loads on
+// Presses). Loads made before this are Status 'Cut', which the app still reads the same way. Its Ticket IS the app-generated Load # — the primary, writable pallet number;
 // the parent tickets/mills live in Mill + Comments and the full composition stays on the Slitter
 // Pallets row. Cost and Litho are carried down as the simple average of the parent skids' values
 // (two independent averages — never combined; blanks/zeros skipped). Weight is deferred. Returns
@@ -3611,7 +3612,8 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const stripsOf = (c) => (c && c.strips != null ? c.strips : (c && c.qty) || 0);
   const parents = comp.map((c) => (c && c.ticket ? c.ticket : 'Mill ' + (c && c.mill)) + ' (' + stripsOf(c) + ')').join(', ');
   const row = {
-    'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'Status': STATUS.CUT, 'QTY/LOAD': num(outputCount),
+    'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'QTY/LOAD': num(outputCount),
+    'Status': parentRows.some((p) => String(p['Status'] || '').trim() === STATUS.WIP || num(p['Litho']) > 0) ? STATUS.WIP : STATUS.CURRENT,
     'Mill': mills.join(' / '), 'Cut Type': cutType,
     'Cut From': parentRows.map((p) => String(p['Skid ID']).trim()).filter((x, i, a) => a.indexOf(x) === i).join(', '),   // its receivers come from these
     'System Notes': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,

@@ -1588,6 +1588,13 @@ const base = {
   ok('delete: asks once more', (await page.textContent('#modalRoot')).includes('Delete this work session?'));
   await page.click('#modalOk'); await page.waitForTimeout(300);
   const del = calls.filter((c) => c.fn === 'deleteRun')[0];
+  const loads = await page.evaluate(() => {
+    allCache = [{ skidId: 'L1', ticket: '1001', status: 'Current', cutType: 'Slit' }, { skidId: 'L2', ticket: '1002', status: 'WIP', cutType: 'Scroll' },
+      { skidId: 'L3', ticket: '1003', status: 'Cut', cutType: 'Scroll' }, { skidId: 'S1', ticket: '7001', status: 'Current' }];
+    markCacheStatus('S1', 'Current');
+    return [prodPickList('Press').map((t) => t.skidId).join(), prodPickList('Line').map((t) => t.skidId).join(), queueCache.map((t) => t.skidId).join()];
+  });
+  ok('loads: Current / WIP loads stay on their own machines, off the Litho pickers', loads.join('|') === 'L2,L3,S1|L1,S1|S1', loads);
   ok('delete: deletes that run and goes back to Press', del && del.args[0] === 'RUN-00009' && del.args[1] === 'Ann' && !!(await page.$('#startRunBtn')), del && del.args);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();

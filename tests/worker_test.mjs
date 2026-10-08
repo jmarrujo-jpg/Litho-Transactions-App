@@ -1143,6 +1143,7 @@ await concurrency(envBase, 'in-worker lock');
     sk('B-1', 'SKD-000031', 'Current', { 'Mill': 'MB', 'Receiver': 'R-00118' }),
     sk('X-1', 'SKD-000032', 'Current', { 'Mill': 'MX / MY', 'Receiver': 'R-00011', 'Also Cut From': 'SKD-000033' }),   // a coil-changeover skid
     sk('Y-1', 'SKD-000033', 'Used', { 'Mill': 'MY', 'Receiver': 'R-00200' }),
+    sk('W-1', 'SKD-000034', 'WIP', { 'Mill': 'MW', 'Litho': 12 }),
     sk('1001', 'SKD-000040', 'Cut', { 'Mill': 'MA / MB', 'Cut Type': 'Slit', 'Load #': 1001 }),   // an older load: sources only in Slitter Pallets
   ], 'Transactions': [TX_H], 'Receivers': [RH,
     ['R-00011', '26-01-01--KG--R-00011', '2026-01-01', 'KG', '', 'https://drive/r11', '', '', '', '', '', '', '', ''],
@@ -1170,6 +1171,15 @@ await concurrency(envBase, 'in-worker lock');
   const rc = await call('getReceivers', []);
   const t = rc.ok && rc.result.tickets.filter((x) => x.skidId === load['Skid ID'])[0];
   ok('Receivers screen: the load sits under all three', t && t.via === 'R-00118' && t.alsoVia.map((a) => a.receiver).join() === 'R-00011,R-00200', t);
+  ok('a load cut from raw steel is Current', load['Status'] === 'Current', load['Status']);
+  await call('slitterSwitchSkid', [sid, 10, 'SKD-000034', 'Ann', 'op-34-w2']);
+  await call('slitterFinishPallet', [sid, 40, '', 'Ann', 'op-34-f2']);
+  const load2 = fk.rows(SID, 'Steel Tickets').filter((o) => o['Cut Type'] && o['Skid ID'] !== 'SKD-000040' && o['Skid ID'] !== load['Skid ID'])[0];
+  ok('a load with coated (WIP) steel in it is WIP', load2 && load2['Status'] === 'WIP' && load2['Cut From'] === 'SKD-000032, SKD-000034', load2);
+  const run = await call('createRun', ['Press 2', 'Ann', '', 'op-34-r']);
+  await call('runAddSkid', [run.result.runId, load2['Skid ID'], 'Ann', 'op-34-a']);
+  await call('deleteRun', [run.result.runId, 'Ann', 'op-34-d']);
+  ok('off a run, a load goes back to its own status', fk.rows(SID, 'Steel Tickets').filter((o) => o['Skid ID'] === load2['Skid ID'])[0]['Status'] === 'WIP');
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

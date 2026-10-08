@@ -233,7 +233,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.78.0</span>
+      <span class="version" id="appVersion">v1.79.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -5091,7 +5091,7 @@
   function setCaches(all) {
     if (!missCheck.busy) missCheck.term = null;   // fresh list: a later miss is worth re-checking again
     allCache = all || [];
-    queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
+    queueCache = allCache.filter(function (t) { return (t.status === 'Current' || t.status === 'WIP') && !t.cutType; });   // loads are metals stock
   }
 
   // After a skid is added to a job it's no longer Current, so drop it from the picker source
@@ -5122,7 +5122,7 @@
   // before the background getAllTickets refresh lands.
   function markCacheStatus(skidId, status) {
     allCache.forEach(function (t) { if (t.skidId === skidId) t.status = status; });
-    queueCache = allCache.filter(function (t) { return t.status === 'Current' || t.status === 'WIP'; });
+    queueCache = allCache.filter(function (t) { return (t.status === 'Current' || t.status === 'WIP') && !t.cutType; });   // loads are metals stock
   }
 
   // The ticket list is loaded once and kept, so an iPad left open all shift doesn't see tickets
@@ -5289,7 +5289,7 @@
       // (In Production) or consumed (Used) it drops off this list; it lives in Production now.
       // Missing skids drop off too (they live in the count's Missing list); Cut pallets are metals
       // stock (they belong to the Slitter/Metals side), so they never appear in the Litho list.
-      if (t.status === 'In Production' || t.status === 'Used' || t.status === 'Missing' || t.status === 'Cut') return false;
+      if (t.status === 'In Production' || t.status === 'Used' || t.status === 'Missing' || t.status === 'Cut' || t.cutType) return false;
       if (term) {
         var hit = String(t.ticket).toLowerCase().indexOf(term) !== -1 ||
                   String(t.skidId).toLowerCase().indexOf(term) !== -1;
@@ -7738,9 +7738,10 @@
   function prodPickList(machineType) {
     var cutFor = machineType === 'Press' ? 'Scroll' : (machineType === 'Line' ? 'Slit' : null);
     return allCache.filter(function (t) {
-      if (t.status === 'Current' || t.status === 'WIP') return true;
-      if (t.status === 'Cut') return cutFor ? (t.cutType === cutFor) : true;
-      return false;
+      // A slitter / scroll load is Current or WIP like its parents (older ones say 'Cut'), but only
+      // goes on its own machines: slit loads on Lines, scroll loads on Presses.
+      if (t.cutType) return (t.status === 'Current' || t.status === 'WIP' || t.status === 'Cut') && (cutFor ? t.cutType === cutFor : true);
+      return t.status === 'Current' || t.status === 'WIP';
     });
   }
 
