@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.82.0</span>
+      <span class="version" id="appVersion">v1.83.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2204,7 +2204,10 @@
   // sheet count) — worked out by the Worker; display only.
   function specWarnHtml(list, where) {
     if (!list || !list.length) return '';
-    return '<div class="specwarn">' + list.map(function (m) { return '<div>⚠ ' + esc(m) + '</div>'; }).join('') +
+    return '<div class="specwarn">' + list.map(function (m) {
+      var i = String(m).indexOf(' Likely meant: ');   // the Worker's guess at the right value goes on its own line
+      return '<div>⚠ ' + (i === -1 ? esc(m) : esc(m.slice(0, i)) + '<div style="margin:2px 0 0 18px"><b>→ Likely meant:</b> ' + esc(m.slice(i + 15)) + '</div>') + '</div>';
+    }).join('') +
       (where ? '<div style="font-size:13px;opacity:.85">' + esc(where) + '</div>' : '') + '</div>';
   }
 

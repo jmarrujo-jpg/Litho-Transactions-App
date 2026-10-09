@@ -152,7 +152,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'warn-81', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'likely-83', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3644,34 +3644,79 @@ function piecesPerSheet(src, specs) {
 //   - sheet size (Width × Length) not listed for that End Use;
 //   - Weight not within 15% of sheets × Width × Length × BW ÷ 31,360 (a base box is 31,360 sq in
 //     and BW is its weight in lb).
+// Each message also says what was likely meant, when the spec sheet points to it:
+//   - the size is another End Use's spec sheet → probably that End Use;
+//   - one side matches a spec size for this End Use → probably that size (only when the weight
+//     doesn't argue against it);
+//   - weight off → the weight that fits the sheets, and the sheet count that fits the weight.
 // Returns a list of plain-English messages ([] = looks fine).
 function specWarnings(o, specs) {
   const st = String(o['Status'] || '').trim();
   if (st === STATUS.USED || st === STATUS.MISSING) return [];
   if (String(o['C/S'] || '').trim().toUpperCase() === 'C' || String(o['Cut Type'] || '').trim()) return [];
   if (!(o['Ticket'] || o['Skid ID'])) return [];
-  const out = [], fmt = (x) => String(Math.round(num(x) * 1000) / 1000);
+  const out = [], fmt = (x) => String(Math.round(num(x) * 1000) / 1000), lbs = (x) => Math.round(x).toLocaleString('en-US');
   const w = num(o['Width']), l = num(o['Length']), eu = String(o['End Use'] || '').trim();
+  const qty = num(o['QTY/LOAD']), bw = num(o['BW']), wt = num(o['Weight']);
+  const near = (x, y) => Math.abs(x - y) <= 0.1;
+  const sizeIs = (r, a, b, tol) => { const n = (x, y) => Math.abs(x - y) <= (tol || 0.1); return (n(r.a, a) && n(r.b, b)) || (n(r.a, b) && n(r.b, a)); };
+  const expect = (a, b) => a * b * qty * bw / 31360;
+  // true / false = the weight does / doesn't fit that size; null = can't tell (missing numbers)
+  const fits = (a, b) => (a > 0 && b > 0 && qty > 0 && bw > 0 && wt > 0 ? Math.abs(wt / expect(a, b) - 1) <= 0.15 : null);
+  const label = (kind, code) => code + (kind === 'end' ? ' ENDS' : '');
+  // Which OTHER End Uses list this exact sheet size: ['401 ENDS (401 END SCROLL STOCK sheet)', …]
+  const otherUses = (skip) => {
+    const found = [];
+    if (!(w > 0 && l > 0)) return found;
+    [['can', specs.cans], ['end', specs.ends]].forEach(([kind, map]) => Object.keys(map).forEach((code) => {
+      if (kind === (skip && skip.kind) && code === skip.code) return;
+      const r = map[code].filter((x) => sizeIs(x, w, l, 0.05))[0];   // tighter: a suggestion should be the same sheet
+      if (r && found.length < 3) found.push(label(kind, code) + ' (the ' + String(r.name).replace(/\s*\(.*$/, '').trim() + ' sheet)');
+    }));
+    return found;
+  };
   if (specs && specs.ok && eu) {
     const code = specCode(eu);
     const rows = code ? (code.kind === 'can' ? specs.cans : specs.ends)[code.code] : null;
-    if (!rows || !rows.length) out.push('End Use "' + eu + '" isn\'t on the spec sheet. Check the End Use.');
-    else if (w > 0 && l > 0) {
-      const near = (x, y) => Math.abs(x - y) <= 0.1;
-      if (!rows.some((r) => (near(r.a, w) && near(r.b, l)) || (near(r.a, l) && near(r.b, w)))) {
-        const sizes = [];
-        rows.forEach((r) => { const z = fmt(r.a) + ' × ' + fmt(r.b); if (r.a > 0 && r.b > 0 && sizes.indexOf(z) === -1) sizes.push(z); });
-        out.push('Sheet size ' + fmt(w) + ' × ' + fmt(l) + ' isn\'t on the spec sheet for ' + code.code + (code.kind === 'end' ? ' ENDS' : '') +
-          (sizes.length ? ' (spec sizes: ' + sizes.slice(0, 6).join(', ') + ')' : '') + '. Check Width / Length, or the End Use.');
+    if (!rows || !rows.length) {
+      const others = otherUses(null);
+      out.push('End Use "' + eu + '" isn\'t on the spec sheet. Check the End Use.' +
+        (others.length ? ' Likely meant: ' + others.join(' or ') + ' — this sheet size is on the spec sheet for that.' : ''));
+    } else if (w > 0 && l > 0 && !rows.some((r) => sizeIs(r, w, l))) {
+      const sizes = [];
+      rows.forEach((r) => { const z = fmt(r.a) + ' × ' + fmt(r.b); if (r.a > 0 && r.b > 0 && sizes.indexOf(z) === -1) sizes.push(z); });
+      let msg = 'Sheet size ' + fmt(w) + ' × ' + fmt(l) + ' isn\'t on the spec sheet for ' + label(code.kind, code.code) +
+        (sizes.length ? ' (spec sizes: ' + sizes.slice(0, 6).join(', ') + ')' : '') + '. Check Width / Length, or the End Use.';
+      const likely = [];
+      const others = otherUses(code);
+      if (others.length) likely.push('End Use ' + others.join(' or ') + ' — this exact size is on the spec sheet for that');
+      // One side right, the other mis-typed: the spec size sharing a side, with the other side closest.
+      let best = null;
+      rows.forEach((r) => {
+        [[r.a, r.b], [r.b, r.a]].forEach(([x, y]) => {
+          let cand = null;
+          if (near(x, w) && !near(y, l)) cand = { w: x, l: y, off: Math.abs(y - l), fixes: 'Length' };
+          else if (near(x, l) && !near(y, w)) cand = { w: y, l: x, off: Math.abs(y - w), fixes: 'Width' };
+          if (cand && (!best || cand.off < best.off)) best = cand;
+        });
+      });
+      if (best) {
+        const f = fits(best.w, best.l);
+        const fNow = fits(w, l);
+        if (f !== false) likely.push(best.fixes + ' ' + fmt(best.fixes === 'Length' ? best.l : best.w) + ' (so ' + fmt(best.w) + ' × ' + fmt(best.l) + ')' +
+          (f && fNow === false ? ' — the weight fits that size, not the one typed' : ''));
       }
+      if (likely.length) msg += ' Likely meant: ' + likely.join('; or ') + '.';
+      out.push(msg);
     }
   }
-  const qty = num(o['QTY/LOAD']), bw = num(o['BW']), wt = num(o['Weight']);
   if (w > 0 && l > 0 && qty > 0 && bw > 0 && wt > 0) {
-    const exp = w * l * qty * bw / 31360;
+    const exp = expect(w, l);
     if (Math.abs(wt / exp - 1) > 0.15) {
-      out.push('Weight ' + Math.round(wt).toLocaleString('en-US') + ' lb doesn\'t fit ' + Math.round(qty).toLocaleString('en-US') + ' sheets of ' + fmt(w) + ' × ' + fmt(l) +
-        ' at BW ' + fmt(bw) + ' (that should weigh about ' + Math.round(exp).toLocaleString('en-US') + ' lb). Check Weight, QTY/LOAD, Width / Length or BW.');
+      const sheetsForWt = wt * 31360 / (w * l * bw);
+      out.push('Weight ' + lbs(wt) + ' lb doesn\'t fit ' + lbs(qty) + ' sheets of ' + fmt(w) + ' × ' + fmt(l) +
+        ' at BW ' + fmt(bw) + ' (that should weigh about ' + lbs(exp) + ' lb). Check Weight, QTY/LOAD, Width / Length or BW.' +
+        ' Likely meant: Weight about ' + lbs(exp) + ' lb; or QTY/LOAD about ' + lbs(sheetsForWt) + ' sheets.');
     }
   }
   return out;

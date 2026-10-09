@@ -1245,7 +1245,7 @@ await concurrency(envBase, 'in-worker lock');
   const good = { 'End Use': '401X508', 'Width': 34, 'Length': 37.093, 'QTY/LOAD': 1000, 'BW': 75, 'Weight': 3000 };
   const fk = makeFake({ [SID]: { 'Steel Tickets': [H,
       sk('OK-1', 'SKD-000060', good),
-      sk('SZ-1', 'SKD-000061', Object.assign({}, good, { 'Length': 97.093, 'Weight': 7900 })),
+      sk('SZ-1', 'SKD-000061', Object.assign({}, good, { 'Length': 97.093, 'Weight': 3000 })),
       sk('EU-1', 'SKD-000062', Object.assign({}, good, { 'End Use': '211 DIA' })),
       sk('WT-1', 'SKD-000063', Object.assign({}, good, { 'Weight': 13830 })),
       sk('OK-2', 'SKD-000064', Object.assign({}, good, { 'Width': 37.093, 'Length': 34, 'Weight': 3300 })),   // turned round, +9%
@@ -1268,7 +1268,10 @@ await concurrency(envBase, 'in-worker lock');
   ok('coils, Used skids and slitter / scroll loads are not checked', !w('CO-1').length && !w('US-1').length && !w('LD-1').length, [w('CO-1'), w('US-1'), w('LD-1')]);
   const raw = await call('getRawTable', ['steel']);
   const rw = (t) => (raw.result.rows.filter((r) => r['Ticket'] === t)[0] || {}).__warn;
-  ok('the Steel Tickets table carries the same warnings', raw.ok && rw('SZ-1') && rw('SZ-1').length === 1 && !rw('OK-1'), raw.ok ? [rw('SZ-1'), rw('OK-1')] : raw);
+  ok('the Steel Tickets table carries the same warnings', raw.ok && rw('SZ-1') && rw('SZ-1').length === 2 && !rw('OK-1'), raw.ok ? [rw('SZ-1'), rw('OK-1')] : raw);
+  ok('size: says what was likely meant (the spec size sharing a side; the weight fits it)', /Likely meant: Length 37\.093 \(so 34 × 37\.093\) — the weight fits that size, not the one typed/.test(w('SZ-1')[0]), w('SZ-1'));
+  ok('End Use: names the End Use whose spec sheet is this size', /Likely meant: 401X508 \(the 401X508 S\/S sheet\)/.test(w('EU-1')[0]), w('EU-1'));
+  ok('weight: the weight that fits, and the sheet count that fits the weight', /Likely meant: Weight about 3,016 lb; or QTY\/LOAD about 4,585 sheets/.test(w('WT-1')[0]), w('WT-1'));
   const tx = await call('getRawTable', ['tx']);
   ok('the Transactions table is not checked', tx.ok && !tx.result.rows.some((r) => r.__warn), tx);
 }

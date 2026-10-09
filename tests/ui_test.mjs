@@ -1601,7 +1601,7 @@ const base = {
 }
 
 // ---- 39. Database: ⚠ warnings for skids that look mis-typed against the spec sheet
-{ const W = 'Sheet size 34 × 97.093 isn\'t on the spec sheet for 401X508 (spec sizes: 37.093 × 34). Check Width / Length, or the End Use.';
+{ const W = 'Sheet size 34 × 97.093 isn\'t on the spec sheet for 401X508 (spec sizes: 37.093 × 34). Check Width / Length, or the End Use. Likely meant: Length 37.093 (so 34 × 37.093).';
   let raws = 0;
   const { page, calls } = await boot(Object.assign({}, base, {
     getMasterSheet: () => R({ rows: [
@@ -1615,6 +1615,7 @@ const base = {
   await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
   const list = await page.textContent('#msList');
   ok('Master sheet: the flagged skid shows ⚠ check and why', list.includes('⚠ check') && list.includes('97.093 isn') && list.includes('Steel Tickets tab'), list);
+  ok('Master sheet: Likely meant on its own line', ((await page.innerHTML('#msList')) || '').includes('<b>→ Likely meant:</b> Length 37.093 (so 34 × 37.093).'));
   ok('Master sheet: a ⚠ Check filter with the count', (await page.textContent('[data-msf="warn"]')).includes('⚠ Check (1)'));
   await page.click('[data-msf="warn"]'); await page.waitForTimeout(100);
   ok('the ⚠ Check filter shows only flagged skids', (await page.textContent('#msList')).includes('120225-011') && !(await page.textContent('#msList')).includes('502'));
