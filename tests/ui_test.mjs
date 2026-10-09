@@ -1632,6 +1632,40 @@ const base = {
   await page.close();
 }
 
+// ---- 40. Master sheet: ✏️ Edit opens the ticket's row (usual fields first) and comes back
+{ let raws = 0, upd = null;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [
+      { skidId: 'SKD-1', ticket: '102825-009', status: 'Current', litho: 0, coatings: [], warn: [] },
+      { skidId: 'SKD-2', ticket: '502', status: 'Current', litho: 0, coatings: [], warn: [] }], receivers: [] }),
+    getRawTable: () => { raws++; return R({ headers: ['Ticket', 'Skid ID', 'Status', 'Weight', 'End Use', 'Last Op ID'], rows: [
+      { __row: 2, 'Ticket': '102825-009', 'Skid ID': 'SKD-1', 'Status': 'Current', 'Weight': '3040', 'End Use': '603 ENDS', 'Last Op ID': 'x' },
+      { __row: 3, 'Ticket': '502', 'Skid ID': 'SKD-2', 'Status': 'Current', 'Weight': '100', 'End Use': '', 'Last Op ID': '' }] }); },
+    updateRawRow: (a) => { upd = a; return R({ ok: true, updated: 1 }); },
+  }));
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
+  await page.selectOption('[data-msst="SKD-2"]', 'Used'); await page.waitForTimeout(100);
+  await page.click('[data-msedit="SKD-1"]'); await page.waitForTimeout(300);
+  const vis = await page.$$eval('.dbf', (els) => els.filter((e) => e.offsetParent).map((e) => e.getAttribute('data-f')));
+  ok('Edit opens that ticket with the usual fields only', vis.join() === 'Ticket,End Use,Weight' && (await page.textContent('#view')).includes('Edit SKD-1'), vis);
+  await page.click('#dbAllFields'); await page.waitForTimeout(100);
+  ok('Show all fields shows the rest', (await page.$$eval('.dbf', (els) => els.filter((e) => e.offsetParent).length)) === 6);
+  await page.click('#dbCancel'); await page.waitForTimeout(200);
+  ok('Cancel goes back to the Master sheet with the unsaved mark kept', !!(await page.$('#msList')) && (await page.textContent('#msBarText')).includes('1 ticket changed'));
+  await page.click('[data-msedit="SKD-1"]'); await page.waitForTimeout(300);
+  await page.fill('.dbf[data-f="Weight"]', '4310');
+  await page.click('#dbSave'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('Save writes that one field to its Steel Tickets row', upd && upd[0] === 'steel' && upd[1] === 2 && JSON.stringify(upd[2]) === '{"Weight":"4310"}', upd);
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('after saving: back on the Master sheet, reloaded, marks kept', !!(await page.$('#msList')) && calls.filter((c) => c.fn === 'getMasterSheet').length === 2
+    && (await page.textContent('#msBarText')).includes('1 ticket changed'));
+  await page.click('[data-msedit="SKD-1"]'); await page.waitForTimeout(300);
+  await page.click('#backBtn'); await page.waitForTimeout(200);
+  ok('Back from the editor also returns to the Master sheet', !!(await page.$('#msList')) && raws === 3, raws);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

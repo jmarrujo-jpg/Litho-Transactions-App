@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.81.0</span>
+      <span class="version" id="appVersion">v1.82.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -757,6 +757,9 @@
     "No Current or WIP tickets match.": "Ningún ticket actual o WIP coincide.",
     "No available skids match.": "No hay tarimas disponibles que coincidan.",
     "No changes to save": "No hay cambios para guardar",
+    "✏️ Edit": "✏️ Editar",
+    "▸ Show all fields": "▸ Mostrar todos los campos",
+    "▾ Hide the other fields": "▾ Ocultar los demás campos",
     "No coatings added yet.": "Todavía no hay recubrimientos.",
     "No coatings on this ticket.": "Este ticket no tiene recubrimientos.",
     "No coatings recorded on this skid yet.": "Esta tarima todavía no tiene recubrimientos registrados.",
@@ -1887,7 +1890,7 @@
       case 'run': openProductionReview(); return;
       case 'slitterSession': openSlitterKind(slitKind); return;  // session -> its Slitters / Scrolls home
       case 'database': renderLanding(); return;            // database home -> landing
-      case 'databaseEdit': renderDatabaseHome(); return;   // row editor -> database home
+      case 'databaseEdit': dbEditDone(); return;   // row editor -> database home (or the Master sheet it came from)
       default: renderLanding(); return;
     }
   };
@@ -1929,6 +1932,11 @@
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
   var dbWarnOnly = false;                       // Steel Tickets: only rows with a ⚠ spec warning
+  var dbEditFrom = '';                          // 'master' when the row editor was opened from the Master sheet
+  var msScrollY = null;                         // where to scroll back to on the Master sheet
+  // The fields people actually fix, shown first when editing from the Master sheet (the rest are
+  // behind "Show all fields"). Status and receiver stay on the Master sheet's own controls.
+  var MS_EDIT_FIELDS = ['Ticket', 'End Use', 'Width', 'Length', 'Weight', 'QTY/LOAD', 'BW', 'Mill', 'Supplier', 'PO Number', 'Row', 'Comments'];
   // No passcode: the Database only shows on computers (see FULL_APP).
   function openDatabase() {
     if (!FULL_APP) { renderLanding(); return; }
@@ -2121,6 +2129,10 @@
         renderMsList();
       };
     });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-msedit]'), function (b) {
+      b.onclick = function () { msOpenEditor(b.getAttribute('data-msedit'), b); };
+    });
+    if (msScrollY != null) { var y = msScrollY; msScrollY = null; window.scrollTo(0, y); }
     Array.prototype.forEach.call(box.querySelectorAll('[data-mscoats]'), function (b) {
       b.onclick = function () { var id = b.getAttribute('data-mscoats'); msOpen[id] = !msOpen[id]; renderMsList(); };
     });
@@ -2179,7 +2191,7 @@
           (t.warn && t.warn.length ? '<span class="specwarn-tag" title="' + esc(t.warn.join(' ')) + '">⚠ check</span> ' : '') +
           '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.customer ? ' &middot; ' + esc(t.customer) : '') +
           ' &middot; litho ' + money(t.litho) + (off ? ' → ' + money(t.litho - off) : '') + (t.status === 'Used' && t.usedOn ? ' &middot; used ' + esc(t.usedOn) : '') + '</span></div>' +
-        '<div>' + statusCtl + '</div>' +
+        '<div>' + statusCtl + ' <button class="btn secondary" style="padding:6px 10px;font-size:13px" data-msedit="' + esc(t.skidId) + '">✏️ Edit</button></div>' +
       '</div>' +
       specWarnHtml(t.warn, 'To fix it, find this ticket on the Steel Tickets tab and tap its row.') +
       '<div class="sub" style="margin-top:6px">' + (t.po ? 'PO ' + esc(t.po) + ' &middot; ' : '') + 'Receiver: ' + rcvCtl + '</div>' +
@@ -2194,6 +2206,30 @@
     if (!list || !list.length) return '';
     return '<div class="specwarn">' + list.map(function (m) { return '<div>⚠ ' + esc(m) + '</div>'; }).join('') +
       (where ? '<div style="font-size:13px;opacity:.85">' + esc(where) + '</div>' : '') + '</div>';
+  }
+
+  // ✏️ Edit on the Master sheet: open that ticket's Steel Tickets row in the row editor. The row is
+  // read fresh (people fix tickets one after another), and marked-but-unsaved Master sheet changes
+  // are kept for when they come back.
+  function msOpenEditor(skidId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Opening…'; }
+    msScrollY = window.scrollY;
+    google.script.run.withSuccessHandler(function (res) {
+      dbData.steel = (res && res.headers) ? { headers: res.headers, rows: res.rows || [] } : { headers: [], rows: [] };
+      var rowObj = dbData.steel.rows.filter(function (r) { return String(r['Skid ID']).trim() === skidId; })[0];
+      if (!rowObj) { if (btn) { btn.disabled = false; btn.textContent = '✏️ Edit'; } toast('That ticket was not found on Steel Tickets — tap ↻ and try again'); return; }
+      dbTable = 'steel'; dbEditFrom = 'master';
+      renderDbEditor(rowObj);
+      window.scrollTo(0, 0);
+    }).withFailureHandler(function (err) {
+      if (btn) { btn.disabled = false; btn.textContent = '✏️ Edit'; }
+      toast('Could not open it: ' + (err && err.message));
+    }).getRawTable('steel');
+  }
+  // Leave the row editor: back to the Master sheet when it was opened from there.
+  function dbEditDone() {
+    if (dbEditFrom === 'master') { dbEditFrom = ''; dbTable = 'master'; }
+    renderDatabaseHome();
   }
 
   function msSaveAll() {
@@ -3140,14 +3176,25 @@
     nextViewToken();
     var data = dbData[dbTable];
     var title = (dbTable === 'steel') ? (rowObj['Skid ID'] || rowObj['Ticket'] || ('Row ' + rowObj.__row)) : ('Row ' + rowObj.__row);
-    var fieldsHtml = data.headers.map(function (h) {
+    var fieldHtml = function (h) {
       var v = rowObj[h] == null ? '' : rowObj[h];
       var big = String(v).length > 40 || h === 'Comments' || h === 'Notes' || h === 'Litho Notes';
       var input = big
         ? '<textarea class="dbf" data-f="' + esc(h) + '" rows="2">' + esc(v) + '</textarea>'
         : '<input class="dbf" data-f="' + esc(h) + '" value="' + esc(v) + '">';
       return '<div class="field" style="margin:0 0 8px"><label>' + esc(h) + '</label>' + input + '</div>';
-    }).join('');
+    };
+    var fieldsHtml;
+    if (dbEditFrom === 'master') {
+      // The usual fields first; every other column is still there behind "Show all fields".
+      var main = MS_EDIT_FIELDS.filter(function (h) { return data.headers.indexOf(h) !== -1; });
+      var rest = data.headers.filter(function (h) { return main.indexOf(h) === -1; });
+      fieldsHtml = main.map(fieldHtml).join('') +
+        '<button class="btn secondary" id="dbAllFields" style="padding:6px 12px;font-size:13px;margin:4px 0 10px">▸ Show all fields</button>' +
+        '<div id="dbMoreFields" style="display:none">' + rest.map(fieldHtml).join('') + '</div>';
+    } else {
+      fieldsHtml = data.headers.map(fieldHtml).join('');
+    }
     view.innerHTML =
       '<div class="card">' +
         '<div class="row" style="justify-content:space-between;align-items:center">' +
@@ -3163,7 +3210,13 @@
           '<button class="btn success" id="dbSave" style="flex:2">Save changes</button>' +
         '</div>' +
       '</div>';
-    document.getElementById('dbCancel').onclick = function () { renderDatabaseHome(); };
+    document.getElementById('dbCancel').onclick = dbEditDone;
+    var allBtn = document.getElementById('dbAllFields');
+    if (allBtn) allBtn.onclick = function () {
+      var more = document.getElementById('dbMoreFields'), open = more.style.display === 'none';
+      more.style.display = open ? '' : 'none';
+      allBtn.textContent = (open ? '▾ Hide the other fields' : '▸ Show all fields');
+    };
     document.getElementById('dbSave').onclick = function () { dbSaveEditor(rowObj); };
   }
 
@@ -3188,7 +3241,7 @@
             var applied = (res && res.updated != null) ? res.updated : changed.length;
             Object.keys(fields).forEach(function (h) { rowObj[h] = fields[h]; });   // keep local cache in sync
             if (dbTable === 'steel') { fetchTickets(); dbData.steel = null; msData = null; }   // reload so ⚠ warnings re-check
-            showInfo('Saved', applied + ' field' + (applied === 1 ? '' : 's') + ' updated.', function () { renderDatabaseHome(); });
+            showInfo('Saved', applied + ' field' + (applied === 1 ? '' : 's') + ' updated.', dbEditDone);
           },
           function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('dbSave'); if (b2) { b2.disabled = false; b2.textContent = 'Save changes'; } });
       });
