@@ -1235,6 +1235,21 @@ await concurrency(envBase, 'in-worker lock');
   ok('no spec sheet: the pallet is still made', p.ok && p.result.newLoadNo && !p.result.newLoadWeight, p);
 }
 
+// 35c. A load carries its source skids' PO numbers
+{ const H = MASTER_H.concat(['PO Number']);
+  const sk = (t, id, po) => { const o = { 'Ticket': t, 'Skid ID': id, 'Status': 'Current', 'QTY/LOAD': 1000, 'Weight': 5000, 'PO Number': po }; return H.map((h) => (o[h] == null ? '' : o[h])); };
+  const fk = makeFake({ [SID]: { 'Steel Tickets': [H, sk('P-1', 'SKD-000070', '7730-DC'), sk('P-2', 'SKD-000071', '22025-GZ'), sk('P-3', 'SKD-000072', '7730-DC')], 'Transactions': [TX_H] } });
+  globalThis.fetch = fk.fetchImpl;
+  const loadOf = (r) => fk.rows(SID, 'Steel Tickets').filter((o) => String(o['Ticket']) === String(r.result.newLoadNo))[0];
+  const s1 = await call('createSlitterSession', ['Slitter', '9 A', 'Ann', '', 'op-35c-s']);
+  await call('slitterLoadSkid', [s1.result.sessionId, 'SKD-000070', 'Ann', 'op-35c-l']);
+  const p1 = await call('slitterFinishPallet', [s1.result.sessionId, 100, '', 'Ann', 'op-35c-f1']);
+  ok('a load gets its source skid\'s PO number', p1.ok && loadOf(p1)['PO Number'] === '7730-DC', p1.ok ? loadOf(p1) : p1);
+  await call('slitterSwitchSkid', [s1.result.sessionId, 40, 'SKD-000071', 'Ann', 'op-35c-w']);
+  await call('slitterSwitchSkid', [s1.result.sessionId, 70, 'SKD-000072', 'Ann', 'op-35c-w2']);
+  const p2 = await call('slitterFinishPallet', [s1.result.sessionId, 100, '', 'Ann', 'op-35c-f2']);
+  ok('a load from skids on two POs lists both, once each', p2.ok && loadOf(p2)['PO Number'] === '7730-DC / 22025-GZ', p2.ok ? loadOf(p2) : p2);
+}
 // 36. Database warnings: skids that look mis-typed against the spec sheet (display only)
 { const SPEC = '1NVCx-n9_Zha9u1HPyi3hGLBQ4EyWHx7AbA4zs36hbYc';
   const H = MASTER_H.concat(['BW', 'C/S', 'Cut Type', 'End Use', 'Width', 'Length', 'Weight', 'QTY/LOAD'].filter((h) => MASTER_H.indexOf(h) === -1));

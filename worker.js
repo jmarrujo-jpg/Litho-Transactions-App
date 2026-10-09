@@ -152,7 +152,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'likely-83', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'po-85', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3743,7 +3743,7 @@ function estimateLoadWeight(comp, parentsById, specs) {
 // keeps it off the Litho screens and on the right machines (slit loads on Lines, scroll loads on
 // Presses). Loads made before this are Status 'Cut', which the app still reads the same way. Its Ticket IS the app-generated Load # — the primary, writable pallet number;
 // the parent tickets/mills live in Mill + Comments and the full composition stays on the Slitter
-// Pallets row. Cost and Litho are carried down as the simple average of the parent skids' values
+// Pallets row. PO Number(s) carry down from the parents. Cost and Litho are carried down as the simple average of the parent skids' values
 // (two independent averages — never combined; blanks/zeros skipped). Weight is deferred. Returns
 // { skidId, loadNo }.
 async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machine, specs) {
@@ -3757,6 +3757,7 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Cut From');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Weight');
   ens = await ensureColumn(sheets, MASTER, ens.headers, 'Weight Basis');
+  ens = await ensureColumn(sheets, MASTER, ens.headers, 'PO Number');
   master = await readTab(sheets, MASTER);
   const skidId = fmtId('SKD-', maxIdNumber(master.rows, 'Skid ID', 'SKD-') + 1);
   const loadNo = nextLoadNumber(master.rows);
@@ -3780,10 +3781,12 @@ async function createCutSkid(sheets, palletId, cutType, outputCount, comp, machi
   const mills = comp.map((c) => String((c && c.mill) || '').trim()).filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
   const stripsOf = (c) => (c && c.strips != null ? c.strips : (c && c.qty) || 0);
   const parents = comp.map((c) => (c && c.ticket ? c.ticket : 'Mill ' + (c && c.mill)) + ' (' + stripsOf(c) + ')').join(', ');
+  // The PO(s) it was bought on carry down too (two skids on different POs -> "PO1 / PO2").
+  const pos = parentRows.map((p) => String(p['PO Number'] || '').trim()).filter((x) => x && x !== '0').filter((x, i, a) => a.indexOf(x) === i);
   const row = {
     'Skid ID': skidId, 'Ticket': String(loadNo), 'Load #': loadNo, 'QTY/LOAD': num(outputCount),
     'Status': parentRows.some((p) => String(p['Status'] || '').trim() === STATUS.WIP || num(p['Litho']) > 0) ? STATUS.WIP : STATUS.CURRENT,
-    'Mill': mills.join(' / '), 'Cut Type': cutType,
+    'Mill': mills.join(' / '), 'Cut Type': cutType, 'PO Number': pos.join(' / '),
     'Cut From': parentRows.map((p) => String(p['Skid ID']).trim()).filter((x, i, a) => a.indexOf(x) === i).join(', '),   // its receivers come from these
     'System Notes': cutType + ' pallet (Load ' + loadNo + ') cut on ' + (machine || '') + ' from: ' + parents,
     'Last Updated At': nowStamp(), 'Last Updated By': 'cut',
