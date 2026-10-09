@@ -1667,6 +1667,42 @@ const base = {
   await page.close();
 }
 
+// ---- 41. Count Edit: changing the sheet count fills in an estimated weight; you can override it
+{ const sess = { sessionId: 'CNT-1', stage: 'Current', startedOn: today, startedBy: 'Ann' };
+  let upd = [];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getActiveCount: () => R(sess),
+    getAllTickets: () => R([ticket('SKD-A', '102825-009', 'Current', { qty: 1422, weight: '4,310.00' }),
+      ticket('SKD-B', '200', 'Current', { qty: '', weight: '', width: 34, length: 37.093, bw: 75 }),
+      ticket('SKD-C', 'C-1', 'Current', { cs: 'C', qty: '', weight: 20000 })]),
+    updateTicketDetails: (a) => { upd.push(a); return R({ ok: true }); },
+  }));
+  await page.evaluate(() => openSteelCount());
+  await page.waitForSelector('[data-countedit="SKD-A"]');
+  await page.click('[data-countedit="SKD-A"]'); await page.waitForTimeout(100);
+  ok('the weight box starts with the pallet weight', (await page.inputValue('#ceWt_SKD-A')) === '4310');
+  await page.fill('#ceQty_SKD-A', '1000'); await page.waitForTimeout(50);
+  ok('a new count scales the pallet weight: 4,310 ÷ 1,422 × 1,000 = 3,031', (await page.inputValue('#ceWt_SKD-A')) === '3031' && (await page.textContent('#ceWtNote_SKD-A')).includes('estimated'));
+  await page.fill('#ceWt_SKD-A', '3100'); await page.waitForTimeout(50);
+  await page.fill('#ceQty_SKD-A', '999'); await page.waitForTimeout(50);
+  ok('a typed weight wins over the estimate', (await page.inputValue('#ceWt_SKD-A')) === '3100' && await page.isVisible('#ceWtEst_SKD-A'));
+  await page.click('#ceWtEst_SKD-A'); await page.waitForTimeout(50);
+  ok('Use estimate puts it back', (await page.inputValue('#ceWt_SKD-A')) === '3028');
+  await page.fill('#ceWt_SKD-A', '3100'); await page.fill('#ceQty_SKD-A', '1000');
+  await page.click('#ceSave_SKD-A'); await page.waitForTimeout(300);
+  ok('Save sends the count and the weight', upd.length === 1 && upd[0][1]['QTY/LOAD'] === 1000 && upd[0][1]['Weight'] === 3100, upd);
+  await page.click('[data-countedit="SKD-B"]'); await page.waitForTimeout(100);
+  await page.fill('#ceQty_SKD-B', '1000'); await page.waitForTimeout(50);
+  ok('no weight yet: worked out from the size (34 × 37.093 × 1,000 × 75 ÷ 31,360 = 3,016)', (await page.inputValue('#ceWt_SKD-B')) === '3016');
+  await page.click('[data-countedit="SKD-C"]'); await page.waitForTimeout(100);
+  await page.fill('#ceQty_SKD-C', '2'); await page.waitForTimeout(50);
+  ok('coils: no estimate', (await page.inputValue('#ceWt_SKD-C')) === '20000' && !(await page.textContent('#ceWtNote_SKD-C')));
+  await page.click('#ceSave_SKD-C'); await page.waitForTimeout(300);
+  ok('an unchanged weight is not re-sent', upd.length === 2 && !('Weight' in upd[1][1]), upd[1] && upd[1][1]);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

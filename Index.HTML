@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.83.0</span>
+      <span class="version" id="appVersion">v1.84.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -757,6 +757,9 @@
     "No Current or WIP tickets match.": "Ningún ticket actual o WIP coincide.",
     "No available skids match.": "No hay tarimas disponibles que coincidan.",
     "No changes to save": "No hay cambios para guardar",
+    "Weight (lb)": "Peso (lb)",
+    "↺ Use estimate": "↺ Usar el estimado",
+    "Weight must be 0 or more": "El peso debe ser 0 o más",
     "✏️ Edit": "✏️ Editar",
     "▸ Show all fields": "▸ Mostrar todos los campos",
     "▾ Hide the other fields": "▾ Ocultar los demás campos",
@@ -4609,31 +4612,64 @@
     });
   }
 
+  // Estimated weight for a new sheet count: scale the pallet's own weight (keeps the mill's real
+  // weight per sheet); with no weight / count on it yet, work it out from the size: Width × Length ×
+  // sheets × BW ÷ 31,360 (a base box is 31,360 sq in and BW is its weight in lb). '' = can't tell.
+  function countNum(v) { var x = parseFloat(String(v == null ? '' : v).replace(/[$,\s]/g, '')); return isNaN(x) ? 0 : x; }
+  function countEstWeight(t, qty) {
+    qty = countNum(qty);
+    if (!(qty >= 0) || String(t.cs || '').toUpperCase() === 'C') return '';
+    var w0 = countNum(t.weight), q0 = countNum(t.qty);
+    if (w0 > 0 && q0 > 0) return Math.round(w0 / q0 * qty);
+    var w = countNum(t.width), l = countNum(t.length), bw = countNum(t.bw);
+    if (w > 0 && l > 0 && bw > 0) return Math.round(w * l * qty * bw / 31360);
+    return '';
+  }
+
   function openCountEdit(sk) {
     var t = countCache.filter(function (x) { return x.skidId === sk; })[0];
     var form = document.getElementById('countEdit_' + sk);
     if (!form || !t) return;
     if (form.style.display === 'block') { form.style.display = 'none'; form.innerHTML = ''; return; }
     form.style.display = 'block';
+    var w0 = countNum(t.weight);
     form.innerHTML =
       '<div class="row">' +
         '<div class="field"><label>Location</label><input id="ceLoc_' + esc(sk) + '" value="' + esc(t.row || '') + '"></div>' +
         '<div class="field"><label>Sheets (qty)</label><input type="number" inputmode="numeric" id="ceQty_' + esc(sk) + '" min="0" value="' + esc(t.qty || 0) + '"></div>' +
+        '<div class="field"><label>Weight (lb) <span class="sub" id="ceWtNote_' + esc(sk) + '"></span></label><input type="number" inputmode="decimal" id="ceWt_' + esc(sk) + '" min="0" value="' + esc(w0 > 0 ? w0 : '') + '">' +
+          '<a href="#" class="sub" id="ceWtEst_' + esc(sk) + '" style="display:none">↺ Use estimate</a></div>' +
       '</div>' +
       '<button class="btn success" id="ceSave_' + esc(sk) + '">Save</button> ' +
       '<button class="btn secondary" id="ceCancel_' + esc(sk) + '">Cancel</button>';
+    var qtyEl = document.getElementById('ceQty_' + sk), wtEl = document.getElementById('ceWt_' + sk);
+    var noteEl = document.getElementById('ceWtNote_' + sk), estLink = document.getElementById('ceWtEst_' + sk);
+    // The weight follows the sheet count until someone types their own; ↺ Use estimate goes back.
+    var typedOwn = false;
+    var showEst = function () {
+      var changed = String(qtyEl.value) !== String(t.qty || 0);
+      var est = changed && qtyEl.value !== '' ? countEstWeight(t, qtyEl.value) : '';
+      if (!typedOwn && est !== '') { wtEl.value = est; noteEl.textContent = L('(estimated)', '(estimado)'); }
+      else if (!typedOwn) { wtEl.value = w0 > 0 ? w0 : ''; noteEl.textContent = ''; }
+      estLink.style.display = typedOwn && est !== '' && String(est) !== String(wtEl.value) ? '' : 'none';
+    };
+    qtyEl.oninput = showEst;
+    wtEl.oninput = function () { typedOwn = true; noteEl.textContent = ''; showEst(); };
+    estLink.onclick = function (e) { e.preventDefault(); typedOwn = false; showEst(); };
     document.getElementById('ceCancel_' + sk).onclick = function () { form.style.display = 'none'; form.innerHTML = ''; };
     document.getElementById('ceSave_' + sk).onclick = function () {
       var loc = document.getElementById('ceLoc_' + sk).value;
-      var qty = document.getElementById('ceQty_' + sk).value;
+      var qty = qtyEl.value, wt = wtEl.value;
       var op = lastOperator;
       if (qty !== '' && (isNaN(Number(qty)) || Number(qty) < 0)) { toast('Sheets must be 0 or more'); return; }
+      if (wt !== '' && (isNaN(Number(wt)) || Number(wt) < 0)) { toast('Weight must be 0 or more'); return; }
       var fields = { Row: loc };
       if (qty !== '') fields['QTY/LOAD'] = Number(qty);
+      if (wt !== '' && Number(wt) !== w0) fields['Weight'] = Number(wt);
       var btn = document.getElementById('ceSave_' + sk); btn.disabled = true; btn.textContent = 'Saving…';
       runMutation('updateTicketDetails', [sk, fields, op, newOpId()],
         function () {
-          if (t) { t.row = loc; if (qty !== '') t.qty = Number(qty); }
+          if (t) { t.row = loc; if (qty !== '') t.qty = Number(qty); if (fields['Weight'] != null) t.weight = fields['Weight']; }
           toast('Updated');
           renderCountList();
         },
