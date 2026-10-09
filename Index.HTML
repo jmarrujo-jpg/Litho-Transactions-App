@@ -130,6 +130,9 @@
   .dbtable tbody tr { cursor: pointer; }
   .dbtable tbody tr:hover td { background: #eef2ff; }
   .dbtable .dbsticky { position: sticky; left: 0; background: var(--card); z-index: 1; }
+  .specwarn { margin: 8px 0; padding: 8px 12px; border-radius: 8px; background: #fff4d6; color: #6b4500; border: 1px solid #e0b040; font-size: 14px; }
+  .specwarn div + div { margin-top: 4px; }
+  .specwarn-tag { display: inline-block; padding: 1px 7px; border-radius: 10px; background: #fff4d6; color: #8a5a00; border: 1px solid #e0b040; font-size: 12px; font-weight: 700; white-space: nowrap; }
   .gate { max-width: 380px; margin: 60px auto; text-align: center; }
   /* Coil Line production report: Skid | Ticket count | Weight | x, like the paper form */
   .crep-head, .crep-row { display: grid; grid-template-columns: 72px 1fr 1fr 44px; gap: 8px; align-items: center; }
@@ -233,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.80.0</span>
+      <span class="version" id="appVersion">v1.81.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1925,6 +1928,7 @@
   var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
   var dbSearch = '';
+  var dbWarnOnly = false;                       // Steel Tickets: only rows with a ⚠ spec warning
   // No passcode: the Database only shows on computers (see FULL_APP).
   function openDatabase() {
     if (!FULL_APP) { renderLanding(); return; }
@@ -2040,7 +2044,8 @@
   function renderMasterSheet() {
     var box = document.getElementById('msBox');
     if (!box) return;
-    var chips = [['all', 'All'], ['Current', 'Current'], ['WIP', 'WIP'], ['Used', 'Used'], ['Pending', 'Pending']].map(function (c) {
+    var nWarn = (msData || []).filter(function (t) { return t.warn && t.warn.length; }).length;
+    var chips = [['all', 'All'], ['Current', 'Current'], ['WIP', 'WIP'], ['Used', 'Used'], ['Pending', 'Pending'], ['warn', '⚠ Check' + (nWarn ? ' (' + nWarn + ')' : '')]].map(function (c) {
       return '<button data-msf="' + c[0] + '"' + (msFilter === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
     box.innerHTML =
@@ -2081,7 +2086,8 @@
     if (!box || !msData) return;
     var term = String(msSearch || '').trim().toLowerCase();
     var rows = msData.filter(function (t) {
-      if (msFilter !== 'all' && t.status !== msFilter) return false;
+      if (msFilter === 'warn') { if (!(t.warn && t.warn.length)) return false; }
+      else if (msFilter !== 'all' && t.status !== msFilter) return false;
       if (!term) return true;
       return [t.ticket, t.skidId, t.mill, t.customer, t.jobId, t.po, t.receiver, t.receiverName, rcvAllNames(t)].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
     });
@@ -2091,6 +2097,8 @@
       return ca - cb;
     });
     var shown = rows.slice(0, MS_CAP);
+    var wchip = document.querySelector('[data-msf="warn"]');
+    if (wchip) { var nw = msData.filter(function (t) { return t.warn && t.warn.length; }).length; wchip.textContent = '⚠ Check' + (nw ? ' (' + nw + ')' : ''); }
     var cnt = document.getElementById('msCount');
     if (cnt) cnt.textContent = 'Showing ' + shown.length + ' of ' + rows.length + (rows.length > MS_CAP ? ' — search to narrow it down.' : '.');
     box.innerHTML = shown.length ? shown.map(msRowHtml).join('') : '<div class="card empty">No tickets match.</div>';
@@ -2168,14 +2176,24 @@
     return '<div class="card" style="padding:12px 14px;margin-bottom:8px' + (changed ? ';border:2px solid #b26a00' : '') + '">' +
       '<div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">' +
         '<div style="flex:1;min-width:180px"><span class="ticket-id" style="font-size:16px">' + esc(t.ticket || '(no ticket)') + '</span> ' +
+          (t.warn && t.warn.length ? '<span class="specwarn-tag" title="' + esc(t.warn.join(' ')) + '">⚠ check</span> ' : '') +
           '<span class="sub">' + esc(t.skidId) + (t.mill ? ' &middot; Mill ' + esc(t.mill) : '') + (t.customer ? ' &middot; ' + esc(t.customer) : '') +
           ' &middot; litho ' + money(t.litho) + (off ? ' → ' + money(t.litho - off) : '') + (t.status === 'Used' && t.usedOn ? ' &middot; used ' + esc(t.usedOn) : '') + '</span></div>' +
         '<div>' + statusCtl + '</div>' +
       '</div>' +
+      specWarnHtml(t.warn, 'To fix it, find this ticket on the Steel Tickets tab and tap its row.') +
       '<div class="sub" style="margin-top:6px">' + (t.po ? 'PO ' + esc(t.po) + ' &middot; ' : '') + 'Receiver: ' + rcvCtl + '</div>' +
       '<button class="btn secondary" style="padding:6px 10px;font-size:13px;margin-top:8px" data-mscoats="' + esc(t.skidId) + '">' + (open ? '▾' : '▸') +
         ' Coatings (' + t.coatings.length + ')' + (nMarks ? ' — ' + nMarks + ' to remove' : '') + '</button>' +
       coats + '</div>';
+  }
+
+  // Likely mis-typed fields (End Use / sheet size not on the spec sheet, weight that doesn't fit the
+  // sheet count) — worked out by the Worker; display only.
+  function specWarnHtml(list, where) {
+    if (!list || !list.length) return '';
+    return '<div class="specwarn">' + list.map(function (m) { return '<div>⚠ ' + esc(m) + '</div>'; }).join('') +
+      (where ? '<div style="font-size:13px;opacity:.85">' + esc(where) + '</div>' : '') + '</div>';
   }
 
   function msSaveAll() {
@@ -3084,16 +3102,24 @@
     if (!data) { box.innerHTML = '<div class="loading">Loading&hellip;</div>'; return; }
     var term = (dbSearch || '').trim().toLowerCase();
     var rows = data.rows;
+    if (dbTable === 'steel' && dbWarnOnly) rows = rows.filter(function (r) { return r.__warn; });
     if (term) rows = rows.filter(function (r) {
       return data.headers.some(function (h) { return String(r[h] == null ? '' : r[h]).toLowerCase().indexOf(term) !== -1; });
     });
     var total = rows.length;
     var shown = rows.slice(0, DB_ROW_CAP);
-    if (countEl) countEl.textContent = 'Showing ' + shown.length + ' of ' + total + (term ? ' matching' : '') + ' — tap a row to edit.';
+    if (countEl) {
+      var nW = dbTable === 'steel' ? data.rows.filter(function (r) { return r.__warn; }).length : 0;
+      countEl.innerHTML = esc('Showing ' + shown.length + ' of ' + total + (term ? ' matching' : '') + ' — tap a row to edit.') +
+        (nW || dbWarnOnly ? ' <button class="btn ' + (dbWarnOnly ? '' : 'secondary') + '" id="dbWarnBtn" style="padding:4px 10px;font-size:13px;margin-left:6px">' +
+          (dbWarnOnly ? 'Show all rows' : '⚠ Only the ' + nW + ' to check') + '</button>' : '');
+      var wb = document.getElementById('dbWarnBtn');
+      if (wb) wb.onclick = function () { dbWarnOnly = !dbWarnOnly; renderDbTable(); };
+    }
     if (!shown.length) { box.innerHTML = '<div class="sub">No rows' + (term ? ' match “' + esc(term) + '”.' : '.') + '</div>'; return; }
     var th = '<th class="dbsticky">#</th>' + data.headers.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('');
     var trs = shown.map(function (r) {
-      var tds = '<td class="dbsticky" style="font-weight:600">' + esc(r.__row) + '</td>' +
+      var tds = '<td class="dbsticky" style="font-weight:600">' + esc(r.__row) + (r.__warn ? ' <span class="specwarn-tag" title="' + esc(r.__warn.join(' ')) + '">⚠</span>' : '') + '</td>' +
         data.headers.map(function (h) { return '<td>' + esc(r[h]) + '</td>'; }).join('');
       return '<tr data-dbrow="' + esc(r.__row) + '">' + tds + '</tr>';
     }).join('');
@@ -3130,6 +3156,7 @@
             (dbTable === 'steel' && rowObj['Skid ID'] ? ' <button class="btn secondary" style="padding:6px 12px;font-size:13px;margin-left:8px" data-hist="' + esc(rowObj['Skid ID']) + '">🕘 History</button>' : '') + '</span>' +
         '</div>' +
         '<div class="sub" style="margin:6px 0 12px">Change any field and save — edits write straight to the sheet.</div>' +
+        (dbTable === 'steel' ? specWarnHtml(rowObj.__warn) : '') +
         fieldsHtml +
         '<div class="row" style="gap:8px;margin-top:12px">' +
           '<button class="btn secondary" id="dbCancel" style="flex:1">Cancel</button>' +
@@ -3160,7 +3187,7 @@
           function (res) {
             var applied = (res && res.updated != null) ? res.updated : changed.length;
             Object.keys(fields).forEach(function (h) { rowObj[h] = fields[h]; });   // keep local cache in sync
-            if (dbTable === 'steel') fetchTickets();
+            if (dbTable === 'steel') { fetchTickets(); dbData.steel = null; msData = null; }   // reload so ⚠ warnings re-check
             showInfo('Saved', applied + ' field' + (applied === 1 ? '' : 's') + ' updated.', function () { renderDatabaseHome(); });
           },
           function (err) { toast('Error: ' + err.message); var b2 = document.getElementById('dbSave'); if (b2) { b2.disabled = false; b2.textContent = 'Save changes'; } });

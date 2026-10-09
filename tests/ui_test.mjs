@@ -1600,6 +1600,38 @@ const base = {
   await page.close();
 }
 
+// ---- 39. Database: ⚠ warnings for skids that look mis-typed against the spec sheet
+{ const W = 'Sheet size 34 × 97.093 isn\'t on the spec sheet for 401X508 (spec sizes: 37.093 × 34). Check Width / Length, or the End Use.';
+  let raws = 0;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMasterSheet: () => R({ rows: [
+      { skidId: 'SKD-1', ticket: '120225-011', status: 'Current', litho: 0, coatings: [], warn: [W] },
+      { skidId: 'SKD-2', ticket: '502', status: 'Current', litho: 0, coatings: [], warn: [] }], receivers: [] }),
+    getRawTable: () => { raws++; return R({ headers: ['Ticket', 'Skid ID', 'Length'], rows: [
+      { __row: 2, 'Ticket': '120225-011', 'Skid ID': 'SKD-1', 'Length': '97.093', __warn: [W] },
+      { __row: 3, 'Ticket': '502', 'Skid ID': 'SKD-2', 'Length': '37.093' }] }); },
+    updateRawRow: () => R({ ok: true, updated: 1 }),
+  }));
+  await page.evaluate(() => { openDatabase(); }); await page.waitForTimeout(300);
+  const list = await page.textContent('#msList');
+  ok('Master sheet: the flagged skid shows ⚠ check and why', list.includes('⚠ check') && list.includes('97.093 isn') && list.includes('Steel Tickets tab'), list);
+  ok('Master sheet: a ⚠ Check filter with the count', (await page.textContent('[data-msf="warn"]')).includes('⚠ Check (1)'));
+  await page.click('[data-msf="warn"]'); await page.waitForTimeout(100);
+  ok('the ⚠ Check filter shows only flagged skids', (await page.textContent('#msList')).includes('120225-011') && !(await page.textContent('#msList')).includes('502'));
+  await page.click('[data-dbt="steel"]'); await page.waitForTimeout(300);
+  ok('Steel Tickets: ⚠ on the flagged row only', (await page.$$('#dbTableBox .specwarn-tag')).length === 1);
+  await page.click('#dbWarnBtn'); await page.waitForTimeout(100);
+  ok('Steel Tickets: only-the-flagged button', (await page.$$('#dbTableBox tbody tr')).length === 1);
+  await page.click('[data-dbrow="2"]'); await page.waitForTimeout(100);
+  ok('editor: the warning is shown above the fields', ((await page.textContent('.specwarn')) || '').includes('97.093 isn'));
+  await page.fill('.dbf[data-f="Length"]', '37.093');
+  await page.click('#dbSave'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(300);
+  await page.click('#modalOk'); await page.waitForTimeout(300);
+  ok('after a save the table reloads so the warning re-checks', raws === 2, raws);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

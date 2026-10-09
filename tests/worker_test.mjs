@@ -1235,5 +1235,48 @@ await concurrency(envBase, 'in-worker lock');
   ok('no spec sheet: the pallet is still made', p.ok && p.result.newLoadNo && !p.result.newLoadWeight, p);
 }
 
+// 36. Database warnings: skids that look mis-typed against the spec sheet (display only)
+{ const SPEC = '1NVCx-n9_Zha9u1HPyi3hGLBQ4EyWHx7AbA4zs36hbYc';
+  const H = MASTER_H.concat(['BW', 'C/S', 'Cut Type', 'End Use', 'Width', 'Length', 'Weight', 'QTY/LOAD'].filter((h) => MASTER_H.indexOf(h) === -1));
+  const sk = (t, id, extra) => { const o = Object.assign({ 'Ticket': t, 'Skid ID': id, 'Status': 'Current' }, extra); return H.map((h) => (o[h] == null ? '' : o[h])); };
+  const CH = ['Can Size', 'Customer', 'Sheet Dia', 'Coil Width', '#OUT'];
+  const EH = ['End Size', 'Customer', 'Sheet Dim 1', 'Sheet Dim 2', '#OUT', 'Strip Length (in)', 'Cut Edge (in)', 'Strip Width (in)'];
+  // 34 × 37.093 × 1000 sheets × BW 75 ÷ 31,360 ≈ 3,016 lb
+  const good = { 'End Use': '401X508', 'Width': 34, 'Length': 37.093, 'QTY/LOAD': 1000, 'BW': 75, 'Weight': 3000 };
+  const fk = makeFake({ [SID]: { 'Steel Tickets': [H,
+      sk('OK-1', 'SKD-000060', good),
+      sk('SZ-1', 'SKD-000061', Object.assign({}, good, { 'Length': 97.093, 'Weight': 7900 })),
+      sk('EU-1', 'SKD-000062', Object.assign({}, good, { 'End Use': '211 DIA' })),
+      sk('WT-1', 'SKD-000063', Object.assign({}, good, { 'Weight': 13830 })),
+      sk('OK-2', 'SKD-000064', Object.assign({}, good, { 'Width': 37.093, 'Length': 34, 'Weight': 3300 })),   // turned round, +9%
+      sk('CO-1', 'SKD-000065', Object.assign({}, good, { 'C/S': 'C', 'End Use': '211 DIA' })),
+      sk('US-1', 'SKD-000066', Object.assign({}, good, { 'Status': 'Used', 'End Use': '211 DIA' })),
+      sk('LD-1', 'SKD-000067', Object.assign({}, good, { 'Cut Type': 'Slit', 'QTY/LOAD': 9000 })),
+      sk('EN-1', 'SKD-000068', { 'End Use': '603 ENDS', 'Width': 34.005, 'Length': 30.6875, 'QTY/LOAD': 1000, 'BW': 85, 'Weight': 2830 }),
+    ], 'Transactions': [TX_H] },
+    [SPEC]: {
+      'CanSpecs': [['CAN BODY SCRAP'], CH, ['401X508 S/S', 'COFFEE', 37.093, 34, 18]],
+      'EndSpecs': [['CAN END SCRAP'], EH, ['603 END SCROLL', 'STOCK', 34.005, 30.6875, 25, 34.005, 6.769, 6.869]],
+    } });
+  globalThis.fetch = fk.fetchImpl;
+  const ms = await call('getMasterSheet', []);
+  const w = (t) => ((ms.result.rows.filter((r) => r.ticket === t)[0] || {}).warn) || [];
+  ok('a skid matching the spec, with a weight that fits, has no warning', ms.ok && !w('OK-1').length && !w('OK-2').length && !w('EN-1').length, ms.ok ? [w('OK-1'), w('OK-2'), w('EN-1')] : ms);
+  ok('sheet size not on the spec for its End Use is flagged, with the spec sizes', w('SZ-1').some((m) => /Sheet size 34 × 97\.093 isn't on the spec sheet for 401X508 \(spec sizes: 37\.093 × 34\)/.test(m)), w('SZ-1'));
+  ok('End Use not on the spec sheet is flagged', w('EU-1').length === 1 && /End Use "211 DIA" isn't on the spec sheet/.test(w('EU-1')[0]), w('EU-1'));
+  ok('a weight that does not fit the sheet count is flagged with the expected weight', w('WT-1').length === 1 && /Weight 13,830 lb .* about 3,016 lb/.test(w('WT-1')[0]), w('WT-1'));
+  ok('coils, Used skids and slitter / scroll loads are not checked', !w('CO-1').length && !w('US-1').length && !w('LD-1').length, [w('CO-1'), w('US-1'), w('LD-1')]);
+  const raw = await call('getRawTable', ['steel']);
+  const rw = (t) => (raw.result.rows.filter((r) => r['Ticket'] === t)[0] || {}).__warn;
+  ok('the Steel Tickets table carries the same warnings', raw.ok && rw('SZ-1') && rw('SZ-1').length === 1 && !rw('OK-1'), raw.ok ? [rw('SZ-1'), rw('OK-1')] : raw);
+  const tx = await call('getRawTable', ['tx']);
+  ok('the Transactions table is not checked', tx.ok && !tx.result.rows.some((r) => r.__warn), tx);
+}
+// 36b. No spec sheet: only the weight check runs
+{ const f = fresh();
+  const ms = await call('getMasterSheet', []);
+  ok('no spec sheet: the Master sheet still loads', ms.ok && ms.result.rows.every((r) => Array.isArray(r.warn) && !r.warn.some((m) => /spec sheet/.test(m))), ms);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -152,7 +152,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'weight-80', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'warn-81', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -291,7 +291,7 @@ async function handle(fn, args, env) {
     case 'getSkidHistory': // (skidId) one ticket's full history: timeline, where it came from, what was made from it
       return getSkidHistory(sheets, args[0]);
     case 'getMasterSheet': // () every Current / WIP / Used / Pending ticket with its live coatings
-      return getMasterSheet(sheets);
+      return getMasterSheet(sheets, env);
     case 'masterEdit': // (changes[{skidId, status?, removePasses?[], receiver?}], operator, opId) Database Master sheet: save all at once
       return masterEdit(sheets, args[0], args[1], args[2]);
     case 'getReceivers': // () every receiver, plus a light list of every ticket (to attach them)
@@ -350,7 +350,7 @@ async function handle(fn, args, env) {
     case 'discardCoilCarry': // (coilSkidId, operator, opId) drop an unfinished skid left for the next coil-line run
       return discardCoilCarry(sheets, args[0], args[1], args[2]);
     case 'getRawTable': // (tableKey: 'steel' | 'tx')
-      return getRawTable(sheets, args[0]);
+      return getRawTable(sheets, args[0], env);
     case 'updateRawRow': // (tableKey, rowNum, fields, opId)
       return updateRawRow(sheets, args[0], args[1], args[2], args[3]);
     case 'importStaging': // (opId) fresh-start import from the 'Current' + 'WIP' tabs
@@ -1737,9 +1737,10 @@ async function getSkidHistory(sheets, skidId) {
 // Every ticket that's Current, WIP, Used or Pending, with its live coatings, for the Database
 // "Master sheet" screen. One read of Steel Tickets, Transactions and Litho Jobs.
 const MASTER_STATUSES = [STATUS.CURRENT, STATUS.WIP, STATUS.USED];
-async function getMasterSheet(sheets) {
+async function getMasterSheet(sheets, env) {
   const master = await readTab(sheets, MASTER);
   const ctx = await traceContext(sheets, master.rows);
+  const specs = await loadSpecs(sheets, env);
   const out = [];
   master.rows.forEach((o) => {
     const st = o['Status'] || '';
@@ -1750,6 +1751,7 @@ async function getMasterSheet(sheets) {
       jobId: t.jobId, qty: t.qty, usedOn: t.usedOn, po: t.po, receiver: t.receiver, receiverName: t.receiverName, receiverLink: t.receiverLink, receiverFrom: t.receiverFrom,
       moreReceivers: t.moreReceivers || [],
       receiverOwn: String(o['Receiver'] || '').trim(),
+      warn: specWarnings(o, specs),
       coatings: activeCoatings(skidHist(ctx, o)).map((c) => ({ passNumber: c.passNumber, item: c.item, group: c.group || '', sub: c.sub || '', chemCode: c.chemCode || '', cost: c.cost, date: c.date })) });
   });
   return { rows: out, receivers: Object.keys(ctx.receivers).sort().map((id) => ({ id, name: receiverName(ctx.receivers[id]) })) };
@@ -3195,16 +3197,18 @@ const DB_TABLES = { steel: MASTER, tx: TRANSACTIONS };
 // first occurrence of each name (blank headers dropped), in sheet order; each row is a plain object
 // keyed by header name plus __row (its sheet row number, used to target edits). Values are exactly
 // what the app reads for that row. Fully-blank trailing rows are skipped.
-async function getRawTable(sheets, tableKey) {
+async function getRawTable(sheets, tableKey, env) {
   const tab = DB_TABLES[String(tableKey || '')];
   if (!tab) throw new Error('Unknown table: ' + tableKey);
   const r = await readObjects(sheets, tab);
+  const specs = tab === MASTER ? await loadSpecs(sheets, env) : null;
   const seen = {};
   const headers = [];
   r.headers.forEach((h) => { const n = String(h || '').trim(); if (n && !seen[n]) { seen[n] = true; headers.push(n); } });
   const rows = r.rows.map((o) => {
     const row = { __row: o.__row };
     headers.forEach((h) => { row[h] = (o[h] == null ? '' : o[h]); });
+    if (specs) { const w = specWarnings(o, specs); if (w.length) row.__warn = w; }
     return row;
   }).filter((row) => headers.some((h) => String(row[h]).trim() !== ''));
   return { tab, tableKey, headers, rows };
@@ -3633,6 +3637,44 @@ function piecesPerSheet(src, specs) {
   if (hit.length) { const r = best(hit); return { per: r.per, how: 'spec', name: r.name }; }
   const r = best(rows);
   return { per: r.per, how: 'spec (size not listed)', name: r.name };
+}
+// Likely typos on a skid, for the Database screens (display only — nothing is written). Checked on
+// sheet skids still in stock (not coils, not slitter / scroll loads, not Used / Missing):
+//   - End Use not on the spec sheet;
+//   - sheet size (Width × Length) not listed for that End Use;
+//   - Weight not within 15% of sheets × Width × Length × BW ÷ 31,360 (a base box is 31,360 sq in
+//     and BW is its weight in lb).
+// Returns a list of plain-English messages ([] = looks fine).
+function specWarnings(o, specs) {
+  const st = String(o['Status'] || '').trim();
+  if (st === STATUS.USED || st === STATUS.MISSING) return [];
+  if (String(o['C/S'] || '').trim().toUpperCase() === 'C' || String(o['Cut Type'] || '').trim()) return [];
+  if (!(o['Ticket'] || o['Skid ID'])) return [];
+  const out = [], fmt = (x) => String(Math.round(num(x) * 1000) / 1000);
+  const w = num(o['Width']), l = num(o['Length']), eu = String(o['End Use'] || '').trim();
+  if (specs && specs.ok && eu) {
+    const code = specCode(eu);
+    const rows = code ? (code.kind === 'can' ? specs.cans : specs.ends)[code.code] : null;
+    if (!rows || !rows.length) out.push('End Use "' + eu + '" isn\'t on the spec sheet. Check the End Use.');
+    else if (w > 0 && l > 0) {
+      const near = (x, y) => Math.abs(x - y) <= 0.1;
+      if (!rows.some((r) => (near(r.a, w) && near(r.b, l)) || (near(r.a, l) && near(r.b, w)))) {
+        const sizes = [];
+        rows.forEach((r) => { const z = fmt(r.a) + ' × ' + fmt(r.b); if (r.a > 0 && r.b > 0 && sizes.indexOf(z) === -1) sizes.push(z); });
+        out.push('Sheet size ' + fmt(w) + ' × ' + fmt(l) + ' isn\'t on the spec sheet for ' + code.code + (code.kind === 'end' ? ' ENDS' : '') +
+          (sizes.length ? ' (spec sizes: ' + sizes.slice(0, 6).join(', ') + ')' : '') + '. Check Width / Length, or the End Use.');
+      }
+    }
+  }
+  const qty = num(o['QTY/LOAD']), bw = num(o['BW']), wt = num(o['Weight']);
+  if (w > 0 && l > 0 && qty > 0 && bw > 0 && wt > 0) {
+    const exp = w * l * qty * bw / 31360;
+    if (Math.abs(wt / exp - 1) > 0.15) {
+      out.push('Weight ' + Math.round(wt).toLocaleString('en-US') + ' lb doesn\'t fit ' + Math.round(qty).toLocaleString('en-US') + ' sheets of ' + fmt(w) + ' × ' + fmt(l) +
+        ' at BW ' + fmt(bw) + ' (that should weigh about ' + Math.round(exp).toLocaleString('en-US') + ' lb). Check Weight, QTY/LOAD, Width / Length or BW.');
+    }
+  }
+  return out;
 }
 // The estimate for a new load from its composition [{skidId, strips}] and the parent rows.
 function estimateLoadWeight(comp, parentsById, specs) {
