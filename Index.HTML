@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.84.0</span>
+      <span class="version" id="appVersion">v1.84.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1285,6 +1285,9 @@
   // when a finger is its only pointer (no mouse or trackpad); iPads that call themselves a Mac count
   // too. Any device can be switched by opening the page with ?view=full or ?view=floor (remembered on
   // that device; ?view=auto goes back to detecting). This only hides buttons; it isn't a lock.
+  // MOBILE_GATE: set to false to give every device the full app (the floor version then only shows
+  // with ?view=floor). Turned off for now, so phones and tablets get everything too.
+  var MOBILE_GATE = false;
   var FULL_APP = (function () {
     var forced = '';
     try {
@@ -1294,6 +1297,7 @@
     } catch (e) { /* no storage: detect every load */ }
     if (forced === 'full') return true;
     if (forced === 'floor') return false;
+    if (!MOBILE_GATE) return true;
     var ua = navigator.userAgent || '';
     if (/iPad|iPhone|iPod|Android|Mobile|Silk|Kindle/i.test(ua)) return false;
     if (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return false;   // iPadOS asks for desktop sites

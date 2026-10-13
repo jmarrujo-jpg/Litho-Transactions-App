@@ -1180,6 +1180,8 @@ const base = {
 { const IPAD = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   const { page, calls } = await boot(base, { userAgent: IPAD });
   const ids = async () => page.$$eval('#view button', (bs) => bs.map((b) => b.id));
+  ok('mobile gate off: a tablet gets everything', !!(await page.$('#tileDatabase')) && !!(await page.$('#tileReports')));
+  await page.goto(FILE + '?view=floor'); await page.waitForTimeout(300);
   let home = await ids();
   ok('tablet: no Reports or Database', !home.includes('tileReports') && !home.includes('tileDatabase') && home.includes('tileSearch') && home.includes('tileCount'), home);
   ok('tablet: version says tablet', (await page.textContent('#appVersion')).includes('tablet'));
@@ -1198,8 +1200,8 @@ const base = {
   ok('?view=full shows everything on a tablet', !!(await page.$('#tileDatabase')) && !!(await page.$('#tileReports')));
   await page.goto(FILE); await page.waitForTimeout(300);
   ok('?view=full is remembered on that device', !!(await page.$('#tileDatabase')));
-  await page.goto(FILE + '?view=auto'); await page.waitForTimeout(300);
-  ok('?view=auto goes back to detecting', !(await page.$('#tileDatabase')));
+  await page.goto(FILE + '?view=floor'); await page.goto(FILE + '?view=auto'); await page.waitForTimeout(300);
+  ok('?view=auto goes back to detecting (gate off: everything)', !!(await page.$('#tileDatabase')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
