@@ -1705,6 +1705,75 @@ const base = {
   await page.close();
 }
 
+// ---- 42. Materials: receive a delivery by scanning lots; the list; edit a lot
+{ const mats = [
+    { id: 'M-00002', lot: 'PW-1', type: 'Powder', product: 'Stripe 9', supplier: 'AKZO', receiver: 'R-00007', po: '55', date: '2026-09-01', expiration: '2020-01-01', qtyReceived: 2, qtyOnHand: 2, container: 'Box', status: 'In Stock', comments: '' },
+    { id: 'M-00001', lot: 'OLD-1', type: 'Compound', product: 'WB-2100', supplier: 'DSM', receiver: 'R-00007', po: '55', date: '2026-08-01', expiration: '', qtyReceived: 1, qtyOnHand: 0, container: 'Pail', status: 'Used', comments: '' }];
+  const G = { materials: mats, types: ['Compound', 'Powder', 'Copper', 'Ink'], products: { Compound: ['WB-2100'], Powder: ['Stripe 9'], Copper: [], Ink: [] },
+    suppliers: ['AKZO', 'DSM'], containers: ['Box', 'Pail'], receivers: [{ id: 'R-00007', name: '26-09-01--AKZO--R-00007', date: '2026-09-01', supplier: 'AKZO', pos: '55' }] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMaterials: () => R(G),
+    receiveMaterials: (a) => R({ ok: true, receiver: 'R-00008', receiverCreated: true, lots: 2, containers: 3, saved: [] }),
+    updateMaterial: () => R({ ok: true }),
+  }));
+  await page.click('#tileMaterials');
+  await page.waitForSelector('[data-mtopen]');
+  let txt = await page.textContent('#mtList');
+  ok('materials list: in-stock lots only by default; expired shows', txt.includes('PW-1') && !txt.includes('OLD-1') && txt.includes('EXPIRED 2020-01-01') && txt.includes('2 of 2 left'), txt);
+  await page.check('#mtShowUsed');
+  ok('Show used-up lots shows the used one', (await page.textContent('#mtList')).includes('OLD-1'));
+  await page.click('[data-mtt="Compound"]');
+  txt = await page.textContent('#mtList');
+  ok('type chip filters', txt.includes('OLD-1') && !txt.includes('PW-1'), txt);
+  // Receive
+  await page.click('#mtReceiveBtn');
+  await page.waitForSelector('#mtScan');
+  await page.fill('#mtSupplier', 'DSM');
+  await page.fill('#mtPo', '7731-DC');
+  await page.fill('#mtScan', 'A1'); await page.press('#mtScan', 'Enter');
+  ok('scanning without a product name is refused', !(await page.$('[data-mtqty]')));
+  await page.fill('#mtProduct', 'WB-2100');
+  await page.fill('#mtExp', '2027-04-01');
+  for (const lot of ['24A0915', '24A0915', '24A0922']) { await page.fill('#mtScan', lot); await page.press('#mtScan', 'Enter'); }
+  const qtys = await page.$$eval('[data-mtqty]', (els) => els.map((e) => e.textContent));
+  ok('the same lot scanned twice counts 2 containers', qtys.join() === '1,2', qtys);
+  ok('the scan box is cleared and ready for the next', (await page.$eval('#mtScan', (e) => e.value)) === '' && (await page.evaluate(() => document.activeElement.id)) === 'mtScan');
+  await page.click('[data-mtrt="Powder"]');
+  ok('a new type: its container, blank product, its product list', (await page.$eval('#mtContainer', (e) => e.value)) === 'Box' && (await page.$eval('#mtProduct', (e) => e.value)) === ''
+    && (await page.$eval('#mtProdList', (e) => e.innerHTML)).includes('Stripe 9'));
+  await page.fill('#mtScan', 'PW-1');
+  ok('save button counts lots and containers', (await page.textContent('#mtSave')).includes('Save 2 lots (3 containers)'), await page.textContent('#mtSave'));
+  // Back keeps the scanned lots
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  ok('stepping out keeps the scanned lots (warning on the list)', (await page.textContent('#view')).includes('2 scanned lots are not saved yet'));
+  await page.click('#mtReceiveBtn'); await page.waitForSelector('#mtScan');
+  ok('…and they are still there', (await page.$$('[data-mtqty]')).length === 2);
+  // The typed-but-not-entered lot (PW-1 is gone now since the screen redrew) — product needed for powder
+  await page.fill('#mtProduct', 'Stripe 9');
+  await page.fill('#mtScan', 'PW-1');
+  await page.click('#mtSave');   // the lot left in the box is added before saving
+  await page.waitForSelector('#modalOk'); await page.click('#modalOk');
+  await page.waitForTimeout(200);
+  const rc = calls.filter((c) => c.fn === 'receiveMaterials')[0];
+  ok('receiveMaterials gets the delivery and every lot', rc && rc.args[0].supplier === 'DSM' && rc.args[0].po === '7731-DC' && rc.args[0].receiver === '' && rc.args[1].length === 3
+    && rc.args[1].some((l) => l.lot === '24A0915' && l.qty === 2 && l.expiration === '2027-04-01' && l.product === 'WB-2100' && l.type === 'Compound')
+    && rc.args[1].some((l) => l.lot === 'PW-1' && l.type === 'Powder' && l.container === 'Box'), rc && rc.args);
+  ok('saved: says the receiver number to write on the slip', (await page.textContent('#modalRoot')).includes('R-00008'));
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  ok('back on the list after saving; nothing pending', !!(await page.$('#mtReceiveBtn')) && !(await page.textContent('#view')).includes('not saved yet'));
+  // Edit a lot
+  await page.click('[data-mtt="all"]');
+  await page.waitForSelector('[data-mtopen="M-00002"]');
+  await page.click('[data-mtopen="M-00002"]');
+  await page.waitForSelector('#mtEdSave');
+  await page.fill('#mtEd5', '0');
+  await page.click('#mtEdSave'); await page.waitForTimeout(150);
+  const up = calls.filter((c) => c.fn === 'updateMaterial')[0];
+  ok('edit sends only the changed field', up && up.args[0] === 'M-00002' && JSON.stringify(up.args[1]) === '{"Qty On Hand":"0"}', up && up.args);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

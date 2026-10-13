@@ -1296,5 +1296,59 @@ await concurrency(envBase, 'in-worker lock');
   ok('no spec sheet: the Master sheet still loads', ms.ok && ms.result.rows.every((r) => Array.isArray(r.warn) && !r.warn.some((m) => /spec sheet/.test(m))), ms);
 }
 
+// 37. Materials: receive a delivery by lot (one new receiver), edit, delete; retry-safe
+{ const f = fresh();
+  const none = await call('getMaterials', []);
+  ok('no Materials tab yet: empty list, the four types', none.ok && none.result.materials.length === 0 && none.result.types.join() === 'Compound,Powder,Copper,Ink', none);
+  const noSup = await call('receiveMaterials', [{ supplier: '' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100' }], 'Jo', 'op-37-x']);
+  ok('needs a supplier', !noSup.ok && /supplier/.test(noSup.error), noSup);
+  const noProd = await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: '' }], 'Jo', 'op-37-y']);
+  ok('needs a product name', !noProd.ok && /product/.test(noProd.error), noProd);
+  const badExp = await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: 'P', expiration: 'soon' }], 'Jo', 'op-37-z']);
+  ok('a bad expiration date is refused', !badExp.ok && /expiration date must be a date/.test(badExp.error), badExp);
+  ok('nothing saved by the refused tries', !f.rows(SID, 'Receivers').length);
+  // Lost answer: the rows land but the reply fails; the retry must not add them twice.
+  f.faults.push({ match: (r) => r.kind === 'append' && r.decoded.includes('Materials'), mode: 'after', status: 503, times: 1 });
+  const lots = [{ lot: '24A0915', type: 'compound', product: 'WB-2100', qty: 1, expiration: '2027-04-01', container: 'Pail' },
+    { lot: '24A0915', type: 'Compound', product: 'WB-2100', qty: 1 },
+    { lot: '24A0922', type: 'Compound', product: 'WB-2100', qty: 4, container: 'Pail' },
+    { lot: 'PW-77', type: 'Powder', product: 'Stripe 9', qty: 2 }];
+  const a = await call('receiveMaterials', [{ date: '2026-10-13', supplier: 'dsm', po: '7731-DC', comments: 'dock 2' }, lots, 'Jo', 'op-37-a']);
+  const a2 = await call('receiveMaterials', [{ date: '2026-10-13', supplier: 'dsm', po: '7731-DC', comments: 'dock 2' }, lots, 'Jo', 'op-37-a']);
+  const m = f.rows(SID, 'Materials');
+  ok('the same lot scanned twice is one row with 2 containers', a.ok && m.length === 3 && m[0]['Lot #'] === '24A0915' && String(m[0]['Qty Received']) === '2' && String(m[0]['Qty On Hand']) === '2', m);
+  ok('type spelled the app\'s way; expiration and container kept', m[0]['Type'] === 'Compound' && m[0]['Expiration Date'] === '2027-04-01' && m[0]['Container'] === 'Pail' && m[2]['Type'] === 'Powder', m[0]);
+  ok('one new receiver for the delivery, every lot on it with the PO', f.rows(SID, 'Receivers').length === 1 && m.every((r) => r['Receiver'] === 'R-00001' && r['PO #'] === '7731-DC' && r['Supplier'] === 'DSM'), [f.rows(SID, 'Receivers'), m]);
+  ok('the receiver notes say what came on it', /Materials: Compound, Powder/.test(f.rows(SID, 'Receivers')[0]['Notes']), f.rows(SID, 'Receivers')[0]);
+  ok('the retry adds nothing (no second receiver or lots)', a2.ok && a2.result.duplicate && f.rows(SID, 'Receivers').length === 1 && f.rows(SID, 'Materials').length === 3, a2);
+  ok('numbered M-00001.. and In Stock', m.map((r) => r['Material ID']).join() === 'M-00001,M-00002,M-00003' && m.every((r) => r['Status'] === 'In Stock'), m.map((r) => r['Material ID']));
+  // A second delivery onto an existing receiver
+  const b = await call('receiveMaterials', [{ supplier: 'Elektrisola', receiver: 'r-00001' }, [{ lot: 'K88213', type: 'Copper', product: '0.059 wire', container: 'Gaylord' }], 'Jo', 'op-37-b']);
+  ok('onto a picked receiver: no new receiver', b.ok && f.rows(SID, 'Receivers').length === 1 && f.rows(SID, 'Materials')[3]['Receiver'] === 'R-00001', b);
+  const bad = await call('receiveMaterials', [{ supplier: 'X', receiver: 'R-09999' }, [{ lot: 'Z', type: 'Ink', product: 'Blue' }], 'Jo', 'op-37-c']);
+  ok('an unknown receiver is refused', !bad.ok && /R-09999 not found/.test(bad.error), bad);
+  const g = await call('getMaterials', []);
+  ok('product names offered per type', g.ok && g.result.products.Compound.join() === 'WB-2100' && g.result.products.Powder.join() === 'Stripe 9' && g.result.products.Copper.join() === '0.059 wire', g.result && g.result.products);
+  ok('newest lot first; receivers listed to pick', g.result.materials[0].id === 'M-00004' && g.result.receivers[0].id === 'R-00001' && g.result.containers.join() === 'Gaylord,Pail', g.result);
+  // Edit
+  const e1 = await call('updateMaterial', ['M-00001', { 'Qty On Hand': 0 }, 'Jo', 'op-37-e']);
+  ok('on hand 0 -> Used', e1.ok && f.rows(SID, 'Materials')[0]['Status'] === 'Used' && String(f.rows(SID, 'Materials')[0]['Qty On Hand']) === '0', f.rows(SID, 'Materials')[0]);
+  const e2 = await call('updateMaterial', ['M-00001', { 'Qty On Hand': 1, 'Expiration Date': '', 'Product': 'WB-2200' }, 'Jo', 'op-37-f']);
+  ok('on hand back above 0 -> In Stock; expiration cleared; product changed', e2.ok && f.rows(SID, 'Materials')[0]['Status'] === 'In Stock' && f.rows(SID, 'Materials')[0]['Expiration Date'] === '' && f.rows(SID, 'Materials')[0]['Product'] === 'WB-2200', f.rows(SID, 'Materials')[0]);
+  const e3 = await call('updateMaterial', ['M-00001', { 'Qty On Hand': -1 }, 'Jo', 'op-37-g']);
+  ok('a negative count is refused', !e3.ok && /whole number/.test(e3.error), e3);
+  // The receiver can't be deleted while lots are on it; its list counts them
+  const rc = await call('getReceivers', []);
+  ok('the Receivers list counts material lots', rc.ok && rc.result.receivers[0].materialCount === 4, rc.result && rc.result.receivers);
+  const dr = await call('deleteReceiver', ['R-00001', '', 'op-37-h']);
+  ok('a receiver with lots on it can\'t be deleted', !dr.ok && /material lot/.test(dr.error), dr);
+  // Delete a lot
+  const d = await call('deleteMaterial', ['M-00002', 'Jo', 'op-37-i']);
+  const d2 = await call('deleteMaterial', ['M-00002', 'Jo', 'op-37-i']);
+  ok('delete a lot; again is harmless', d.ok && d2.ok && d2.result.alreadyGone && f.rows(SID, 'Materials').map((r) => r['Material ID']).join() === 'M-00001,M-00003,M-00004', f.rows(SID, 'Materials').map((r) => r['Material ID']));
+  const n = await call('receiveMaterials', [{ supplier: 'DSM', receiver: 'R-00001' }, [{ lot: 'NEW', type: 'Ink', product: 'Blue' }], 'Jo', 'op-37-j']);
+  ok('a deleted M-number is not reused', n.ok && n.result.saved[0].id === 'M-00005', n.result && n.result.saved);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
