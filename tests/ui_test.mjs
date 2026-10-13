@@ -1774,6 +1774,29 @@ const base = {
   await page.close();
 }
 
+// ---- 43. Skid traveler prints straight to the Zebra (via print_server.py's /label tab)
+{ const steel = { 'Skid ID': 'SKD-1', 'Ticket': '100', 'Status': 'WIP', 'BW': '75', 'Litho': 10 };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getTicketCard: () => R(card(steel, { coatings: [{ passNumber: 1, item: 'SIZE', group: '603X408', sub: '10-OUT', cost: 2 }] })),
+  }));
+  await page.evaluate(() => { window.__opened = []; window.open = (u) => { window.__opened.push(u); return {}; }; window.__printed = 0; window.print = () => { window.__printed++; }; });
+  await page.evaluate(() => openCard('SKD-1'));
+  await page.waitForSelector('#printTravelerBtn');
+  await page.click('#printTravelerBtn');
+  const opened = await page.evaluate(() => window.__opened);
+  const zpl = opened.length ? Buffer.from(opened[0].split('#')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('latin1') : '';
+  ok('Print opens the print server\'s /label page with the label', opened.length === 1 && opened[0].indexOf('http://192.168.1.214:8000/label#') === 0, opened);
+  ok('the label is one 300 dpi graphic, turned for a 4in printer (1200 x 1800 dots)', /^\^XA\^PW1200\^LL1800\^LH0,0\^FO0,0\^GFA,270000,270000,150,/.test(zpl) && /\^FS\^PQ1\^XZ$/.test(zpl), zpl.slice(0, 60));
+  ok('no print dialog for the Zebra', (await page.evaluate(() => window.__printed)) === 0);
+  await page.click('#printTravelerDialog');
+  ok('"Print with the print dialog instead" still opens the dialog', (await page.evaluate(() => window.__printed)) === 1);
+  await page.evaluate(() => { window.open = () => null; });
+  await page.click('#printTravelerBtn'); await page.waitForTimeout(50);
+  ok('a blocked pop-up says how to allow it', /Allow pop-ups/.test(await page.textContent('#toast')), await page.textContent('#toast'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 await browser.close();
 console.log((fail ? '✗' : '✓') + ' ui_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

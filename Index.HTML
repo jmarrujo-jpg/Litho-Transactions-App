@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.85.0</span>
+      <span class="version" id="appVersion">v1.86.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -1206,6 +1206,7 @@
     "🖨 Print list": "🖨 Imprimir lista",
     "🖨️ Print New Steel Tickets": "🖨️ Imprimir tickets de acero nuevos",
     "🖨️ Print skid traveler": "🖨️ Imprimir viajero de tarima",
+    "Print with the print dialog instead": "Imprimir con el diálogo de impresión",
     "🗄️ Database": "🗄️ Base de datos",
     "🛠️ Press Department": "🛠️ Departamento de Prensas",
     "🧮 Litho Steel Count": "🧮 Conteo de acero de Litho",
@@ -5534,6 +5535,182 @@
     window.print();
   }
 
+  // ---- Skid traveler straight to the Zebra ----------------------------------------------------
+  // Print draws the traveler at the printer's resolution (the same layout as the dialog version),
+  // turns it into one black-and-white ZPL graphic, and opens print_server.py's /label page on the
+  // shop PC with the label in the link. That page sends it to the Zebra and closes itself. (The app
+  // can't send it in the background: it's https and the print server is plain http on the shop
+  // network, which browsers block — opening a tab is allowed.)
+  var ZEBRA_LABEL_URL = 'http://192.168.1.214:8000/label';   // print_server.py on the shop PC
+  var ZEBRA_DPI = 300;
+  // The 6in x 4in label usually feeds sideways through a 4in-wide printer, so the image is turned a
+  // quarter turn to fit. A printer that feeds it 6in wide wants false.
+  var ZEBRA_ROTATE = true;
+
+  // Draws the traveler on a canvas 6in x 4in at ZEBRA_DPI (white background, black ink).
+  function travelerLabelCanvas(card) {
+    var D = ZEBRA_DPI, PT = D / 72, W = Math.round(6 * D), H = Math.round(4 * D);
+    var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    var g = cv.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#000'; g.strokeStyle = '#000'; g.textBaseline = 'top';
+    var M = Math.round(0.12 * D), X0 = M, X1 = W - M, BOTTOM = H - M;
+    var y = M + Math.round(0.15 * D);
+    function font(pt, bold) { g.font = (bold ? 'bold ' : '') + Math.round(pt * PT) + 'px Arial, Helvetica, sans-serif'; }
+    function fit(text, maxW) {   // one line, cut with … if it's too long
+      text = String(text == null ? '' : text);
+      if (g.measureText(text).width <= maxW) return text;
+      while (text.length && g.measureText(text + '…').width > maxW) text = text.slice(0, -1);
+      return text + '…';
+    }
+    function wrap(text, maxW) {   // word-wrapped lines (a word longer than the cell is cut to fit)
+      var words = String(text == null ? '' : text).split(/\s+/).filter(Boolean), lines = [], cur = '';
+      words.forEach(function (w) {
+        var t = cur ? cur + ' ' + w : w;
+        if (g.measureText(t).width <= maxW) { cur = t; return; }
+        if (cur) lines.push(cur);
+        cur = g.measureText(w).width <= maxW ? w : fit(w, maxW);
+      });
+      if (cur) lines.push(cur);
+      return lines.length ? lines : [''];
+    }
+    var steel = card.steel || {};
+    var coats = travelerCoatings(card);
+
+    // Top: logo, the ticket heading, and the Data Matrix (same payload as the dialog version).
+    var logoEl = document.querySelector('#appHeader .logo') || document.querySelector('.logo');
+    var logoH = Math.round(0.62 * D), logoW = 0;
+    if (logoEl && logoEl.complete && logoEl.naturalWidth) {
+      logoW = Math.round(logoEl.naturalWidth * logoH / logoEl.naturalHeight);
+      g.drawImage(logoEl, X0, y, logoW, logoH);
+    }
+    var payload = String(card.ticket || card.skidId || '');
+    coats.forEach(function (c) { payload += '|' + (c.item || '') + ' ' + travelerDate(c.when); });
+    var dmBox = Math.round(0.95 * D), dmLeft = X1, sym = null;
+    try { sym = window.DataMatrix.encode(payload); } catch (e) { sym = null; }
+    if (sym) {
+      var s = Math.max(1, Math.floor(dmBox / (sym.size + 4)));   // 2 modules of white all round
+      var dx = X1 - (sym.size + 2) * s, dy = y + 2 * s;
+      for (var r = 0; r < sym.size; r++) for (var c = 0; c < sym.size; c++) if (sym.matrix[r][c]) g.fillRect(dx + c * s, dy + r * s, s, s);
+      dmLeft = X1 - dmBox;
+    }
+    var hx = X0 + (logoW ? logoW + Math.round(10 * PT) : 0), hw = dmLeft - Math.round(10 * PT) - hx, ty = y + Math.round(2 * PT);
+    font(8, true); g.fillText(fit('Container Supply CO.', hw), hx, ty); ty += Math.round(11 * PT);
+    font(17, true); g.fillText(fit('Ticket - ' + (card.ticket || '(none)'), hw), hx, ty); ty += Math.round(20 * PT);
+    font(9, true); g.fillText(fit((card.skidId || '') + (card.status ? ' · ' + card.status : ''), hw), hx, ty); ty += Math.round(12 * PT);
+    y = Math.max(y + logoH, sym ? y + dmBox : y, ty) + Math.round(5 * PT);
+
+    // Steel specs, three label / value pairs to a row.
+    var specs = [
+      ['Ticket', card.ticket], ['Skid ID', card.skidId], ['Status', card.status],
+      ['Basis Wt', steel['BW']], ['Type', steel['TC']], ['Temper', steel['TM']],
+      ['Length', steel['Length']], ['Width', steel['Width']], ['End Use', steel['End Use']],
+      ['Job', steel['Job ID']]
+    ].filter(function (p) { return p[1] !== '' && p[1] != null; });
+    var pairW = (X1 - X0) / 3, specH = Math.round(10 * PT);
+    for (var i = 0; i < specs.length; i += 3) {
+      for (var j = 0; j < 3 && specs[i + j]; j++) {
+        var px = X0 + j * pairW;
+        font(8, false); g.fillText(specs[i + j][0], px, y);
+        var lw = g.measureText(specs[i + j][0]).width + Math.round(4 * PT);
+        font(8, true); g.fillText(fit(specs[i + j][1], pairW - lw - Math.round(14 * PT)), px + lw, y);
+      }
+      y += specH;
+    }
+    y += Math.round(2 * PT);
+    g.fillRect(X0, y, X1 - X0, Math.max(2, Math.round(PT))); y += Math.round(4 * PT);
+    font(9.5, true); g.fillText('Coatings applied', X0, y); y += Math.round(13 * PT);
+
+    if (!coats.length) { font(8, false); g.fillText('No coatings recorded on this skid yet.', X0, y); return cv; }
+    // Coatings table: black header row, a box around every cell, long names wrapped.
+    var widths = [0.06, 0.34, 0.26, 0.16, 0.18], cols = [], cx = X0;
+    widths.forEach(function (w) { var cw = (X1 - X0) * w; cols.push({ x: cx, w: cw }); cx += cw; });
+    var pad = Math.round(3 * PT), line = Math.max(2, Math.round(0.5 * PT));
+    var headH = Math.round(11 * PT);
+    g.fillRect(X0, y, X1 - X0, headH);
+    font(7, true); g.fillStyle = '#fff';
+    ['#', 'Coating', 'Group / Sub', 'Date', 'Operator'].forEach(function (t, k) { g.fillText(t, cols[k].x + pad, y + Math.round(2 * PT)); });
+    g.fillStyle = '#000'; y += headH;
+    var lineH = Math.round(9.5 * PT);
+    for (var n = 0; n < coats.length; n++) {
+      var co = coats[n];
+      font(7.5, false);
+      var cells = [[String(n + 1)], wrap(co.item || '', cols[1].w - 2 * pad), wrap((co.group || '') + (co.sub ? ' / ' + co.sub : ''), cols[2].w - 2 * pad),
+        [fit(travelerDate(co.when), cols[3].w - 2 * pad)], wrap(co.operator || '', cols[4].w - 2 * pad)];
+      var rows = Math.max.apply(null, cells.map(function (l) { return l.length; }));
+      var rowH = rows * lineH + Math.round(4 * PT);
+      var left = coats.length - n;
+      if (y + rowH > BOTTOM - (left > 1 ? lineH : 0)) {   // no room: say how many didn't fit
+        font(8, true); g.fillText('+ ' + left + ' more coating' + (left === 1 ? '' : 's') + ' — see the app', X0, y + Math.round(2 * PT));
+        break;
+      }
+      cells.forEach(function (lines, k) {
+        g.lineWidth = line; g.strokeRect(cols[k].x, y, cols[k].w, rowH);
+        lines.forEach(function (t, li) {
+          var tx = k === 0 ? cols[k].x + (cols[k].w - g.measureText(t).width) / 2 : cols[k].x + pad;
+          g.fillText(t, tx, y + Math.round(2 * PT) + li * lineH);
+        });
+      });
+      y += rowH;
+    }
+    return cv;
+  }
+
+  // ZPL's compressed hex for one graphic row: a run of the same digit becomes a count letter
+  // (G..Y = 1..19, g..z = 20..400) plus the digit; trailing zeros become ','.
+  function zplRunLength(n) {
+    var o = '';
+    while (n > 400) { o += 'z'; n -= 400; }
+    if (n >= 20) { o += String.fromCharCode(102 + Math.floor(n / 20)); n %= 20; }
+    if (n > 0) o += String.fromCharCode(70 + n);
+    return o;
+  }
+  function zplCompressRow(hex) {
+    var t = hex.replace(/0+$/, ''), out = '';
+    for (var i = 0; i < t.length;) {
+      var ch = t[i], j = i;
+      while (j < t.length && t[j] === ch) j++;
+      out += (j - i === 1 ? '' : zplRunLength(j - i)) + ch;
+      i = j;
+    }
+    return t.length < hex.length ? out + ',' : out;
+  }
+  // The whole canvas as one ZPL label (a quarter turn when `rotate`). Dark pixels print black.
+  function canvasToZpl(cv, rotate) {
+    var W = cv.width, H = cv.height, px = cv.getContext('2d').getImageData(0, 0, W, H).data;
+    var outW = rotate ? H : W, outH = rotate ? W : H, bpr = Math.ceil(outW / 8);
+    function dark(x, y) { var i = (y * W + x) * 4; return px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114 < 140; }
+    var rows = [], prev = null;
+    for (var oy = 0; oy < outH; oy++) {
+      var hex = '';
+      for (var b = 0; b < bpr; b++) {
+        var v = 0;
+        for (var bit = 0; bit < 8; bit++) {
+          var ox = b * 8 + bit;
+          if (ox >= outW) continue;
+          // Turned clockwise: the label's left edge leads out of the printer.
+          if (rotate ? dark(oy, H - 1 - ox) : dark(ox, oy)) v |= 128 >> bit;
+        }
+        hex += (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+      }
+      rows.push(hex === prev ? ':' : zplCompressRow(hex));
+      prev = hex;
+    }
+    var total = bpr * outH;
+    return '^XA^PW' + outW + '^LL' + outH + '^LH0,0^FO0,0^GFA,' + total + ',' + total + ',' + bpr + ',' + rows.join('') + '^FS^PQ1^XZ';
+  }
+  function travelerZpl(card) { return canvasToZpl(travelerLabelCanvas(card), ZEBRA_ROTATE); }
+
+  // Print button: open the print server's page with the label (it prints, then closes itself).
+  function printTravelerZebra(card) {
+    var zpl;
+    try { zpl = travelerZpl(card); }
+    catch (e) { toast(L('Could not make the label: ', 'No se pudo hacer la etiqueta: ') + (e && e.message ? e.message : e)); return; }
+    var b64 = btoa(zpl).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    var w = window.open(ZEBRA_LABEL_URL + '#' + b64, '_blank');
+    if (!w) toast(L('The browser blocked the print tab. Allow pop-ups for this site, then press Print again.', 'El navegador bloqueó la pestaña de impresión. Permita ventanas emergentes para este sitio y presione Imprimir otra vez.'));
+  }
+
   // Review Jobs is a button on the home screen (rendered by renderAll), wired to this.
   function openReview() {
     if (!managerOnly()) return;
@@ -6023,6 +6200,7 @@
         '</div>';
     }
     html += '<button class="btn secondary" id="printTravelerBtn" style="width:100%;margin-top:12px">🖨️&nbsp; Print skid traveler</button>';
+    html += '<div style="text-align:center;margin-top:6px"><a href="#" id="printTravelerDialog" class="sub" style="text-decoration:underline">Print with the print dialog instead</a></div>';
     html += '</div>';
 
     if (status === 'Current') html += currentActionsHtml(card);
@@ -6064,7 +6242,9 @@
     }
     wireTicketDetailsEditor(card);
     var ptb = document.getElementById('printTravelerBtn');
-    if (ptb) ptb.onclick = function () { printTraveler(card); };
+    if (ptb) ptb.onclick = function () { printTravelerZebra(card); };
+    var ptd = document.getElementById('printTravelerDialog');
+    if (ptd) ptd.onclick = function (e) { e.preventDefault(); printTraveler(card); };
   }
 
   // ----- Edit a skid's steel details, Row number and Spoilage count -----
