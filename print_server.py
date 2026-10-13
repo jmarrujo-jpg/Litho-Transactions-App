@@ -4,8 +4,12 @@ Zebra print server for Windows.
 Your web app sends a label (ZPL) to this PC, and this PC sends it to the
 Zebra printer over the network. No print dialog, no AirPrint.
 
+The printer is tracked by its MAC address, which never changes. If the
+printer's IP address changes, the server scans the network, finds the
+printer again by its MAC address, and keeps printing.
+
 Setup:
-  1. Change PRINTER_IP and TOKEN below.
+  1. Change TOKEN below (any password you like).
   2. Run:  python print_server.py
   3. On your iPhone, open  http://192.168.1.214:8000  and tap "Print test label".
 
@@ -20,15 +24,117 @@ Uses only the Python standard library, so there is nothing else to install.
 """
 
 import json
+import re
 import socket
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---- Settings -------------------------------------------------------------
-PRINTER_IP = "192.168.1.171"  # Zebra printer (MAC 60:95:32:0B:E0:1F) - reserve in router
-PRINTER_PORT = 9100           # standard raw printing port on Zebra printers
-SERVER_PORT = 8000            # port your web app connects to on this PC
-TOKEN = "change-me"           # shared secret; your web app must send this
+PRINTER_MAC = "60-95-32-0b-e0-1f"  # the printer's permanent hardware ID
+PRINTER_IP = "192.168.1.171"       # last known address; updated automatically
+PRINTER_PORT = 9100                # standard raw printing port on Zebra printers
+SERVER_PORT = 8000                 # port your web app connects to on this PC
+TOKEN = "change-me"                # shared secret; your web app must send this
 # ---------------------------------------------------------------------------
+
+_lock = threading.Lock()
+_current_ip = PRINTER_IP
+
+
+def normalize_mac(mac: str) -> str:
+    """'60:95:32:B:E0:1F' or '60-95-32-0b-e0-1f' -> '60-95-32-0b-e0-1f'."""
+    parts = re.split(r"[:-]", mac.strip())
+    return "-".join(p.zfill(2).lower() for p in parts)
+
+
+TARGET_MAC = normalize_mac(PRINTER_MAC)
+
+
+def read_arp_table() -> dict:
+    """Return {ip: mac} from the computer's ARP table (works on Windows, Mac, Linux)."""
+    try:
+        out = subprocess.run(["arp", "-a"], capture_output=True, text=True,
+                             errors="ignore", timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return parse_arp(out)
+
+
+def parse_arp(text: str) -> dict:
+    table = {}
+    for line in text.splitlines():
+        ip = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
+        mac = re.search(r"([0-9a-fA-F]{1,2}(?:[:-][0-9a-fA-F]{1,2}){5})", line)
+        if ip and mac:
+            table[ip.group(1)] = normalize_mac(mac.group(1))
+    return table
+
+
+def mac_of(ip: str) -> str:
+    return read_arp_table().get(ip, "")
+
+
+def local_network_prefix() -> str:
+    """Work out this PC's network, e.g. '192.168.1.' (ignores virtual adapters)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((_current_ip, PRINTER_PORT))  # no data is sent
+        my_ip = s.getsockname()[0]
+    finally:
+        s.close()
+    return my_ip.rsplit(".", 1)[0] + "."
+
+
+def _poke(ip: str) -> None:
+    """Briefly contact an address so it shows up in the ARP table."""
+    try:
+        socket.create_connection((ip, PRINTER_PORT), timeout=0.5).close()
+    except OSError:
+        pass
+
+
+def find_printer() -> str:
+    """Scan the local network and return the printer's current IP, or ''."""
+    prefix = local_network_prefix()
+    print(f"Looking for printer {TARGET_MAC} on {prefix}0/24 ...")
+    with ThreadPoolExecutor(max_workers=100) as pool:
+        pool.map(_poke, [f"{prefix}{n}" for n in range(1, 255)])
+    for ip, mac in read_arp_table().items():
+        if mac == TARGET_MAC:
+            print(f"Found printer at {ip}")
+            return ip
+    print("Printer not found. Is it turned on and connected to the network?")
+    return ""
+
+
+def _send(ip: str, zpl: str) -> None:
+    with socket.create_connection((ip, PRINTER_PORT), timeout=5) as s:
+        # Make sure this address is still OUR printer before sending anything.
+        if mac_of(ip) != TARGET_MAC:
+            raise LookupError(f"{ip} is no longer the printer")
+        s.sendall(zpl.encode("utf-8"))
+
+
+def send_to_printer(zpl: str) -> str:
+    """Send ZPL to the printer, re-finding it by MAC if its IP has changed.
+    Returns the IP that was used."""
+    global _current_ip
+    with _lock:
+        try:
+            _send(_current_ip, zpl)
+            return _current_ip
+        except (OSError, LookupError) as first_error:
+            print(f"Couldn't use {_current_ip} ({first_error}); searching for printer...")
+            new_ip = find_printer()
+            if not new_ip:
+                raise ConnectionError("Printer not found on the network. "
+                                      "Check that it is on and plugged in.")
+            _current_ip = new_ip
+            _send(_current_ip, zpl)
+            return _current_ip
+
 
 SAMPLE_ZPL = """^XA
 ^FO50,50^A0N,40,40^FDHello from the web app^FS
@@ -80,7 +186,8 @@ btn.onclick = async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Print failed");
-    status.textContent = "Printed."; status.className = "ok";
+    status.textContent = "Printed (printer at " + data.printer_ip + ").";
+    status.className = "ok";
   } catch (e) {
     status.textContent = e.message; status.className = "err";
   }
@@ -89,6 +196,7 @@ btn.onclick = async () => {
 </script>
 </body>
 </html>"""
+
 
 # Opened by the Litho app's Print button with the label after the # (base64url ZPL; the part after
 # # never reaches the server). Prints it, then closes the tab. On a problem it stays open and says so.
@@ -136,7 +244,7 @@ function fail(text) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Print failed");
   } catch (e) {
-    return fail(/reach printer/i.test(e.message) ? "Can\\u2019t reach the Zebra printer \\u2014 is it on?" : e.message);
+    return fail(/not found|reach|refused|timed out/i.test(e.message) ? "Can\\u2019t reach the Zebra printer \\u2014 is it on and plugged in?" : e.message);
   }
   msg.textContent = "\\u2713 Printed"; msg.className = "ok";
   setTimeout(() => window.close(), 400);
@@ -146,12 +254,6 @@ function fail(text) {
 </script>
 </body>
 </html>"""
-
-
-def send_to_printer(zpl: str) -> None:
-    """Open a raw connection to the printer and send the ZPL text."""
-    with socket.create_connection((PRINTER_IP, PRINTER_PORT), timeout=5) as s:
-        s.sendall(zpl.encode("utf-8"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -171,27 +273,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, page):
-        page = page.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(page)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(page)
-
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
         self.end_headers()
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        if path == "/":
-            return self._html(TEST_PAGE.replace("__SAMPLE__", SAMPLE_ZPL).replace("__TOKEN__", TOKEN))
-        if path == "/label":
-            return self._html(LABEL_PAGE.replace("__TOKEN__", TOKEN))
-        return self._json(404, {"error": "Not found"})
+        if self.path.split("?", 1)[0] == "/label":
+            page = LABEL_PAGE.replace("__TOKEN__", TOKEN).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(page)
+            return
+        if self.path == "/status":
+            return self._json(200, {"printer_ip": _current_ip, "printer_mac": TARGET_MAC})
+        if self.path != "/":
+            return self._json(404, {"error": "Not found"})
+        page = (TEST_PAGE.replace("__SAMPLE__", SAMPLE_ZPL)
+                         .replace("__TOKEN__", TOKEN)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.end_headers()
+        self.wfile.write(page)
 
     def do_POST(self):
         if self.path != "/print":
@@ -201,20 +308,27 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(length) or b"{}")
-            zpl = data.get("zpl", "").strip()
-            if not zpl:
-                return self._json(400, {"error": "No label data (zpl) sent"})
-            send_to_printer(zpl)
-            print(f"Printed job from {self.client_address[0]}")
-            return self._json(200, {"ok": True})
-        except (socket.timeout, ConnectionRefusedError, OSError) as e:
-            return self._json(502, {"error": f"Can't reach printer at {PRINTER_IP}: {e}"})
         except json.JSONDecodeError:
             return self._json(400, {"error": "Body must be JSON like {\"zpl\": \"^XA...^XZ\"}"})
+        zpl = str(data.get("zpl", "")).strip()
+        if not zpl:
+            return self._json(400, {"error": "No label data (zpl) sent"})
+        try:
+            ip = send_to_printer(zpl)
+            print(f"Printed job from {self.client_address[0]} on printer at {ip}")
+            return self._json(200, {"ok": True, "printer_ip": ip})
+        except (OSError, LookupError) as e:
+            return self._json(502, {"error": str(e)})
 
 
 if __name__ == "__main__":
+    # Confirm the printer's location at startup.
+    if mac_of(_current_ip) != TARGET_MAC:
+        _poke(_current_ip)
+        if mac_of(_current_ip) != TARGET_MAC:
+            _current_ip = find_printer() or _current_ip
+    print(f"Printer {TARGET_MAC} is at {_current_ip}")
     server = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), Handler)
-    print(f"Print server running on port {SERVER_PORT}, sending to {PRINTER_IP}:{PRINTER_PORT}")
+    print(f"Print server running on port {SERVER_PORT}.")
     print("Open http://192.168.1.214:%d on your phone to test. Ctrl+C to stop." % SERVER_PORT)
     server.serve_forever()
