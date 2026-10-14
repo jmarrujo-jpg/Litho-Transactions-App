@@ -1486,5 +1486,38 @@ await concurrency(envBase, 'in-worker lock');
   ok('per container must be a number', !sv.ok && /per container must be a number/.test(sv.error), sv);
 }
 
+// 41. Add Lots (the walk-around): one lot at a time, no receiver / PO; on a machine = Loaded; same lot again adds a container; supplier remembered; remove START lots
+{ const f = fresh();
+  await call('setupMaterials', [{ date: '2026-10-12', items: [{ name: '9307G', type: 'Compound', unit: 'lbs', perContainer: 549 }],
+    machines: [{ name: 'Press 13', positions: ['Barrel 1', 'Barrel 2'] }], stock: [{ name: '9307G', type: 'Compound', qty: 3, location: 'Pallet Area' }] }, 'Jo', 'op-41-a']);
+  const noLoc = await call('addMaterialLot', [{ type: 'Compound', product: '9307G', lot: 'L1' }, 'Jo', 'op-41-b']);
+  ok('where it is is required', !noLoc.ok && /where it is/.test(noLoc.error), noLoc);
+  const noLot = await call('addMaterialLot', [{ type: 'Compound', product: '9307G', location: 'Pallet Area' }, 'Jo', 'op-41-c']);
+  ok('the lot number is required', !noLot.ok && /lot number/.test(noLot.error), noLot);
+  const a = await call('addMaterialLot', [{ type: 'compound', product: '9307g', supplier: 'dow', lot: 'L1', expiration: '2027-03-01', location: 'pallet area' }, 'Jo', 'op-41-d']);
+  const a2 = await call('addMaterialLot', [{ type: 'compound', product: '9307g', supplier: 'dow', lot: 'L1', expiration: '2027-03-01', location: 'pallet area' }, 'Jo', 'op-41-d']);
+  let m = f.rows(SID, 'Materials');
+  ok('a lot in storage: In Stock, no receiver / PO, material spelled as listed', a.ok && m.length === 2 && m[1]['Lot #'] === 'L1' && m[1]['Product'] === '9307G' && m[1]['Status'] === 'In Stock'
+    && m[1]['Receiver'] === '' && m[1]['PO #'] === '' && m[1]['Supplier'] === 'DOW' && m[1]['Expiration Date'] === '2027-03-01' && m[1]['Container'] === 'Barrel' && m[1]['Location'] === 'pallet area', m[1]);
+  ok('the retry adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Materials').length === 2, a2);
+  ok('the supplier is remembered on the Material List', f.rows(SID, 'Material List')[0]['Supplier'] === 'DOW', f.rows(SID, 'Material List')[0]);
+  const b = await call('addMaterialLot', [{ type: 'Compound', product: '9307G', lot: 'l1', location: 'Pallet Area' }, 'Jo', 'op-41-e']);
+  const b2 = await call('addMaterialLot', [{ type: 'Compound', product: '9307G', lot: 'l1', location: 'Pallet Area' }, 'Jo', 'op-41-e']);
+  m = f.rows(SID, 'Materials');
+  ok('the same lot again at the same place adds a container (once on a retry)', b.ok && !b.result.added && b2.result.duplicate && m.length === 2 && String(m[1]['Qty On Hand']) === '2' && String(m[1]['Qty Received']) === '2', m[1]);
+  const c = await call('addMaterialLot', [{ type: 'Compound', product: '9307G', supplier: 'DOW', lot: 'L2', location: 'press 13', position: 'Barrel 1' }, 'Jo', 'op-41-f']);
+  m = f.rows(SID, 'Materials');
+  ok('on a machine: Loaded, the machine as listed, the barrel', c.ok && m[2]['Status'] === 'Loaded' && m[2]['Location'] === 'Press 13' && m[2]['Position'] === 'Barrel 1', m[2]);
+  const ld = await call('loadMaterials', [{ machine: 'Press 13' }, [{ lot: 'L2' }], 'Sam', 'op-41-g']);
+  ok('a Loaded lot can\'t be loaded again', !ld.ok && /used up|0 left|only/.test(ld.error), ld);
+  const u = await call('updateMaterial', ['M-00003', { 'Status': 'Used' }, 'Jo', 'op-41-h']);
+  ok('Used up: Used with 0 left', u.ok && f.rows(SID, 'Materials')[2]['Status'] === 'Used' && String(f.rows(SID, 'Materials')[2]['Qty On Hand']) === '0', f.rows(SID, 'Materials')[2]);
+  const nw = await call('addMaterialLot', [{ type: 'Ink', product: 'V411-D', supplier: 'VIDEOJET', lot: 'X1', location: 'Line 4 cabinet' }, 'Jo', 'op-41-i']);
+  ok('a material not on the list yet goes on it', nw.ok && f.rows(SID, 'Material List').some((r) => r['Name'] === 'V411-D' && r['Supplier'] === 'VIDEOJET'), f.rows(SID, 'Material List'));
+  const rs = await call('removeStartLots', ['Jo', 'op-41-j']);
+  const rs2 = await call('removeStartLots', ['Jo', 'op-41-k']);
+  ok('remove the START lots; again is harmless', rs.ok && rs.result.removed === 1 && rs.result.remaining === 0 && rs2.result.removed === 0 && !f.rows(SID, 'Materials').some((r) => r['Lot #'] === 'START') && f.rows(SID, 'Materials').length === 3, f.rows(SID, 'Materials').map((r) => r['Lot #']));
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
