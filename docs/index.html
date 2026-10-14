@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.86.0</span>
+      <span class="version" id="appVersion">v1.87.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -349,6 +349,28 @@
     "Materials": "Materiales",
     "Receive Materials": "Recibir materiales",
     "Find a lot": "Buscar un lote",
+    "📋 Material List": "📋 Lista de materiales",
+    "Material List": "Lista de materiales",
+    "➕ Add Material": "➕ Agregar material",
+    "Find a material": "Buscar un material",
+    "name, type, supplier, part #…": "nombre, tipo, proveedor, parte #…",
+    "Show inactive materials too": "Mostrar también los materiales inactivos",
+    "No materials match.": "Ningún material coincide.",
+    "No materials on the list yet. Tap Add Material to add the first one.": "Todavía no hay materiales en la lista. Toque Agregar material para agregar el primero.",
+    "Material": "Material",
+    "pick from the Material List": "elija de la lista de materiales",
+    "Pick the material first": "Elija primero el material",
+    "Material name": "Nombre del material",
+    "e.g. WB-2100": "p. ej. WB-2100",
+    "— pick one —": "— elija uno —",
+    "➕ New type…": "➕ Tipo nuevo…",
+    "new type, e.g. Solvent": "tipo nuevo, p. ej. Solvente",
+    "Supplier (optional)": "Proveedor (opcional)",
+    "Part # (optional)": "Parte # (opcional)",
+    "supplier item #": "# de artículo del proveedor",
+    "Shelf life in days (optional)": "Vida útil en días (opcional)",
+    "e.g. 180": "p. ej. 180",
+    "With a shelf life, receiving fills in the expiration date for you.": "Con vida útil, al recibir se llena la fecha de vencimiento sola.",
     "lot #, product, supplier, receiver, PO…": "lote, producto, proveedor, recibo, PO…",
     "Show used-up lots too": "Mostrar también los lotes terminados",
     "# lot.": "# lote.",
@@ -1946,7 +1968,8 @@
       case 'slitterSession': openSlitterKind(slitKind); return;  // session -> its Slitters / Scrolls home
       case 'database': renderLanding(); return;            // database home -> landing
       case 'materials': renderLanding(); return;
-      case 'materialsReceive': case 'materialsEdit': openMaterials(); return;   // the scanned lots are kept
+      case 'materialsReceive': case 'materialsEdit': case 'materialsList': openMaterials(); return;   // the scanned lots are kept
+      case 'materialsItem': if (mtItemFrom === 'receive') openMtReceive(); else openMtList(); return;
       case 'databaseEdit': dbEditDone(); return;   // row editor -> database home (or the Master sheet it came from)
       default: renderLanding(); return;
     }
@@ -1997,7 +2020,7 @@
 
   function mtNewRcv() {
     return { date: todayStr(), supplier: '', receiver: '', po: '', comments: '', operator: lastOperator,
-      type: 'Compound', product: '', container: MT_CONTAINERS.Compound, expiration: '', lines: [] };
+      type: 'Compound', product: '', container: MT_CONTAINERS.Compound, expiration: '', expAuto: false, lines: [] };
   }
   function mtLoad(after) {
     google.script.run.withSuccessHandler(function (res) {
@@ -2011,6 +2034,21 @@
     }).getMaterials();
   }
   function mtById(id) { return ((mtData && mtData.materials) || []).filter(function (m) { return m.id === id; })[0]; }
+  // Every type: the four, plus any added on the Material List.
+  function mtTypes() { return (mtData && mtData.types && mtData.types.length) ? mtData.types : MT_TYPES; }
+  function mtContainerFor(type) { return ((mtData && mtData.containerFor) || MT_CONTAINERS)[type] || ''; }
+  function mtItems() { return (mtData && mtData.items) || []; }
+  // The Material List item with this name (and type, when given).
+  function mtItemFor(name, type) {
+    var n = String(name || '').trim().toLowerCase();
+    if (!n) return null;
+    var hits = mtItems().filter(function (i) { return i.name.toLowerCase() === n && (!type || i.type === type); });
+    return hits.filter(function (i) { return i.active; })[0] || hits[0] || null;
+  }
+  function mtAddDays(ymd, days) {
+    var d = new Date((ymd || todayStr()) + 'T00:00:00'); d.setDate(d.getDate() + Number(days));
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
   // 'expired' | 'soon' | '' for an expiration date (YYYY-MM-DD).
   function mtExpiry(ymd) {
     if (!ymd) return '';
@@ -2039,11 +2077,10 @@
   function renderMaterials() {
     var view = document.getElementById('view');
     var pending = mtRcv && mtRcv.lines.length;
-    var chips = [['all', 'All']].concat(MT_TYPES.map(function (t) { return [t, t]; })).map(function (c) {
-      return '<button data-mtt="' + esc(c[0]) + '"' + (mtType === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
-    }).join('');
+    var chips = mtTypeChipsHtml();
     view.innerHTML =
       '<button class="btn" id="mtReceiveBtn" style="width:100%;padding:22px;font-size:19px;margin-bottom:8px">📦&nbsp; Receive Materials</button>' +
+      '<button class="btn secondary" id="mtListBtn" style="width:100%;padding:16px;font-size:17px;margin-bottom:8px">📋&nbsp; Material List</button>' +
       (pending ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;color:var(--warn);font-weight:600">' +
         esc(L(mtRcv.lines.length + ' scanned lot' + (mtRcv.lines.length === 1 ? ' is' : 's are') + ' not saved yet. Tap Receive Materials to finish.',
           mtRcv.lines.length + ' lote(s) escaneado(s) sin guardar. Toque Recibir materiales para terminar.')) + '</div>' : '') +
@@ -2051,28 +2088,41 @@
         '<div class="field" style="flex:1;margin:0"><label>Find a lot</label><input id="mtSearch" placeholder="lot #, product, supplier, receiver, PO…" autocomplete="off" value="' + esc(mtSearch) + '"></div>' +
         '<button class="btn secondary" id="mtReload" style="margin:0">↻</button>' +
       '</div>' +
-      '<div class="tabbar" style="margin-top:8px">' + chips + '</div>' +
+      '<div class="tabbar" id="mtTypeChips" style="margin-top:8px">' + chips + '</div>' +
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="mtShowUsed"' + (mtShowUsed ? ' checked' : '') + '> Show used-up lots too</label>' +
       '<div class="sub" id="mtCount" style="margin-bottom:8px"></div>' +
       '<div id="mtList"><div class="loading">Loading&hellip;</div></div>';
     document.getElementById('mtReceiveBtn').onclick = openMtReceive;
+    document.getElementById('mtListBtn').onclick = openMtList;
     var s = document.getElementById('mtSearch');
     s.oninput = function () { mtSearch = s.value; renderMtList(); };
     document.getElementById('mtReload').onclick = function () { mtData = null; document.getElementById('mtList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materials') renderMtList(); }); };
     document.getElementById('mtShowUsed').onchange = function () { mtShowUsed = this.checked; renderMtList(); };
-    Array.prototype.forEach.call(view.querySelectorAll('[data-mtt]'), function (b) {
+    bindMtTypeChips();
+    if (mtData) renderMtList();
+  }
+  function mtTypeChipsHtml() {
+    return [['all', 'All']].concat(mtTypes().map(function (t) { return [t, t]; })).map(function (c) {
+      return '<button data-mtt="' + esc(c[0]) + '"' + (mtType === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
+    }).join('');
+  }
+  function bindMtTypeChips() {
+    var box = document.getElementById('mtTypeChips');
+    if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mtt]'), function (b) {
       b.onclick = function () {
         mtType = b.getAttribute('data-mtt');
-        Array.prototype.forEach.call(view.querySelectorAll('[data-mtt]'), function (x) { x.classList.toggle('active', x === b); });
+        Array.prototype.forEach.call(box.querySelectorAll('[data-mtt]'), function (x) { x.classList.toggle('active', x === b); });
         renderMtList();
       };
     });
-    if (mtData) renderMtList();
   }
 
   function renderMtList() {
     var box = document.getElementById('mtList'), cnt = document.getElementById('mtCount');
     if (!box || !mtData) return;
+    var chipBox = document.getElementById('mtTypeChips');
+    if (chipBox && chipBox.querySelectorAll('[data-mtt]').length !== mtTypes().length + 1) { chipBox.innerHTML = mtTypeChipsHtml(); bindMtTypeChips(); }
     var term = String(mtSearch || '').trim().toLowerCase();
     var rows = mtData.materials.filter(function (m) {
       if (mtType !== 'all' && m.type !== mtType) return false;
@@ -2112,9 +2162,11 @@
     renderMtReceive();
   }
   function mtProducts(type) { return ((mtData && mtData.products && mtData.products[type]) || []); }
+  // What the receiving product box offers: the active Material List items of that type.
+  function mtListNames(type) { return mtItems().filter(function (i) { return i.active && i.type === type; }).map(function (i) { return i.name; }); }
   function mtContainerList() {
     var seen = {}, out = [];
-    MT_TYPES.map(function (t) { return MT_CONTAINERS[t]; }).concat(['Drum', 'Bag', 'Spool'], (mtData && mtData.containers) || []).forEach(function (c) {
+    mtTypes().map(mtContainerFor).concat(['Drum', 'Bag', 'Spool'], (mtData && mtData.containers) || []).forEach(function (c) {
       if (c && !seen[c.toLowerCase()]) { seen[c.toLowerCase()] = 1; out.push(c); }
     });
     return out;
@@ -2126,7 +2178,7 @@
     var rcvOpts = '<option value="">New receiver (made when you save)</option>' + ((mtData && mtData.receivers) || []).slice(0, 200).map(function (x) {
       return '<option value="' + esc(x.id) + '"' + (r.receiver === x.id ? ' selected' : '') + '>' + esc(x.name || x.id) + '</option>';
     }).join('');
-    var typeBtns = MT_TYPES.map(function (t) { return '<button data-mtrt="' + esc(t) + '"' + (r.type === t ? ' class="active"' : '') + '>' + esc(t) + '</button>'; }).join('');
+    var typeBtns = mtTypes().map(function (t) { return '<button data-mtrt="' + esc(t) + '"' + (r.type === t ? ' class="active"' : '') + '>' + esc(t) + '</button>'; }).join('');
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">1. The delivery</h3>' +
@@ -2147,10 +2199,11 @@
         '<h3 style="margin-top:0">2. What you&rsquo;re scanning</h3>' +
         '<div class="tabbar">' + typeBtns + '</div>' +
         '<div class="row">' +
-          '<div class="field"><label>Product name</label><input id="mtProduct" list="mtProdList" autocomplete="off" placeholder="type it, or pick one used before" value="' + esc(r.product) + '"><datalist id="mtProdList">' + mtOptions(mtProducts(r.type)) + '</datalist></div>' +
+          '<div class="field"><label>Material</label><input id="mtProduct" list="mtProdList" autocomplete="off" placeholder="pick from the Material List" value="' + esc(r.product) + '"><datalist id="mtProdList">' + mtOptions(mtListNames(r.type)) + '</datalist></div>' +
           '<div class="field"><label>Container</label><input id="mtContainer" list="mtContList" autocomplete="off" value="' + esc(r.container) + '"><datalist id="mtContList">' + mtOptions(mtContainerList()) + '</datalist></div>' +
           '<div class="field"><label>Expiration date (optional)</label><input type="date" id="mtExp" value="' + esc(r.expiration) + '"></div>' +
         '</div>' +
+        '<div id="mtProdHint" style="margin:-2px 0 8px"></div>' +
         '<div class="sub">Change these before scanning a different product. Each lot keeps what was picked when it was scanned.</div>' +
       '</div>' +
       '<div class="card">' +
@@ -2165,8 +2218,14 @@
         '<button class="btn secondary" id="mtClear" style="width:100%;margin-top:8px">Start over</button>' +
       '</div>';
     function bind(id, key) { var el = document.getElementById(id); el.oninput = el.onchange = function () { r[key] = el.value; }; }
-    bind('mtDate', 'date'); bind('mtSupplier', 'supplier'); bind('mtPo', 'po'); bind('mtOperator', 'operator'); bind('mtComments', 'comments');
-    bind('mtProduct', 'product'); bind('mtContainer', 'container'); bind('mtExp', 'expiration');
+    bind('mtSupplier', 'supplier'); bind('mtPo', 'po'); bind('mtOperator', 'operator'); bind('mtComments', 'comments');
+    bind('mtContainer', 'container');
+    var expEl = document.getElementById('mtExp');
+    expEl.oninput = expEl.onchange = function () { r.expiration = expEl.value; r.expAuto = false; };
+    var dateEl = document.getElementById('mtDate');
+    dateEl.oninput = dateEl.onchange = function () { r.date = dateEl.value; mtAutoExpiry(); };
+    var prodEl = document.getElementById('mtProduct');
+    prodEl.oninput = prodEl.onchange = function () { r.product = prodEl.value; mtPickedItem(); };
     var rsel = document.getElementById('mtReceiver');
     rsel.onchange = function () {
       r.receiver = rsel.value;
@@ -2174,7 +2233,7 @@
       if (x) {   // an existing receiver fills in its supplier / PO / date where they're blank
         if (!r.supplier && x.supplier) { r.supplier = x.supplier; document.getElementById('mtSupplier').value = x.supplier; }
         if (!r.po && x.pos) { r.po = x.pos; document.getElementById('mtPo').value = x.pos; }
-        if (x.date) { r.date = x.date; document.getElementById('mtDate').value = x.date; }
+        if (x.date) { r.date = x.date; document.getElementById('mtDate').value = x.date; mtAutoExpiry(); }
       }
     };
     Array.prototype.forEach.call(view.querySelectorAll('[data-mtrt]'), function (b) {
@@ -2182,12 +2241,14 @@
         var t = b.getAttribute('data-mtrt');
         if (t === r.type) return;
         // A new type: its usual container, and the product list for that type.
-        if (!r.container || r.container === MT_CONTAINERS[r.type]) r.container = MT_CONTAINERS[t] || '';
+        if (!r.container || r.container === mtContainerFor(r.type)) r.container = mtContainerFor(t);
         r.type = t; r.product = '';
+        if (r.expAuto) { r.expiration = ''; r.expAuto = false; document.getElementById('mtExp').value = ''; }
         Array.prototype.forEach.call(view.querySelectorAll('[data-mtrt]'), function (x) { x.classList.toggle('active', x === b); });
         document.getElementById('mtProduct').value = '';
         document.getElementById('mtContainer').value = r.container;
-        document.getElementById('mtProdList').innerHTML = mtOptions(mtProducts(t));
+        document.getElementById('mtProdList').innerHTML = mtOptions(mtListNames(t));
+        renderMtProdHint();
         document.getElementById('mtProduct').focus();
       };
     });
@@ -2200,7 +2261,49 @@
       showConfirm('Start over?', 'This clears the ' + r.lines.length + ' scanned lot(s) and the delivery details. Nothing has been saved.', function () { mtRcv = mtNewRcv(); renderMtReceive(); }, 'Clear', 'danger');
     };
     renderMtLines();
+    renderMtProdHint();
     (r.supplier ? (r.product ? scan : document.getElementById('mtProduct')) : document.getElementById('mtSupplier')).focus();
+  }
+  // A material picked from the list fills in its type, container, supplier (if blank) and — when it
+  // has a shelf life — the expiration date (date received + shelf life; changing it by hand keeps yours).
+  function mtPickedItem() {
+    var r = mtRcv, it = mtItemFor(r.product, r.type) || mtItemFor(r.product);
+    if (it && it.active) {
+      if (r.product !== it.name) { r.product = it.name; document.getElementById('mtProduct').value = it.name; }
+      if (it.type !== r.type) {
+        r.type = it.type;
+        Array.prototype.forEach.call(document.querySelectorAll('[data-mtrt]'), function (x) { x.classList.toggle('active', x.getAttribute('data-mtrt') === it.type); });
+        document.getElementById('mtProdList').innerHTML = mtOptions(mtListNames(it.type));
+      }
+      r.container = it.container || mtContainerFor(it.type);
+      document.getElementById('mtContainer').value = r.container;
+      if (!String(r.supplier || '').trim() && it.supplier) { r.supplier = it.supplier; document.getElementById('mtSupplier').value = it.supplier; }
+      if (it.shelfLife && (!r.expiration || r.expAuto)) r.expAuto = true;
+      mtAutoExpiry();
+    }
+    renderMtProdHint();
+  }
+  function mtAutoExpiry() {
+    var r = mtRcv, it = mtItemFor(r.product, r.type), el = document.getElementById('mtExp');
+    if (!r.expAuto) return;
+    r.expiration = it && it.shelfLife ? mtAddDays(r.date, it.shelfLife) : '';
+    if (!r.expiration) r.expAuto = false;
+    if (el) el.value = r.expiration;
+  }
+  function renderMtProdHint() {
+    var box = document.getElementById('mtProdHint'), r = mtRcv;
+    if (!box) return;
+    var name = String(r.product || '').trim(), it = mtItemFor(name, r.type) || mtItemFor(name);
+    var addBtn = function (label) { return '<button class="btn secondary" id="mtAddItemBtn" style="padding:6px 12px;font-size:14px;margin:0 0 0 6px">' + esc(label) + '</button>'; };
+    if (!name) box.innerHTML = '<div class="sub">' + esc(L('Not on the list?', '¿No está en la lista?')) + addBtn(L('➕ Add new material', '➕ Agregar material nuevo')) + '</div>';
+    else if (it && it.active) box.innerHTML = '<div class="sub" style="color:var(--ok,#15803d)">' + esc(L('✓ On the Material List', '✓ En la lista de materiales') + (it.shelfLife ? ' · ' + L('shelf life ' + it.shelfLife + ' days', 'vida útil ' + it.shelfLife + ' días') : '')) + '</div>';
+    else if (it) box.innerHTML = '<div class="sub" style="color:var(--warn)">' + esc(L(it.name + ' is turned off on the Material List.', it.name + ' está desactivado en la lista de materiales.')) +
+      ' <button class="btn secondary" id="mtOpenItemBtn" style="padding:6px 12px;font-size:14px;margin:0 0 0 6px">' + esc(L('Open it', 'Abrirlo')) + '</button></div>';
+    else box.innerHTML = '<div class="sub" style="color:var(--warn);font-weight:600">' + esc(L(name + ' is not on the Material List yet.', name + ' todavía no está en la lista de materiales.')) + addBtn(L('➕ Add it now', '➕ Agregarlo ahora')) + '</div>';
+    var a = document.getElementById('mtAddItemBtn');
+    if (a) a.onclick = function () { openMtItem(null, 'receive', { name: name, type: r.type, supplier: r.supplier, container: r.container }); };
+    var o = document.getElementById('mtOpenItemBtn');
+    if (o) o.onclick = function () { openMtItem(it, 'receive'); };
   }
 
   function mtLineKey(l) { return [String(l.lot).toLowerCase(), String(l.type).toLowerCase(), String(l.product).toLowerCase()].join('|'); }
@@ -2209,7 +2312,14 @@
     var scan = document.getElementById('mtScan');
     if (!lot) return;
     var prod = String(r.product || '').trim();
-    if (!prod) { toast('Type the product name first'); var p = document.getElementById('mtProduct'); if (p) p.focus(); return; }
+    if (!prod) { toast('Pick the material first'); var p = document.getElementById('mtProduct'); if (p) p.focus(); return; }
+    var it = mtItemFor(prod, r.type) || mtItemFor(prod);
+    if (!it || !it.active) {
+      toast(it ? L(it.name + ' is turned off on the Material List', it.name + ' está desactivado en la lista de materiales') : L('Add ' + prod + ' to the Material List first', 'Primero agregue ' + prod + ' a la lista de materiales'));
+      renderMtProdHint();
+      return;
+    }
+    prod = it.name;
     var line = { lot: lot, type: r.type, product: prod, container: String(r.container || '').trim(), expiration: r.expiration || '', qty: 1 };
     var have = r.lines.filter(function (l) { return mtLineKey(l) === mtLineKey(line); })[0];
     if (have) { have.qty++; toast(L('Lot ' + lot + ': ' + have.qty + ' containers', 'Lote ' + lot + ': ' + have.qty + ' recipientes')); }
@@ -2280,10 +2390,162 @@
       }, L('Save', 'Guardar'));
   }
 
+  // ---- Material List: every material the shop tracks ----
+  // Receiving picks from this list. Names already received are on it automatically. Tap one to fix
+  // it; renaming it renames its lots too. "Active" off keeps it (and its lots) but stops offering it.
+  var mtItemSearch = '', mtShowInactive = false;
+  var mtItemFrom = 'list';        // where the Add / Edit form goes back to: 'list' or 'receive'
+  function mtLotCount(it) {
+    var k = it.type.toLowerCase() + '|' + it.name.toLowerCase();
+    return ((mtData && mtData.materials) || []).filter(function (m) { return (m.type.toLowerCase() + '|' + m.product.toLowerCase()) === k; }).length;
+  }
+  function openMtList() {
+    state.view = 'materialsList';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Material List');
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<button class="btn" id="mtItemAdd" style="width:100%;padding:18px;font-size:18px;margin-bottom:8px">➕&nbsp; Add Material</button>' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Find a material</label><input id="mtItemSearch" placeholder="name, type, supplier, part #…" autocomplete="off" value="' + esc(mtItemSearch) + '"></div>' +
+        '<button class="btn secondary" id="mtItemReload" style="margin:0">↻</button>' +
+      '</div>' +
+      '<label class="sub" style="display:flex;align-items:center;gap:8px;margin:8px 0"><input type="checkbox" id="mtShowInactive"' + (mtShowInactive ? ' checked' : '') + '> Show inactive materials too</label>' +
+      '<div id="mtItemList"><div class="loading">Loading&hellip;</div></div>';
+    document.getElementById('mtItemAdd').onclick = function () { openMtItem(null, 'list'); };
+    var s = document.getElementById('mtItemSearch');
+    s.oninput = function () { mtItemSearch = s.value; renderMtItemList(); };
+    document.getElementById('mtShowInactive').onchange = function () { mtShowInactive = this.checked; renderMtItemList(); };
+    document.getElementById('mtItemReload').onclick = function () { mtData = null; document.getElementById('mtItemList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materialsList') renderMtItemList(); }); };
+    if (mtData) renderMtItemList();
+    else mtLoad(function () { if (state.view === 'materialsList') renderMtItemList(); });
+  }
+  function renderMtItemList() {
+    var box = document.getElementById('mtItemList');
+    if (!box || !mtData) return;
+    var term = String(mtItemSearch || '').trim().toLowerCase();
+    var all = mtItems();
+    var rows = all.filter(function (i) {
+      if (!mtShowInactive && !i.active && !term) return false;
+      return !term || [i.name, i.type, i.supplier, i.partNo, i.container, i.notes].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+    });
+    if (!rows.length) {
+      box.innerHTML = '<div class="card empty">' + (all.length ? 'No materials match.' : 'No materials on the list yet. Tap Add Material to add the first one.') + '</div>';
+      return;
+    }
+    var html = '', lastType = null;
+    rows.forEach(function (it, i) {
+      if (it.type !== lastType) { lastType = it.type; html += '<h3 style="margin:14px 0 6px">' + esc(it.type) + '</h3>'; }
+      var n = mtLotCount(it);
+      html += '<div class="card" data-mtitem="' + i + '" style="padding:12px 14px;margin-bottom:8px;cursor:pointer' + (it.active ? '' : ';opacity:.6') + '">' +
+        '<div><b style="font-size:16px">' + esc(it.name) + '</b>' + (it.active ? '' : ' <span class="badge used">' + esc(L('Inactive', 'Inactivo')) + '</span>') + '</div>' +
+        '<div class="sub">' + esc([it.supplier, it.container, it.partNo && L('Part # ' + it.partNo, 'Parte # ' + it.partNo),
+          it.shelfLife && L('shelf life ' + it.shelfLife + ' days', 'vida útil ' + it.shelfLife + ' días'),
+          L(n + ' lot' + (n === 1 ? '' : 's') + ' received', n + ' lote(s) recibido(s)')].filter(Boolean).join(' · ')) + '</div>' +
+        (it.notes ? '<div class="sub">' + esc(it.notes) + '</div>' : '') + '</div>';
+    });
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mtitem]'), function (c) {
+      c.onclick = function () { openMtItem(rows[Number(c.getAttribute('data-mtitem'))], 'list'); };
+    });
+  }
+
+  // Add (it = null; `pre` fills in what's known) or edit one item.
+  function openMtItem(it, from, pre) {
+    mtItemFrom = from || 'list';
+    state.view = 'materialsItem';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Material List');
+    var view = document.getElementById('view');
+    var isNew = !it, saved = it && it.id;
+    var v = it || { name: (pre && pre.name) || '', type: (pre && pre.type) || '', supplier: (pre && pre.supplier) || '', container: (pre && pre.container) || '',
+      partNo: '', shelfLife: '', notes: '', active: true };
+    if (isNew && v.type && !v.container) v.container = mtContainerFor(v.type);
+    var n = it ? mtLotCount(it) : 0;
+    var typeOpts = '<option value="">— pick one —</option>' + mtTypes().map(function (t) { return '<option value="' + esc(t) + '"' + (t === v.type ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
+      '<option value="__new">➕ New type…</option>';
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">' + esc(isNew ? L('Add Material', 'Agregar material') : v.name) + (saved ? ' <span class="sub">' + esc(it.id) + '</span>' : '') + '</h3>' +
+        (it ? '<div class="sub" style="margin-bottom:10px">' + esc([L(n + ' lot' + (n === 1 ? '' : 's') + ' received under this name', n + ' lote(s) recibido(s) con este nombre'),
+          it.createdBy && (it.createdBy === 'From received lots' ? L('added from received lots', 'agregado de lotes recibidos') : L('added by ' + it.createdBy, 'agregado por ' + it.createdBy)), it.updatedAt && L('last changed ' + it.updatedAt, 'último cambio ' + it.updatedAt)].filter(Boolean).join(' · ')) + '</div>' : '') +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 16px">' +
+          '<div class="field"><label>Material name</label><input id="mtItName" autocomplete="off" placeholder="e.g. WB-2100" value="' + esc(v.name) + '"></div>' +
+          '<div class="field"><label>Type</label><select id="mtItType">' + typeOpts + '</select>' +
+            '<input id="mtItNewType" autocomplete="off" placeholder="new type, e.g. Solvent" style="display:none;margin-top:6px"></div>' +
+          '<div class="field"><label>Supplier (optional)</label><input id="mtItSupplier" list="mtItSupList" autocomplete="off" value="' + esc(v.supplier) + '"><datalist id="mtItSupList">' + mtOptions((mtData && mtData.suppliers) || []) + '</datalist></div>' +
+          '<div class="field"><label>Container</label><input id="mtItContainer" list="mtItContList" autocomplete="off" value="' + esc(v.container) + '"><datalist id="mtItContList">' + mtOptions(mtContainerList()) + '</datalist></div>' +
+          '<div class="field"><label>Part # (optional)</label><input id="mtItPart" autocomplete="off" placeholder="supplier item #" value="' + esc(v.partNo) + '"></div>' +
+          '<div class="field"><label>Shelf life in days (optional)</label><input id="mtItShelf" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 180" value="' + esc(v.shelfLife) + '"></div>' +
+          '<div class="field"><label>Notes (optional)</label><input id="mtItNotes" autocomplete="off" value="' + esc(v.notes) + '"></div>' +
+        '</div>' +
+        '<div class="sub" style="margin:0 0 10px">With a shelf life, receiving fills in the expiration date for you.</div>' +
+        (it ? '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600"><input type="checkbox" id="mtItActive"' + (v.active ? ' checked' : '') + '> ' +
+          esc(L('Active (offered when receiving)', 'Activo (se ofrece al recibir)')) + '</label>' : '') +
+        '<div class="row" style="gap:8px">' +
+          '<button class="btn secondary" id="mtItCancel">Cancel</button>' +
+          (saved ? '<button class="btn danger" id="mtItDelete">Delete</button>' : '') +
+          '<button class="btn success" id="mtItSave" style="flex:1">Save</button>' +
+        '</div>' +
+      '</div>';
+    var typeSel = document.getElementById('mtItType'), newType = document.getElementById('mtItNewType'), cont = document.getElementById('mtItContainer');
+    var lastType = v.type;
+    typeSel.onchange = function () {
+      var t = typeSel.value;
+      newType.style.display = t === '__new' ? '' : 'none';
+      if (t === '__new') { newType.focus(); return; }
+      // The type's usual container, unless one was typed in.
+      if (!cont.value.trim() || cont.value === mtContainerFor(lastType)) cont.value = mtContainerFor(t);
+      lastType = t;
+    };
+    function back() { if (mtItemFrom === 'receive') openMtReceive(); else openMtList(); }
+    document.getElementById('mtItCancel').onclick = back;
+    document.getElementById('mtItSave').onclick = function () {
+      var type = typeSel.value === '__new' ? newType.value.trim() : typeSel.value;
+      var out = { id: saved ? it.id : '', name: document.getElementById('mtItName').value.trim(), type: type,
+        supplier: document.getElementById('mtItSupplier').value.trim(), container: cont.value.trim(),
+        partNo: document.getElementById('mtItPart').value.trim(), shelfLife: document.getElementById('mtItShelf').value.trim(),
+        notes: document.getElementById('mtItNotes').value.trim(), active: it ? document.getElementById('mtItActive').checked : true };
+      if (!out.name) { toast(L('Enter the material name', 'Escriba el nombre del material')); document.getElementById('mtItName').focus(); return; }
+      if (!out.type) { toast(L('Pick the type', 'Elija el tipo')); (typeSel.value === '__new' ? newType : typeSel).focus(); return; }
+      var rename = saved && n && (out.name !== it.name || out.type !== it.type);
+      var go = function () {
+        var btn = document.getElementById('mtItSave');
+        btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
+        runMutation('saveMaterialItem', [out, lastOperator, newOpId()], function (res) {
+          var item = (res && res.item) || out;
+          mtData = null;
+          toast(L('Saved ' + item.name, item.name + ' guardado'));
+          if (mtItemFrom === 'receive' && mtRcv && item.active !== false) {
+            // Back to receiving with the new material picked.
+            mtRcv.product = item.name; mtRcv.type = item.type; mtRcv.container = item.container || mtContainerFor(item.type);
+            if (item.shelfLife && (!mtRcv.expiration || mtRcv.expAuto)) { mtRcv.expiration = mtAddDays(mtRcv.date, item.shelfLife); mtRcv.expAuto = true; }
+          }
+          back();
+        }, function (err) { btn.disabled = false; btn.textContent = L('Save', 'Guardar'); toast(L('Not saved: ', 'No se guardó: ') + err.message); });
+      };
+      if (rename) showConfirm(L('Rename ' + it.name + '?', '¿Cambiar el nombre de ' + it.name + '?'),
+        L('The ' + n + ' lot' + (n === 1 ? '' : 's') + ' received as ' + it.name + ' will be renamed to ' + out.name + ' too.',
+          'Los ' + n + ' lote(s) recibidos como ' + it.name + ' también pasarán a llamarse ' + out.name + '.'), go, L('Rename', 'Cambiar'));
+      else go();
+    };
+    var del = document.getElementById('mtItDelete');
+    if (del) del.onclick = function () {
+      if (n) { showInfo(L('Can’t delete', 'No se puede borrar'), L(n + ' lot' + (n === 1 ? ' was' : 's were') + ' received as ' + it.name + '. Uncheck Active instead — it stays in the records but stops showing when receiving.',
+        n + ' lote(s) se recibieron como ' + it.name + '. Mejor quite la marca de Activo: se queda en los registros pero ya no aparece al recibir.')); return; }
+      showConfirm(L('Delete ' + it.name + '?', '¿Borrar ' + it.name + '?'), L('Only for a material added by mistake. This can\'t be undone.', 'Solo para un material agregado por error. No se puede deshacer.'), function () {
+        runMutation('deleteMaterialItem', [it.id, lastOperator, newOpId()], function () {
+          mtData = null; toast(L('Deleted ' + it.name, it.name + ' borrado')); back();
+        }, function (err) { toast(L('Not deleted: ', 'No se borró: ') + err.message); });
+      }, L('Delete', 'Borrar'), 'danger');
+    };
+    (isNew && !v.name ? document.getElementById('mtItName') : document.getElementById('mtItSave')).focus();
+  }
+
   // ---- Edit one lot ----
   var MT_EDIT_FIELDS = [
     { col: 'Lot #', key: 'lot', label: 'Lot #' },
-    { col: 'Type', key: 'type', label: 'Type', select: MT_TYPES },
+    { col: 'Type', key: 'type', label: 'Type', select: 'types' },
     { col: 'Product', key: 'product', label: 'Product', list: 'mtEdProdList' },
     { col: 'Container', key: 'container', label: 'Container', list: 'mtEdContList' },
     { col: 'Qty Received', key: 'qtyReceived', label: 'Containers received', num: true },
@@ -2307,7 +2569,8 @@
     var fields = MT_EDIT_FIELDS.map(function (f, i) {
       var v = m[f.key] != null ? String(m[f.key]) : '', idA = ' id="mtEd' + i + '"';
       var input;
-      if (f.select) input = '<select' + idA + '>' + f.select.concat(f.select.indexOf(v) === -1 && v ? [v] : []).map(function (o) { return '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
+      var opts = f.select === 'types' ? mtTypes() : f.select;
+      if (f.select) input = '<select' + idA + '>' + opts.concat(opts.indexOf(v) === -1 && v ? [v] : []).map(function (o) { return '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
       else if (f.receiver) input = '<select' + idA + '><option value="">(none)</option>' + ((mtData && mtData.receivers) || []).map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === v ? ' selected' : '') + '>' + esc(x.name || x.id) + '</option>'; }).join('') + '</select>';
       else input = '<input' + idA + (f.date ? ' type="date"' : f.num ? ' type="number" min="0" step="1" inputmode="numeric"' : '') + (f.list ? ' list="' + f.list + '"' : '') + ' autocomplete="off" value="' + esc(v) + '">';
       return '<div class="field"><label>' + esc(f.label) + '</label>' + input + '</div>';

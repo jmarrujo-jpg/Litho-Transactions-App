@@ -1350,5 +1350,58 @@ await concurrency(envBase, 'in-worker lock');
   ok('a deleted M-number is not reused', n.ok && n.result.saved[0].id === 'M-00005', n.result && n.result.saved);
 }
 
+// 38. Material List: names already received are added; add / edit / rename (lots follow) / inactive / delete
+{ const f = fresh();
+  await call('receiveMaterials', [{ supplier: 'dsm' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100', container: 'Pail' }, { lot: 'A2', type: 'Compound', product: 'WB-2100' }], 'Jo', 'op-38-a']);
+  const l = f.rows(SID, 'Material List');
+  ok('a received product is put on the Material List', l.length === 1 && l[0]['Item ID'] === 'MI-00001' && l[0]['Name'] === 'WB-2100' && l[0]['Supplier'] === 'DSM' && l[0]['Created By'] === 'From received lots', l);
+  const g = await call('getMaterials', []);
+  ok('getMaterials returns the list and container defaults', g.ok && g.result.items.length === 1 && g.result.items[0].active && g.result.containerFor.Copper === 'Gaylord', g.result && g.result.items);
+  const noName = await call('saveMaterialItem', [{ name: ' ', type: 'Ink' }, 'Jo', 'op-38-b']);
+  ok('a blank name is refused', !noName.ok && /name/.test(noName.error), noName);
+  const badShelf = await call('saveMaterialItem', [{ name: 'Blue', type: 'Ink', shelfLife: 'a year' }, 'Jo', 'op-38-c']);
+  ok('a shelf life that isn\'t a number is refused', !badShelf.ok && /Shelf life/.test(badShelf.error), badShelf);
+  const a = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun', partNo: 'B-286', shelfLife: '180', notes: 'keep warm' }, 'Jo', 'op-38-d']);
+  const a2 = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun' }, 'Jo', 'op-38-d']);
+  const row = f.rows(SID, 'Material List')[1];
+  ok('add an item: type spelled the app\'s way, container from the type', a.ok && row['Item ID'] === 'MI-00002' && row['Type'] === 'Ink' && row['Container'] === 'Can' && String(row['Shelf Life (Days)']) === '180' && row['Supplier'] === 'SUN', row);
+  ok('the retry adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Material List').length === 2, a2);
+  const dup = await call('saveMaterialItem', [{ name: 'blue 286', type: 'Ink' }, 'Jo', 'op-38-e']);
+  ok('the same name and type twice is refused', !dup.ok && /already on the Material List/.test(dup.error), dup);
+  const nt = await call('saveMaterialItem', [{ name: 'Acetone', type: 'Solvent', container: 'Drum' }, 'Jo', 'op-38-f']);
+  const nt2 = await call('saveMaterialItem', [{ name: 'MEK', type: 'solvent' }, 'Jo', 'op-38-g']);
+  const g2 = await call('getMaterials', []);
+  ok('a new type can be added, and is matched after that', nt.ok && nt2.ok && nt2.result.item.type === 'Solvent' && g2.result.types.join() === 'Compound,Powder,Copper,Ink,Solvent', g2.result && g2.result.types);
+  // Rename WB-2100: its lots follow
+  const rn = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'WB-2100 Gold', type: 'Compound', supplier: 'DSM' }, 'Jo', 'op-38-h']);
+  const lots = f.rows(SID, 'Materials');
+  ok('renaming an item renames its lots', rn.ok && rn.result.renamedLots === 2 && lots.every((r) => r['Product'] === 'WB-2100 Gold') && f.rows(SID, 'Material List').length === 4, { rn, lots });
+  const g3 = await call('getMaterials', []);
+  ok('no leftover entry for the old name', g3.result.items.filter((i) => /WB-2100/.test(i.name)).length === 1, g3.result.items);
+  // Inactive: kept, but not offered when receiving
+  const off = await call('saveMaterialItem', [{ id: 'MI-00003', name: 'Acetone', type: 'Solvent', container: 'Drum', active: false }, 'Jo', 'op-38-i']);
+  const g4 = await call('getMaterials', []);
+  ok('an inactive item stays on the list but not in the pick list', off.ok && f.rows(SID, 'Material List')[2]['Active'] === 'No' && g4.result.items.some((i) => i.name === 'Acetone' && !i.active) && !(g4.result.products.Solvent || []).includes('Acetone'), g4.result.products);
+  // Delete: refused while lots use it; fine for one never received
+  const d1 = await call('deleteMaterialItem', ['MI-00001', 'Jo', 'op-38-j']);
+  ok('an item with lots can\'t be deleted', !d1.ok && /2 lot/.test(d1.error) && /Active/.test(d1.error), d1);
+  const d2 = await call('deleteMaterialItem', ['MI-00004', 'Jo', 'op-38-k']);
+  const d3 = await call('deleteMaterialItem', ['MI-00004', 'Jo', 'op-38-k']);
+  ok('delete an unused item; again is harmless', d2.ok && d3.ok && d3.result.alreadyGone && f.rows(SID, 'Material List').map((r) => r['Item ID']).join() === 'MI-00001,MI-00002,MI-00003', f.rows(SID, 'Material List').map((r) => r['Item ID']));
+  // A lot edited to a product that isn't on the list puts it on the list
+  await call('updateMaterial', ['M-00002', { 'Product': 'WB-9000' }, 'Jo', 'op-38-l']);
+  ok('a lot edited to a new product adds it to the list', f.rows(SID, 'Material List').some((r) => r['Name'] === 'WB-9000' && r['Supplier'] === 'DSM'), f.rows(SID, 'Material List'));
+}
+
+// 38b. Lots received before the Material List existed show on it right away, and are written on the first save
+{ const f = fresh();
+  await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Powder', product: 'P-1', container: 'Box' }], 'Jo', 'op-38b-a']);
+  const b = f.book(SID); delete b.tabs['Material List']; b.order = b.order.filter((x) => x !== 'Material List');
+  const g = await call('getMaterials', []);
+  ok('a received product not saved on the list yet still shows (no id)', g.ok && g.result.items.length === 1 && g.result.items[0].name === 'P-1' && g.result.items[0].id === '', g.result && g.result.items);
+  const s = await call('saveMaterialItem', [{ name: 'P-1', type: 'Powder', supplier: 'DSM', shelfLife: 365 }, 'Jo', 'op-38b-b']);
+  ok('saving that entry fills it in instead of refusing it as a duplicate', s.ok && f.rows(SID, 'Material List').length === 1 && String(f.rows(SID, 'Material List')[0]['Shelf Life (Days)']) === '365', { s, rows: f.rows(SID, 'Material List') });
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

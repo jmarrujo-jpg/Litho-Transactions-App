@@ -1710,7 +1710,9 @@ const base = {
     { id: 'M-00002', lot: 'PW-1', type: 'Powder', product: 'Stripe 9', supplier: 'AKZO', receiver: 'R-00007', po: '55', date: '2026-09-01', expiration: '2020-01-01', qtyReceived: 2, qtyOnHand: 2, container: 'Box', status: 'In Stock', comments: '' },
     { id: 'M-00001', lot: 'OLD-1', type: 'Compound', product: 'WB-2100', supplier: 'DSM', receiver: 'R-00007', po: '55', date: '2026-08-01', expiration: '', qtyReceived: 1, qtyOnHand: 0, container: 'Pail', status: 'Used', comments: '' }];
   const G = { materials: mats, types: ['Compound', 'Powder', 'Copper', 'Ink'], products: { Compound: ['WB-2100'], Powder: ['Stripe 9'], Copper: [], Ink: [] },
-    suppliers: ['AKZO', 'DSM'], containers: ['Box', 'Pail'], receivers: [{ id: 'R-00007', name: '26-09-01--AKZO--R-00007', date: '2026-09-01', supplier: 'AKZO', pos: '55' }] };
+    suppliers: ['AKZO', 'DSM'], containers: ['Box', 'Pail'], receivers: [{ id: 'R-00007', name: '26-09-01--AKZO--R-00007', date: '2026-09-01', supplier: 'AKZO', pos: '55' }],
+    items: [{ id: 'MI-00001', name: 'WB-2100', type: 'Compound', supplier: 'DSM', container: 'Pail', partNo: '', shelfLife: '', notes: '', active: true },
+      { id: 'MI-00002', name: 'Stripe 9', type: 'Powder', supplier: 'AKZO', container: 'Box', partNo: '', shelfLife: '', notes: '', active: true }] };
   const { page, calls } = await boot(Object.assign({}, base, {
     getMaterials: () => R(G),
     receiveMaterials: (a) => R({ ok: true, receiver: 'R-00008', receiverCreated: true, lots: 2, containers: 3, saved: [] }),
@@ -1793,6 +1795,84 @@ const base = {
   await page.evaluate(() => { window.open = () => null; });
   await page.click('#printTravelerBtn'); await page.waitForTimeout(50);
   ok('a blocked pop-up says how to allow it', /Allow pop-ups/.test(await page.textContent('#toast')), await page.textContent('#toast'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 44. Material List: add / edit materials; receiving picks from it ("Add it now" when missing)
+{ const mats = [{ id: 'M-00001', lot: 'A1', type: 'Compound', product: 'WB-2100', supplier: 'DSM', receiver: 'R-00007', po: '', date: '2026-08-01', expiration: '', qtyReceived: 3, qtyOnHand: 3, container: 'Pail', status: 'In Stock', comments: '' }];
+  let items = [{ id: 'MI-00001', name: 'WB-2100', type: 'Compound', supplier: 'DSM', container: 'Pail', partNo: '', shelfLife: 180, notes: '', active: true, createdBy: 'From received lots' },
+    { id: 'MI-00002', name: 'Old Blue', type: 'Ink', supplier: 'SUN', container: 'Can', partNo: '', shelfLife: '', notes: '', active: false },
+    { id: 'MI-00003', name: 'Acetone', type: 'Solvent', supplier: '', container: 'Drum', partNo: 'AC-1', shelfLife: '', notes: 'flammable', active: true }];
+  const G = () => ({ materials: mats, items, types: ['Compound', 'Powder', 'Copper', 'Ink', 'Solvent'], containerFor: { Compound: 'Pail', Powder: 'Box', Copper: 'Gaylord', Ink: 'Can' },
+    products: {}, suppliers: ['DSM', 'SUN'], containers: ['Pail'], receivers: [] });
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMaterials: () => R(G()),
+    saveMaterialItem: (a) => { const it = Object.assign({}, a[0], { id: a[0].id || 'MI-00009', shelfLife: a[0].shelfLife === '' ? '' : Number(a[0].shelfLife) }); items = items.filter((i) => i.id !== it.id).concat([it]); return R({ ok: true, item: it }); },
+    deleteMaterialItem: () => R({ ok: true }),
+  }));
+  await page.click('#tileMaterials');
+  await page.waitForSelector('#mtListBtn');
+  ok('the type chips include a type added on the list', !!(await page.waitForSelector('[data-mtt="Solvent"]', { timeout: 2000 }).catch(() => null)));
+  await page.click('#mtListBtn');
+  await page.waitForSelector('[data-mtitem]');
+  let txt = await page.textContent('#mtItemList');
+  ok('the list: grouped by type, inactive hidden, lot counts and shelf life', txt.includes('WB-2100') && txt.includes('1 lot received') && txt.includes('shelf life 180 days') && txt.includes('Solvent') && txt.includes('Part # AC-1') && !txt.includes('Old Blue'), txt);
+  await page.check('#mtShowInactive');
+  ok('Show inactive shows it, marked', (await page.textContent('#mtItemList')).includes('Old Blue Inactive'));
+  await page.fill('#mtItemSearch', 'flamm');
+  ok('search finds by notes', (await page.$$('[data-mtitem]')).length === 1);
+  await page.fill('#mtItemSearch', '');
+  // Add a new material with a new type
+  await page.click('#mtItemAdd'); await page.waitForSelector('#mtItName');
+  await page.click('#mtItSave');
+  ok('a blank name is refused before sending', !calls.some((c) => c.fn === 'saveMaterialItem'));
+  await page.fill('#mtItName', 'Copper 0.059');
+  await page.selectOption('#mtItType', 'Copper');
+  ok('picking a type fills its container', (await page.inputValue('#mtItContainer')) === 'Gaylord');
+  await page.selectOption('#mtItType', '__new');
+  ok('New type… shows a box to type it', await page.isVisible('#mtItNewType'));
+  await page.fill('#mtItNewType', 'Wire');
+  await page.fill('#mtItShelf', '90');
+  await page.click('#mtItSave'); await page.waitForTimeout(200);
+  let sv = calls.filter((c) => c.fn === 'saveMaterialItem').pop();
+  ok('Add sends the new material', sv && sv.args[0].id === '' && sv.args[0].name === 'Copper 0.059' && sv.args[0].type === 'Wire' && sv.args[0].container === 'Gaylord' && sv.args[0].shelfLife === '90' && sv.args[0].active === true, sv && sv.args);
+  await page.waitForSelector('[data-mtitem]');
+  ok('back on the list with it', (await page.textContent('#mtItemList')).includes('Copper 0.059'));
+  // Rename an item that has lots: asks first
+  const idx = await page.$$eval('[data-mtitem]', (els) => els.findIndex((e) => e.textContent.includes('WB-2100')));
+  await page.click('[data-mtitem="' + idx + '"]'); await page.waitForSelector('#mtItName');
+  ok('editing shows Active and Delete', !!(await page.$('#mtItActive')) && !!(await page.$('#mtItDelete')));
+  await page.click('#mtItDelete'); await page.waitForTimeout(100);
+  ok('Delete with lots says to uncheck Active instead', /Uncheck Active/.test(await page.textContent('#modalRoot')) && !calls.some((c) => c.fn === 'deleteMaterialItem'));
+  await page.click('#modalOk'); await page.waitForTimeout(100);
+  await page.fill('#mtItName', 'WB-2100 Gold');
+  await page.click('#mtItSave'); await page.waitForTimeout(100);
+  ok('renaming asks, saying its lots follow', /1 lot received as WB-2100 will be renamed to WB-2100 Gold/.test(await page.textContent('#modalRoot')));
+  await page.click('#modalOk'); await page.waitForTimeout(200);
+  sv = calls.filter((c) => c.fn === 'saveMaterialItem').pop();
+  ok('the rename is sent with the id', sv && sv.args[0].id === 'MI-00001' && sv.args[0].name === 'WB-2100 Gold', sv && sv.args);
+  mats[0].product = 'WB-2100 Gold';
+  // Receiving: a name not on the list can't be scanned; "Add it now" adds it and comes back with it picked
+  await page.click('#backBtn'); await page.waitForSelector('#mtReceiveBtn');
+  await page.click('#mtReceiveBtn'); await page.waitForSelector('#mtScan');
+  await page.fill('#mtSupplier', 'DSM');
+  await page.fill('#mtProduct', 'WB-2100 Gold');
+  ok('picking a material with a shelf life fills the expiration date', (await page.inputValue('#mtExp')) === (await page.evaluate(() => mtAddDays(todayStr(), 180))) && /On the Material List/.test(await page.textContent('#mtProdHint')));
+  await page.fill('#mtDate', '2026-01-01'); await page.dispatchEvent('#mtDate', 'change');
+  ok('…and follows the date received', (await page.inputValue('#mtExp')) === '2026-06-30', await page.inputValue('#mtExp'));
+  await page.fill('#mtProduct', 'Brand New 7');
+  ok('a name not on the list: says so, with Add it now', /not on the Material List yet/.test(await page.textContent('#mtProdHint')) && !!(await page.$('#mtAddItemBtn')));
+  await page.fill('#mtScan', 'L1'); await page.press('#mtScan', 'Enter');
+  ok('…and its lots can\'t be scanned', !(await page.$('[data-mtqty]')) && /Material List first/.test(await page.textContent('#toast')));
+  await page.click('#mtAddItemBtn'); await page.waitForSelector('#mtItName');
+  ok('Add it now: the form has the name and type filled in', (await page.inputValue('#mtItName')) === 'Brand New 7' && (await page.inputValue('#mtItType')) === 'Compound' && (await page.inputValue('#mtItSupplier')) === 'DSM');
+  await page.click('#mtItSave'); await page.waitForSelector('#mtScan');
+  ok('…back on receiving with it picked', (await page.inputValue('#mtProduct')) === 'Brand New 7' && (await page.inputValue('#mtSupplier')) === 'DSM');
+  await page.fill('#mtScan', 'L1'); await page.press('#mtScan', 'Enter');
+  ok('…and now its lots scan', (await page.$$('[data-mtqty]')).length === 1);
+  await page.fill('#mtProduct', 'Old Blue');
+  ok('an inactive material says it is turned off', /turned off/.test(await page.textContent('#mtProdHint')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
