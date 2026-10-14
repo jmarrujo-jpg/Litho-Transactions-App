@@ -1359,12 +1359,10 @@ await concurrency(envBase, 'in-worker lock');
   ok('getMaterials returns the list and container defaults', g.ok && g.result.items.length === 1 && g.result.items[0].active && g.result.containerFor.Copper === 'Gaylord', g.result && g.result.items);
   const noName = await call('saveMaterialItem', [{ name: ' ', type: 'Ink' }, 'Jo', 'op-38-b']);
   ok('a blank name is refused', !noName.ok && /name/.test(noName.error), noName);
-  const badShelf = await call('saveMaterialItem', [{ name: 'Blue', type: 'Ink', shelfLife: 'a year' }, 'Jo', 'op-38-c']);
-  ok('a shelf life that isn\'t a number is refused', !badShelf.ok && /Shelf life/.test(badShelf.error), badShelf);
-  const a = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun', partNo: 'B-286', shelfLife: '180', notes: 'keep warm' }, 'Jo', 'op-38-d']);
+  const a = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun', partNo: 'B-286', notes: 'keep warm' }, 'Jo', 'op-38-d']);
   const a2 = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun' }, 'Jo', 'op-38-d']);
   const row = f.rows(SID, 'Material List')[1];
-  ok('add an item: type spelled the app\'s way, container from the type', a.ok && row['Item ID'] === 'MI-00002' && row['Type'] === 'Ink' && row['Container'] === 'Can' && String(row['Shelf Life (Days)']) === '180' && row['Supplier'] === 'SUN', row);
+  ok('add an item: type spelled the app\'s way, container from the type', a.ok && row['Item ID'] === 'MI-00002' && row['Type'] === 'Ink' && row['Container'] === 'Can' && row['Part #'] === 'B-286' && row['Supplier'] === 'SUN', row);
   ok('the retry adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Material List').length === 2, a2);
   const dup = await call('saveMaterialItem', [{ name: 'blue 286', type: 'Ink' }, 'Jo', 'op-38-e']);
   ok('the same name and type twice is refused', !dup.ok && /already on the Material List/.test(dup.error), dup);
@@ -1399,8 +1397,57 @@ await concurrency(envBase, 'in-worker lock');
   const b = f.book(SID); delete b.tabs['Material List']; b.order = b.order.filter((x) => x !== 'Material List');
   const g = await call('getMaterials', []);
   ok('a received product not saved on the list yet still shows (no id)', g.ok && g.result.items.length === 1 && g.result.items[0].name === 'P-1' && g.result.items[0].id === '', g.result && g.result.items);
-  const s = await call('saveMaterialItem', [{ name: 'P-1', type: 'Powder', supplier: 'DSM', shelfLife: 365 }, 'Jo', 'op-38b-b']);
-  ok('saving that entry fills it in instead of refusing it as a duplicate', s.ok && f.rows(SID, 'Material List').length === 1 && String(f.rows(SID, 'Material List')[0]['Shelf Life (Days)']) === '365', { s, rows: f.rows(SID, 'Material List') });
+  const s = await call('saveMaterialItem', [{ name: 'P-1', type: 'Powder', supplier: 'DSM', notes: 'keep dry' }, 'Jo', 'op-38b-b']);
+  ok('saving that entry fills it in instead of refusing it as a duplicate', s.ok && f.rows(SID, 'Material List').length === 1 && f.rows(SID, 'Material List')[0]['Notes'] === 'keep dry', { s, rows: f.rows(SID, 'Material List') });
+}
+
+// 39. Loading materials onto a machine: takes containers (oldest delivery first), one line per lot, Used at 0; undo; retry-safe
+{ const f = fresh();
+  await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100', qty: 2 }, { lot: 'B7', type: 'Powder', product: 'Stripe 9', qty: 1 }], 'Jo', 'op-39-a']);
+  await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100', qty: 3 }, { lot: 'X9', type: 'Ink', product: 'Blue', qty: 1 }, { lot: 'X9', type: 'Powder', product: 'Red', qty: 1 }], 'Jo', 'op-39-b']);
+  // M-00001 A1 x2, M-00002 B7 x1, M-00003 A1 x3, M-00004 X9 Blue, M-00005 X9 Red
+  const noM = await call('loadMaterials', [{ machine: ' ' }, [{ lot: 'A1' }], 'Sam', 'op-39-c']);
+  ok('the machine is required', !noM.ok && /machine/.test(noM.error), noM);
+  const bad = await call('loadMaterials', [{ machine: 'Press 3' }, [{ lot: 'A1' }, { lot: 'NOPE' }], 'Sam', 'op-39-d']);
+  ok('a lot not in inventory stops the whole save', !bad.ok && /NOPE is not in inventory/.test(bad.error) && !f.rows(SID, 'Material Loads').length && String(f.rows(SID, 'Materials')[0]['Qty On Hand']) === '2', bad);
+  const amb = await call('loadMaterials', [{ machine: 'Press 3' }, [{ lot: 'X9' }], 'Sam', 'op-39-e']);
+  ok('a lot number on two materials asks which', !amb.ok && /more than one material \(Blue, Red\)/.test(amb.error), amb);
+  const many = await call('loadMaterials', [{ machine: 'Press 3' }, [{ lot: 'B7', qty: 2 }], 'Sam', 'op-39-f']);
+  ok('more containers than are left is refused', !many.ok && /only 1 container/.test(many.error), many);
+  // 3 of A1: 2 from the first delivery (now Used), 1 from the second; B7 used up; X9 Red picked
+  f.faults.push({ match: (r) => r.kind === 'write' && String(r.body || '').includes("'Materials'!"), mode: 'after', status: 503, times: 1 });
+  const scans = [{ lot: 'a1' }, { lot: 'A1', qty: 2 }, { lot: 'B7' }, { lot: 'X9', product: 'red' }];
+  const a = await call('loadMaterials', [{ machine: 'Press 3', notes: 'start of shift' }, scans, 'Sam', 'op-39-g']);
+  const a2 = a.ok ? a : await call('loadMaterials', [{ machine: 'Press 3', notes: 'start of shift' }, scans, 'Sam', 'op-39-g']);
+  const m = f.rows(SID, 'Materials'), L = f.rows(SID, 'Material Loads');
+  ok('oldest delivery first; 0 left -> Used', String(m[0]['Qty On Hand']) === '0' && m[0]['Status'] === 'Used' && String(m[2]['Qty On Hand']) === '2' && m[2]['Status'] === 'In Stock'
+    && String(m[1]['Qty On Hand']) === '0' && m[1]['Status'] === 'Used' && String(m[4]['Qty On Hand']) === '0' && String(m[3]['Qty On Hand']) === '1', m.map((r) => [r['Material ID'], r['Qty On Hand'], r['Status']]));
+  ok('one line per lot taken from, with machine, date, who, what\'s left', L.length === 4 && L[0]['Load ID'] === 'L-000001' && L[0]['Machine'] === 'Press 3' && L[0]['Material ID'] === 'M-00001' && String(L[0]['Qty']) === '2'
+    && String(L[0]['Left After']) === '0' && L[1]['Material ID'] === 'M-00003' && String(L[1]['Qty']) === '1' && String(L[1]['Left After']) === '2' && L[0]['Loaded By'] === 'Sam' && L[0]['Notes'] === 'start of shift'
+    && /^\d{4}-\d\d-\d\d$/.test(L[0]['Date']) && L[3]['Product'] === 'Red', L);
+  ok('(the count write did fail once)', f.faults.every((x) => x.times === 0), f.faults);
+  ok('the retry after a failed count write takes nothing twice', a2.ok && a2.result.containers === 5 && a2.result.usedUp.join() === 'A1,B7,X9', a2);
+  const a3 = await call('loadMaterials', [{ machine: 'Press 3' }, scans, 'Sam', 'op-39-g']);
+  ok('the same save again changes nothing', a3.ok && a3.result.duplicate && f.rows(SID, 'Material Loads').length === 4 && String(f.rows(SID, 'Materials')[2]['Qty On Hand']) === '2', a3);
+  const used = await call('loadMaterials', [{ machine: 'Press 3' }, [{ lot: 'B7' }], 'Sam', 'op-39-h']);
+  ok('a used-up lot says so', !used.ok && /B7 is used up/.test(used.error), used);
+  await call('loadMaterials', [{ machine: 'Liner 1', date: '2026-01-05' }, [{ lot: 'A1' }], 'Sam', 'op-39-i']);
+  // History
+  const today = (await call('getMaterialLoads', [{}])).result;
+  ok('history: today by default, newest first; machines listed', today.loads.length === 4 && today.machines.join() === 'Liner 1,Press 3', today);
+  const old = (await call('getMaterialLoads', [{ from: '2026-01-05', machine: 'liner 1' }])).result;
+  ok('history: a day and a machine', old.loads.length === 1 && old.loads[0].lot === 'A1' && old.loads[0].left === 1, old);
+  const g = await call('getMaterials', []);
+  ok('getMaterials lists the machines used', g.result.machines.join() === 'Liner 1,Press 3', g.result.machines);
+  // Undo the B7 line: back in stock; retry-safe
+  f.faults.push({ match: (r) => r.kind === 'struct' && r.decoded.includes('deleteDimension'), mode: 'after', status: 503, times: 1 });
+  const u = await call('undoMaterialLoad', ['L-000003', 'Sam', 'op-39-j']);
+  const u2 = u.ok && !f.rows(SID, 'Material Loads').some((r) => r['Load ID'] === 'L-000003') ? u : await call('undoMaterialLoad', ['L-000003', 'Sam', 'op-39-j']);
+  const b7 = f.rows(SID, 'Materials')[1];
+  ok('(the line delete did fail once)', f.faults.every((x) => x.times === 0), f.faults);
+  ok('undo puts the container back once and removes the line', u2.ok && String(b7['Qty On Hand']) === '1' && b7['Status'] === 'In Stock' && !f.rows(SID, 'Material Loads').some((r) => r['Load ID'] === 'L-000003'), { u, u2, b7 });
+  const u3 = await call('undoMaterialLoad', ['L-000003', 'Sam', 'op-39-k']);
+  ok('undo again is harmless', u3.ok && u3.result.alreadyGone && String(f.rows(SID, 'Materials')[1]['Qty On Hand']) === '1', u3);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
