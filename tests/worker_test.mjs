@@ -1519,5 +1519,27 @@ await concurrency(envBase, 'in-worker lock');
   ok('remove the START lots; again is harmless', rs.ok && rs.result.removed === 1 && rs.result.remaining === 0 && rs2.result.removed === 0 && !f.rows(SID, 'Materials').some((r) => r['Lot #'] === 'START') && f.rows(SID, 'Materials').length === 3, f.rows(SID, 'Materials').map((r) => r['Lot #']));
 }
 
+// 42. Add Lots, a section of several lots: one save; a lot scanned twice adds up; retry-safe; a new machine is added
+{ const f = fresh();
+  await call('setupMaterials', [{ items: [{ name: '9307G', type: 'Compound' }], machines: [{ name: 'Press 13' }] }, 'Jo', 'op-42-a']);
+  const sec = { type: 'Compound', product: '9307G', supplier: 'DOW', location: 'Pallet Area' };
+  const lots = [{ lot: 'A1', expiration: '2027-01-01' }, { lot: 'A2', expiration: '2027-02-01', qty: 2 }, { lot: 'a1' }];
+  f.faults.push({ match: (r) => r.kind === 'append' && r.decoded.includes('Materials'), mode: 'after', status: 503, times: 1 });
+  const a = await call('addMaterialLots', [sec, lots, 'Jonathan', 'op-42-b']);
+  const a2 = await call('addMaterialLots', [sec, lots, 'Jonathan', 'op-42-b']);
+  let m = f.rows(SID, 'Materials');
+  ok('a section of lots: one line per lot, a lot twice adds up, Received By', a.ok && m.length === 2 && m[0]['Lot #'] === 'A1' && String(m[0]['Qty On Hand']) === '2' && m[1]['Lot #'] === 'A2' && String(m[1]['Qty On Hand']) === '2'
+    && m[1]['Expiration Date'] === '2027-02-01' && m[0]['Received By'] === 'Jonathan' && m[0]['Status'] === 'In Stock', m);
+  ok('the retry adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Materials').length === 2, a2);
+  const b = await call('addMaterialLots', [sec, [{ lot: 'A2' }, { lot: 'A3' }], 'Jonathan', 'op-42-c']);
+  m = f.rows(SID, 'Materials');
+  ok('an existing lot at the same place gets the containers; a new one gets a line', b.ok && m.length === 3 && String(m[1]['Qty On Hand']) === '3' && m[2]['Lot #'] === 'A3', m);
+  const c = await call('addMaterialLots', [{ type: 'Compound', product: '9307G', location: 'Press 22', onMachine: true, position: 'Barrel 1' }, [{ lot: 'A9' }], 'Jonathan', 'op-42-d']);
+  m = f.rows(SID, 'Materials');
+  ok('a new machine: Loaded, and added to the Machines tab', c.ok && m[3]['Status'] === 'Loaded' && m[3]['Location'] === 'Press 22' && f.rows(SID, 'Machines').some((r) => r['Machine'] === 'Press 22' && r['Positions'] === 'Barrel 1'), { m: m[3], machines: f.rows(SID, 'Machines') });
+  const none = await call('addMaterialLots', [sec, [{ lot: ' ' }], 'Jonathan', 'op-42-e']);
+  ok('no lot numbers is refused', !none.ok && /lot number/.test(none.error), none);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

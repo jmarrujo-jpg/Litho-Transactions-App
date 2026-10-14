@@ -2003,20 +2003,19 @@ const base = {
   await page.close();
 }
 
-// ---- 47. Add Lots (the walk-around): type, material, supplier remembered, lot, expiration, place; Loaded on a machine; Used up; remove START
+// ---- 47. Add Lots (the walk-around): pick a section, add several lots, save them together; ➕ new type / supplier / place / machine
 { const items = [{ id: 'MI-1', name: '9000-63-1', type: 'Compound', supplier: 'DOW', container: 'Barrel', active: true, unit: 'lbs', perContainer: 525, reorder: 1050, location: 'Pallet Area' },
     { id: 'MI-2', name: '9307G', type: 'Compound', supplier: '', container: 'Barrel', active: true, unit: 'lbs', perContainer: 549, reorder: '', location: 'Pallet Area' }];
   const mats = [{ id: 'M-00001', lot: 'START', type: 'Compound', product: '9000-63-1', supplier: '', receiver: '', po: '', date: '2026-10-12', expiration: '', qtyReceived: 2, qtyOnHand: 2, container: 'Barrel', status: 'In Stock', comments: '', location: 'Pallet Area', position: '' }];
   let n = 1;
   const G = { materials: mats, items, types: ['Compound', 'Powder', 'Copper', 'Ink', 'Make-Up', 'Solution/Grease'], machines: ['Multi Press', 'Press 14'],
     machineInfo: [{ name: 'Multi Press', positions: ['Barrel 1', 'Barrel 2'], materials: ['9000-63-1'], active: true }, { name: 'Press 14', positions: [], materials: [], active: true }],
-    containerFor: {}, products: {}, suppliers: ['DOW'], containers: [], receivers: [] };
+    containerFor: {}, products: {}, suppliers: ['DOW', 'STEEL MILL X'], containers: [], receivers: [] };
   const { page, calls } = await boot(Object.assign({}, base, {
     getMaterials: () => R(G),
-    addMaterialLot: (a) => { const e = a[0]; const loaded = /press/i.test(e.location);
-      const m = { id: 'M-1' + (n++), lot: e.lot, type: e.type, product: e.product, supplier: String(e.supplier || '').toUpperCase(), expiration: e.expiration, qtyReceived: e.qty, qtyOnHand: e.qty, container: 'Barrel', location: e.location, position: e.position, status: loaded ? 'Loaded' : 'In Stock', receiver: '', po: '', date: '2026-10-14', comments: '' };
-      mats.unshift(m);
-      return R({ ok: true, added: true, material: m }); },
+    addMaterialLots: (a) => { const c = a[0];
+      const saved = a[1].map((l) => { const m = { id: 'M-1' + (n++), lot: l.lot, type: c.type, product: c.product, supplier: String(c.supplier || '').toUpperCase(), expiration: l.expiration, qtyReceived: l.qty, qtyOnHand: l.qty, container: 'Barrel', location: c.location, position: c.position, status: c.onMachine ? 'Loaded' : 'In Stock', receiver: '', po: '', date: '2026-10-14', comments: '' }; mats.unshift(m); return m; });
+      return R({ ok: true, saved, lots: saved.length }); },
     updateMaterial: () => R({ ok: true }),
     removeStartLots: () => R({ ok: true, removed: 1, remaining: 0 }),
   }));
@@ -2024,43 +2023,53 @@ const base = {
   ok('Add Lots is the big button; the START lots can be removed', (await page.textContent('#mtAddBtn')).includes('Add Lots') && !!(await page.$('#mtStartRemove')));
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-maprod]');
   ok('compound shows its material codes as buttons', (await page.$$eval('[data-maprod]', (els) => els.map((e) => e.textContent))).join() === '9000-63-1,9307G');
+  ok('Added by starts as Jonathan', (await page.inputValue('#maOperator')) === 'Jonathan');
+  ok('suppliers are the materials\' suppliers (not every steel mill)', (await page.$$eval('[data-masup]', (els) => els.map((e) => e.textContent))).join() === 'DOW');
   await page.click('[data-maprod="9000-63-1"]');
-  ok('picking the material fills in the supplier used before, and goes to the lot box', (await page.inputValue('#maSupplier')) === 'DOW' && (await page.evaluate(() => document.activeElement.id)) === 'maLot');
-  await page.fill('#maLot', 'B-7781'); await page.press('#maLot', 'Enter');
-  ok('Enter on the lot goes to the expiration date', (await page.evaluate(() => document.activeElement.id)) === 'maExp');
-  await page.fill('#maExp', '2027-05-01');
-  await page.click('#maSave'); await page.waitForTimeout(50);
-  ok('where it is is required', /Pick where it is/.test(await page.textContent('#toast')) && !calls.some((c) => c.fn === 'addMaterialLot'));
-  await page.click('[data-maloc="Pallet Area"]');
+  ok('picking the material picks the supplier used before', (await page.getAttribute('[data-masup="DOW"]', 'class')) === 'btn ');
+  await page.click('[data-maplace="Pallet Area"]');
+  // several lots
+  await page.fill('#maLot', 'B-1'); await page.press('#maLot', 'Enter');
+  ok('Enter on the lot goes to the date', (await page.evaluate(() => document.activeElement.id)) === 'maExp');
+  await page.fill('#maExp', '2027-05-01'); await page.press('#maExp', 'Enter');
+  ok('Enter on the date adds the lot to the list and goes back to the lot box', /B-1.*expires 2027-05-01/.test(await page.textContent('#maLines')) && (await page.evaluate(() => document.activeElement.id)) === 'maLot' && (await page.inputValue('#maExp')) === '2027-05-01');
+  await page.fill('#maLot', 'B-2'); await page.click('#maPlus'); await page.click('#maAddLot');
+  await page.fill('#maLot', 'b-1'); await page.click('#maAddLot');
+  ok('the same lot again adds its containers', (await page.$$eval('[data-maq]', (els) => els.map((e) => e.textContent))).join() === '2,2');
+  await page.fill('#maLot', 'B-3');   // typed but not added: still counts
+  ok('Save says how many lots and containers', /Save 2 lots \(4 containers\)/.test(await page.textContent('#maSave')));
   await page.click('#maSave'); await page.waitForTimeout(200);
-  let ad = calls.filter((c) => c.fn === 'addMaterialLot');
-  ok('Save sends the lot with no receiver or PO', ad.length === 1 && JSON.stringify(ad[0].args[0]) === JSON.stringify({ type: 'Compound', product: '9000-63-1', supplier: 'DOW', lot: 'B-7781', expiration: '2027-05-01', location: 'Pallet Area', position: '', qty: 1 }), ad[0] && ad[0].args);
-  ok('after Save: lot and date cleared, the rest kept, ready to scan the next', (await page.inputValue('#maLot')) === '' && (await page.inputValue('#maExp')) === '' && (await page.inputValue('#maSupplier')) === 'DOW'
-    && (await page.getAttribute('[data-maloc="Pallet Area"]', 'class')) === 'btn ' && (await page.evaluate(() => document.activeElement.id)) === 'maLot' && /Just added \(1\).*B-7781/.test(await page.textContent('#maAdded')));
-  // On a machine: Loaded, with the barrel
-  await page.fill('#maLot', 'B-7790');
-  await page.click('[data-maloc="Multi Press"]');
+  let ad = calls.filter((c) => c.fn === 'addMaterialLots');
+  ok('Save sends the section and every lot at once, no receiver or PO', ad.length === 1 && JSON.stringify(ad[0].args[0]) === JSON.stringify({ type: 'Compound', product: '9000-63-1', supplier: 'DOW', location: 'Pallet Area', onMachine: false, position: '' })
+    && JSON.stringify(ad[0].args[1].map((l) => [l.lot, l.qty])) === JSON.stringify([['B-3', 1], ['B-2', 2], ['B-1', 2]]) && ad[0].args[2] === 'Jonathan', ad[0] && ad[0].args);
+  ok('after Save: the list is empty, the section stays, ready to scan', !(await page.$('[data-maq]')) && /Saved \(3\)/.test(await page.textContent('#maAdded'))
+    && (await page.getAttribute('[data-maplace="Pallet Area"]', 'class')) === 'btn ' && (await page.evaluate(() => document.activeElement.id)) === 'maLot');
+  // ➕ new supplier, new machine (Loaded, with no barrels)
+  await page.click('[data-manew="supplier"]'); await page.fill('#maNew_supplier', 'Henkel'); await page.press('#maNew_supplier', 'Enter');
+  ok('➕ New supplier adds it and picks it', (await page.getAttribute('[data-masup="Henkel"]', 'class')) === 'btn ');
+  await page.click('[data-manew="machine"]'); await page.fill('#maNew_machine', 'Press 22'); await page.click('[data-manewok="machine"]');
+  ok('➕ New machine adds it and picks it', (await page.getAttribute('[data-mamach="Press 22"]', 'class')) === 'btn ' && (await page.getAttribute('[data-maplace="Pallet Area"]', 'class')) === 'btn secondary');
+  await page.fill('#maLot', 'B-9'); await page.click('#maSave'); await page.waitForTimeout(200);
+  ad = calls.filter((c) => c.fn === 'addMaterialLots');
+  ok('a new machine: sent as on a machine', ad[1].args[0].location === 'Press 22' && ad[1].args[0].onMachine === true && ad[1].args[0].supplier === 'Henkel', ad[1].args);
+  // a known machine with barrels
+  await page.click('[data-mamach="Multi Press"]');
   ok('a machine with barrels asks which', (await page.$$('[data-mapos]')).length === 2);
   await page.click('[data-mapos="Barrel 1"]');
-  await page.click('#maSave'); await page.waitForTimeout(200);
-  ad = calls.filter((c) => c.fn === 'addMaterialLot');
-  ok('a lot on a machine is sent with the machine and barrel', ad[1].args[0].location === 'Multi Press' && ad[1].args[0].position === 'Barrel 1' && ad[1].args[0].lot === 'B-7790', ad[1].args);
-  ok('…and shows Loaded', /B-7790.*Loaded.*Multi Press · Barrel 1/.test(await page.textContent('#maAdded')));
-  // A new supplier typed for a material is kept for next time
-  await page.click('[data-maprod="9307G"]');
-  ok('a material with no supplier yet leaves the box as it was', (await page.inputValue('#maSupplier')) === 'DOW');
-  await page.fill('#maSupplier', 'Henkel'); await page.fill('#maLot', 'H1'); await page.click('[data-maloc="Pallet Area"]');
-  await page.click('#maSave'); await page.waitForTimeout(200);
-  await page.click('[data-maprod="9000-63-1"]'); await page.click('[data-maprod="9307G"]');
-  ok('…then picking it again fills in that supplier', (await page.inputValue('#maSupplier')) === 'HENKEL');
-  // Back on Materials: stock counts loaded ones; Used up; remove START
+  await page.fill('#maLot', 'B-10'); await page.click('#maSave'); await page.waitForTimeout(200);
+  ad = calls.filter((c) => c.fn === 'addMaterialLots');
+  ok('…sent with the barrel, shows Loaded', ad[2].args[0].location === 'Multi Press' && ad[2].args[0].position === 'Barrel 1' && /B-10.*Loaded.*Multi Press · Barrel 1/.test(await page.textContent('#maAdded')), ad[2].args);
+  // ➕ new type
+  await page.click('[data-manew="type"]'); await page.fill('#maNew_type', 'Solvent'); await page.press('#maNew_type', 'Enter');
+  ok('➕ New type adds it and picks it (no materials yet)', (await page.getAttribute('[data-matype="Solvent"]', 'class')) === 'btn ' && /No Solvent on the Material List yet/.test(await page.textContent('#view')));
+  // Back on Materials: Used up; stock counts loaded ones; remove START
   await page.click('#backBtn'); await page.waitForSelector('[data-mtusedup]');
   await page.click('[data-mtusedup]'); await page.waitForSelector('#modalOk');
   await page.click('#modalOk'); await page.waitForTimeout(150);
   const up = calls.filter((c) => c.fn === 'updateMaterial')[0];
   ok('Used up marks that lot Used', up && JSON.stringify(up.args[1]) === '{"Status":"Used"}', up && up.args);
   await page.waitForSelector('#mtListBtn'); await page.click('#mtListBtn'); await page.waitForSelector('[data-mtitem]');
-  ok('stock counts loaded containers too, and says how many', /9000-63-1.*In stock: 4 Barrels ≈ 2,100 lbs \(1 loaded\)/.test(await page.textContent('#mtItemList')), await page.textContent('#mtItemList'));
+  ok('stock counts loaded containers too, and says how many', /9000-63-1.*In stock: 9 Barrels ≈ 4,725 lbs \(2 loaded\)/.test(await page.textContent('#mtItemList')), await page.textContent('#mtItemList'));
   await page.click('#backBtn'); await page.waitForSelector('#mtStartRemove');
   await page.click('#mtStartRemove'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(150);
   ok('Remove the START lots asks first, then removes them', calls.some((c) => c.fn === 'removeStartLots'));

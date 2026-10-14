@@ -184,7 +184,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'addlots-90', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'addlots-91', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -350,6 +350,8 @@ async function handle(fn, args, env) {
       return undoMaterialLoad(sheets, args[0], args[1], args[2]);
     case 'setupMaterials': // ({items, machines, stock, date}, operator, opId) one-time setup from the count sheets; only adds / fills blanks
       return setupMaterials(sheets, args[0], args[1], args[2]);
+    case 'addMaterialLots': // ({type, product, supplier, location, onMachine, position, container}, lots[{lot, expiration, qty}], operator, opId) the walk-around: a section of lots
+      return addMaterialLots(sheets, args[0], args[1], args[2], args[3]);
     case 'addMaterialLot': // ({type, product, supplier, lot, expiration, location, position, qty, container}, operator, opId) the walk-around: one lot
       return addMaterialLot(sheets, args[0], args[1], args[2]);
     case 'removeStartLots': // (operator, opId) delete the setup's START lots (up to 20 per call)
@@ -3076,66 +3078,102 @@ async function setupMaterials(sheets, seed, operator, opId) {
 }
 
 // ---- Add Lots: the walk-around ----
-// One lot at a time: type, material, supplier, lot #, expiration, where it is. No receiver or PO
-// (those can be attached later). A machine as the location means it's Loaded (on the machine; still
-// counts toward stock); anywhere else is In Stock. The same lot of the same material again at the same place
-// adds a container to that line. The supplier is remembered on the Material List for next time.
-// Retry-safe: a new line carries the Op ID; an added container stamps "add:<opId>" on its line.
-async function addMaterialLot(sheets, e, operator, opId) {
-  e = e || {};
+// One "section" at a time: type, material, supplier, where it is — then any number of lot numbers
+// (each with its expiration and how many containers). No receiver or PO (those can be attached
+// later). On a machine means Loaded (still counts toward stock); anywhere else is In Stock. A new
+// machine typed here goes on the Machines tab. The same lot of the same material at the same place
+// adds containers to that line. The supplier is remembered on the Material List for next time.
+// Retry-safe: each lot n carries "<opId>#<n>" — as the Op ID of a new line, or stamped as
+// "add:<opId>#<n>" on a line it added containers to — so a retry skips what already landed.
+const ADD_LOTS_MAX = 200;
+async function addMaterialLots(sheets, c, lots, operator, opId) {
+  c = c || {};
   operator = String(operator || '').trim();
-  const typeIn = String(e.type || '').trim(), product = String(e.product || '').trim(), lot = String(e.lot == null ? '' : e.lot).trim();
+  const typeIn = String(c.type || '').trim(), product = String(c.product || '').trim();
   if (!typeIn) throw new Error('Pick the type.');
   if (!product) throw new Error('Pick the material.');
-  if (!lot) throw new Error('Scan or type the lot number.');
-  const locIn = String(e.location || '').trim();
+  const locIn = String(c.location || '').trim();
   if (!locIn) throw new Error('Pick where it is.');
-  const qty = materialQty(e.qty == null || e.qty === '' ? 1 : e.qty, 'The number of containers', 1);
-  const expiration = materialDate(e.expiration, 'The expiration date');
-  const supplier = cleanSupplier(e.supplier);
-  const machine = (await readMachines(sheets)).filter((m) => m.name.toLowerCase() === locIn.toLowerCase())[0];
+  const list = [], byLot = {};
+  (Array.isArray(lots) ? lots : []).forEach((l) => {
+    l = l || {};
+    const lot = String(l.lot == null ? '' : l.lot).trim();
+    if (!lot) return;
+    const qty = materialQty(l.qty == null || l.qty === '' ? 1 : l.qty, 'Lot ' + lot + ': the number of containers', 1);
+    const expiration = materialDate(l.expiration, 'Lot ' + lot + ': the expiration date');
+    const k = lot.toLowerCase();
+    if (byLot[k]) { byLot[k].qty += qty; if (!byLot[k].expiration) byLot[k].expiration = expiration; return; }
+    byLot[k] = { lot, qty, expiration };
+    list.push(byLot[k]);
+  });
+  if (!list.length) throw new Error('Scan or type the lot number.');
+  if (list.length > ADD_LOTS_MAX) throw new Error('That is more than ' + ADD_LOTS_MAX + ' lots at once. Save them in smaller batches.');
+  const supplier = cleanSupplier(c.supplier);
+  const machines = await readMachines(sheets);
+  const machine = machines.filter((m) => m.name.toLowerCase() === locIn.toLowerCase())[0];
+  const onMachine = !!machine || c.onMachine === true;
   const location = machine ? machine.name : locIn;
-  const status = machine ? MATERIAL_STATUS.LOADED : MATERIAL_STATUS.IN_STOCK;
-  const position = machine ? String(e.position || '').trim() : '';
+  const status = onMachine ? MATERIAL_STATUS.LOADED : MATERIAL_STATUS.IN_STOCK;
+  const position = onMachine ? String(c.position || '').trim() : '';
   const t = await materialsTab(sheets);
   const lst = await materialListTab(sheets);
   const items = lst.rows.map(itemOut).filter((i) => i.id || i.name);
   const type = MATERIAL_TYPES.concat(items.map((i) => i.type)).filter((x) => x && x.toLowerCase() === typeIn.toLowerCase())[0] || typeIn;
   const item = items.filter((i) => itemKey(i.name, i.type) === itemKey(product, type))[0];
   const name = item ? item.name : product;
-  const container = String(e.container || '').trim() || (item && item.container) || MATERIAL_CONTAINERS[type] || '';
+  const container = String(c.container || '').trim() || (item && item.container) || MATERIAL_CONTAINERS[type] || '';
   const ts = nowStamp();
-  if (opId) {
-    const done = t.rows.filter((r) => String(r['Op ID'] || '').trim() === opId || String(r['Last Load Op'] || '').trim() === 'add:' + opId)[0];
-    if (done) return { ok: true, material: materialOut(done), duplicate: true };
-  }
-  const same = t.rows.filter((r) => String(r['Lot #'] != null ? r['Lot #'] : '').trim().toLowerCase() === lot.toLowerCase()
-    && itemKey(r['Product'], r['Type']) === itemKey(name, type) && String(r['Location'] || '').trim().toLowerCase() === location.toLowerCase()
-    && String(r['Position'] || '').trim().toLowerCase() === position.toLowerCase() && String(r['Status'] || '').trim() === status)[0];
-  let out, added = false;
-  if (same) {
-    const f = { 'Qty Received': num(same['Qty Received']) + qty, 'Qty On Hand': num(same['Qty On Hand']) + qty, 'Last Load Op': 'add:' + opId, 'Last Updated At': ts };
-    if (expiration && !toYMD(same['Expiration Date'])) f['Expiration Date'] = expiration;
-    if (supplier && !String(same['Supplier'] || '').trim()) f['Supplier'] = supplier;
-    await stampCells(sheets, MATERIALS, same.__row, t.map, f);
-    out = materialOut(Object.assign({}, same, f));
-  } else {
-    const obj = { 'Material ID': 'M-' + ('00000' + (maxIdNumber(t.rows, 'Material ID', 'M-') + 1)).slice(-5), 'Lot #': lot, 'Type': type, 'Product': name,
-      'Supplier': supplier, 'Receiver': '', 'PO #': '', 'Date Received': todayYMD(), 'Expiration Date': expiration, 'Qty Received': qty, 'Qty On Hand': qty,
+  const add = [], data = [], saved = [];
+  let next = maxIdNumber(t.rows, 'Material ID', 'M-'), duplicates = 0;
+  list.forEach((l, i) => {
+    const op = opId ? opId + '#' + (i + 1) : '';
+    const done = op && t.rows.filter((r) => String(r['Op ID'] || '').trim() === op || String(r['Last Load Op'] || '').trim() === 'add:' + op)[0];
+    if (done) { saved.push(materialOut(done)); duplicates++; return; }
+    const same = t.rows.filter((r) => String(r['Lot #'] != null ? r['Lot #'] : '').trim().toLowerCase() === l.lot.toLowerCase()
+      && itemKey(r['Product'], r['Type']) === itemKey(name, type) && String(r['Location'] || '').trim().toLowerCase() === location.toLowerCase()
+      && String(r['Position'] || '').trim().toLowerCase() === position.toLowerCase() && String(r['Status'] || '').trim() === status)[0];
+    if (same) {
+      const f = { 'Qty Received': num(same['Qty Received']) + l.qty, 'Qty On Hand': num(same['Qty On Hand']) + l.qty, 'Last Load Op': 'add:' + op, 'Last Updated At': ts };
+      if (l.expiration && !toYMD(same['Expiration Date'])) f['Expiration Date'] = l.expiration;
+      if (supplier && !String(same['Supplier'] || '').trim()) f['Supplier'] = supplier;
+      Object.keys(f).forEach((col) => { if (t.map[col]) data.push({ range: "'" + MATERIALS + "'!" + colLetter(t.map[col]) + same.__row, values: [[f[col]]] }); });
+      saved.push(materialOut(Object.assign({}, same, f)));
+      return;
+    }
+    const obj = { 'Material ID': 'M-' + ('00000' + (++next)).slice(-5), 'Lot #': l.lot, 'Type': type, 'Product': name,
+      'Supplier': supplier, 'Receiver': '', 'PO #': '', 'Date Received': todayYMD(), 'Expiration Date': l.expiration, 'Qty Received': l.qty, 'Qty On Hand': l.qty,
       'Container': container, 'Location': location, 'Position': position, 'Status': status, 'Comments': '', 'Received At': ts, 'Received By': operator,
-      'Last Updated At': ts, 'Op ID': opId || '' };
-    await appendRowObj(sheets, MATERIALS, t.headers, obj);
-    out = materialOut(obj); added = true;
+      'Last Updated At': ts, 'Op ID': op };
+    add.push(obj); saved.push(materialOut(obj));
+  });
+  if (add.length) {
+    await sheets.appendMany(MATERIALS, add.map((o) => t.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
+      () => columnHas(sheets, MATERIALS, t.headers, 'Material ID', add[0]['Material ID']));
   }
-  // Remember the supplier (and put a new material on the list) — best effort.
+  if (data.length) await sheets.batchUpdate(data);
+  // Best effort: remember the supplier / put a new material on the list / a new machine on the Machines tab.
   try {
-    if (!item) await syncMaterialList(sheets, lst, [Object.assign({}, out, { supplier })]);
+    if (!item) await syncMaterialList(sheets, lst, [Object.assign({}, saved[0], { supplier })]);
     else if (supplier && item.supplier !== supplier) {
       const row = lst.rows.filter((r) => String(r['Item ID'] || '').trim() === item.id)[0];
       if (row) await stampCells(sheets, MATERIAL_LIST, row.__row, lst.map, { 'Supplier': supplier, 'Last Updated At': ts });
     }
-  } catch (err) { /* the lot is saved */ }
-  return { ok: true, material: out, added };
+  } catch (err) { /* the lots are saved */ }
+  if (onMachine && !machine) {
+    try {
+      const mt = await machinesTab(sheets);
+      if (!mt.rows.some((r) => String(r['Machine'] || '').trim().toLowerCase() === location.toLowerCase())) {
+        await appendRowObj(sheets, MACHINES, mt.headers, { 'Machine': location, 'Positions': position, 'Active': 'Yes', 'Created At': ts, 'Last Updated At': ts });
+      }
+    } catch (err) { /* the lots are saved */ }
+  }
+  return { ok: true, saved, lots: saved.length, containers: list.reduce((n, l) => n + l.qty, 0), created: add.length, status, location, duplicate: duplicates === list.length };
+}
+// One lot (older app pages).
+async function addMaterialLot(sheets, e, operator, opId) {
+  e = e || {};
+  const r = await addMaterialLots(sheets, e, [{ lot: e.lot, expiration: e.expiration, qty: e.qty }], operator, opId);
+  return { ok: true, material: r.saved[0], added: r.created > 0, duplicate: r.duplicate };
 }
 
 // Remove the "START" lots from the setup once the walk-around has the real lot numbers.

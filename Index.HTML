@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.90.0</span>
+      <span class="version" id="appVersion">v1.91.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2495,11 +2495,16 @@
   }
 
   // ---- Add Lots: the walk-around ----
-  // Top to bottom, one lot at a time: type, material, supplier (remembered per material), lot #,
-  // expiration, where it is. A machine means it's Loaded; a storage place means In Stock. No receiver
-  // or PO here — those get attached later. After Save, everything but the lot # and expiration stays,
-  // so the next container is just: scan, date, Save.
-  function mtNewAdd() { return { type: 'Compound', product: '', supplier: '', lot: '', expiration: '', location: '', position: '', qty: 1, operator: lastOperator, added: [] }; }
+  // Pick a "section" — type, material, supplier, where it is (a storage spot, or a machine = Loaded)
+  // — then scan as many lot numbers as are there, each with its expiration and container count, and
+  // save them all at once. Anything not in the lists (a type, supplier, place, machine) can be added
+  // with its ➕ button. No receiver or PO here — those get attached later. After Save the section
+  // stays picked, so the next batch is just scan, scan, scan, Save.
+  var MT_ADD_BY = 'Jonathan';     // "Added by" starts with this name
+  function mtNewAdd() {
+    return { type: 'Compound', product: '', supplier: '', location: '', onMachine: false, position: '', operator: MT_ADD_BY,
+      lot: '', expiration: '', qty: 1, lines: [], added: [], extra: { type: [], supplier: [], place: [], machine: [] }, open: '' };
+  }
   function openMtAdd() {
     state.view = 'materialsAdd';
     nextViewToken();
@@ -2512,74 +2517,148 @@
     }
     renderMtAdd();
   }
+  function mtUniq(list) {
+    var seen = {}, out = [];
+    list.forEach(function (v) { v = String(v || '').trim(); if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = 1; out.push(v); } });
+    return out;
+  }
   function mtBigBtns(attr, list, current) {
     return '<div style="display:flex;flex-wrap:wrap;gap:8px">' + list.map(function (v) {
       var on = String(current || '').toLowerCase() === String(v).toLowerCase();
       return '<button class="btn ' + (on ? '' : 'secondary') + '" style="margin:0;padding:12px 16px;font-size:16px" ' + attr + '="' + esc(v) + '">' + esc(v) + '</button>';
     }).join('') + '</div>';
   }
+  // A "➕ New …" button that opens a box to type it in.
+  function mtNewBox(kind, label, placeholder) {
+    return mtAdd.open === kind
+      ? '<div class="row" style="gap:8px;margin-top:8px;align-items:center"><div class="field" style="flex:1;margin:0"><input id="maNew_' + kind + '" autocomplete="off" placeholder="' + esc(placeholder) + '"></div>' +
+        '<button class="btn" data-manewok="' + kind + '" style="margin:0">' + esc(L('Add', 'Agregar')) + '</button><button class="btn secondary" data-manewx="' + kind + '" style="margin:0">✕</button></div>'
+      : '<button class="btn secondary" data-manew="' + kind + '" style="margin:8px 0 0;padding:8px 12px;font-size:14px">➕ ' + esc(label) + '</button>';
+  }
   function renderMtAdd() {
     var a = mtAdd, view = document.getElementById('view');
+    var types = mtUniq(mtTypes().concat(a.extra.type, [a.type]));
     var names = mtListNames(a.type);
-    var machines = (mtData && mtData.machines) || [];
-    var places = mtPlaces().filter(function (p) { return !machines.some(function (m) { return m.toLowerCase() === p.toLowerCase(); }); });
-    var mach = mtMachine(a.location), pos = (mach && mach.positions) || [];
-    var h = function (n, t) { return '<h3 style="margin:16px 0 8px">' + n + '. ' + esc(t) + '</h3>'; };
+    var suppliers = mtUniq(mtItems().map(function (i) { return i.supplier; }).concat(((mtData && mtData.materials) || []).map(function (m) { return m.supplier; }), a.extra.supplier, [a.supplier]));
+    var machines = mtUniq(((mtData && mtData.machines) || []).concat(a.extra.machine, a.onMachine ? [a.location] : []));
+    var places = mtUniq(mtPlaces().concat(a.extra.place, !a.onMachine ? [a.location] : [])).filter(function (p) { return !machines.some(function (m) { return m.toLowerCase() === p.toLowerCase(); }); });
+    var mach = a.onMachine ? mtMachine(a.location) : null, pos = (mach && mach.positions) || [];
+    var n = a.lines.length, c = a.lines.reduce(function (s, l) { return s + l.qty; }, 0);
+    var h = function (num, t) { return '<h3 style="margin:16px 0 8px">' + num + '. ' + esc(t) + '</h3>'; };
     view.innerHTML =
       '<div class="card">' +
-        '<h3 style="margin:0 0 8px">1. ' + esc(L('Type', 'Tipo')) + '</h3>' + mtBigBtns('data-matype', mtTypes(), a.type) +
+        '<h3 style="margin:0 0 8px">1. ' + esc(L('Type', 'Tipo')) + '</h3>' + mtBigBtns('data-matype', types, a.type) + mtNewBox('type', L('New type', 'Tipo nuevo'), L('e.g. Solvent', 'p. ej. Solvente')) +
         h(2, L('Material', 'Material')) +
           (names.length ? mtBigBtns('data-maprod', names, a.product) : '<div class="sub">' + esc(L('No ' + a.type + ' on the Material List yet.', 'Todavía no hay ' + a.type + ' en la lista de materiales.')) + '</div>') +
-          '<button class="btn secondary" id="maNewItem" style="margin:8px 0 0;padding:8px 12px;font-size:14px">' + esc(L('➕ New material', '➕ Material nuevo')) + '</button>' +
+          '<button class="btn secondary" id="maNewItem" style="margin:8px 0 0;padding:8px 12px;font-size:14px">➕ ' + esc(L('New material', 'Material nuevo')) + '</button>' +
         h(3, L('Supplier', 'Proveedor')) +
-          '<div class="field" style="margin:0"><input id="maSupplier" list="maSupList" autocomplete="off" placeholder="' + esc(L('pick or type', 'elija o escriba')) + '" value="' + esc(a.supplier) + '"><datalist id="maSupList">' + mtOptions((mtData && mtData.suppliers) || []) + '</datalist></div>' +
-        h(4, L('Lot #', 'Lote #')) +
-          '<div class="field" style="margin:0"><input id="maLot" autocomplete="off" placeholder="' + esc(L('scan or type', 'escanee o escriba')) + '" value="' + esc(a.lot) + '" style="font-size:18px"></div>' +
-        h(5, L('Expiration date', 'Fecha de vencimiento')) +
-          '<div class="field" style="margin:0"><input type="date" id="maExp" value="' + esc(a.expiration) + '"></div>' +
-        h(6, L('Where is it?', '¿Dónde está?')) +
-          '<div class="sub" style="margin-bottom:4px">' + esc(L('Storage', 'Almacén')) + '</div>' + mtBigBtns('data-maloc', places, a.location) +
-          (machines.length ? '<div class="sub" style="margin:10px 0 4px">' + esc(L('On a machine (loaded)', 'En una máquina (cargado)')) + '</div>' + mtBigBtns('data-maloc', machines, a.location) : '') +
-          '<div class="field" style="margin:8px 0 0"><input id="maLocOther" list="maLocList" autocomplete="off" placeholder="' + esc(L('or type another place', 'u otro lugar')) + '" value="' +
-            esc(places.concat(machines).some(function (p) { return p.toLowerCase() === String(a.location).toLowerCase(); }) ? '' : a.location) + '"><datalist id="maLocList">' + mtOptions(mtPlaces()) + '</datalist></div>' +
+          (suppliers.length ? mtBigBtns('data-masup', suppliers, a.supplier) : '') + mtNewBox('supplier', L('New supplier', 'Proveedor nuevo'), L('supplier name', 'nombre del proveedor')) +
+        h(4, L('Where is it?', '¿Dónde está?')) +
+          '<div class="sub" style="margin-bottom:4px">' + esc(L('In storage', 'En almacén')) + '</div>' + mtBigBtns('data-maplace', places, a.onMachine ? '' : a.location) +
+          mtNewBox('place', L('New storage place', 'Lugar nuevo'), L('e.g. Back dock', 'p. ej. Andén trasero')) +
+          '<div class="sub" style="margin:12px 0 4px">' + esc(L('On a machine (loaded)', 'En una máquina (cargado)')) + '</div>' + mtBigBtns('data-mamach', machines, a.onMachine ? a.location : '') +
+          mtNewBox('machine', L('New machine', 'Máquina nueva'), L('e.g. Press 22', 'p. ej. Prensa 22')) +
           (pos.length ? '<div class="sub" style="margin:10px 0 4px">' + esc(L('Which barrel', 'Qué barril')) + '</div>' + mtBigBtns('data-mapos', pos, a.position) : '') +
-        '<div class="row" style="align-items:flex-end;gap:8px;margin-top:16px">' +
-          '<div class="field" style="margin:0"><label>' + esc(L('Containers', 'Recipientes')) + '</label><div style="display:flex;align-items:center;gap:6px">' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3 style="margin:0 0 4px">5. ' + esc(L('Lot numbers', 'Números de lote')) + '</h3>' +
+        '<div class="sub" style="margin-bottom:8px">' + esc(a.product ? L('Every lot here is saved as ' + a.product + (a.location ? ' at ' + a.location + (a.position ? ' (' + a.position + ')' : '') : '') + '.', 'Cada lote aquí se guarda como ' + a.product + (a.location ? ' en ' + a.location + (a.position ? ' (' + a.position + ')' : '') : '') + '.') : L('Pick the material first.', 'Primero elija el material.')) + '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0 12px;align-items:end">' +
+          '<div class="field"><label>' + esc(L('Lot #', 'Lote #')) + '</label><input id="maLot" autocomplete="off" placeholder="' + esc(L('scan or type', 'escanee o escriba')) + '" value="' + esc(a.lot) + '" style="font-size:18px"></div>' +
+          '<div class="field"><label>' + esc(L('Expiration date', 'Fecha de vencimiento')) + '</label><input type="date" id="maExp" value="' + esc(a.expiration) + '"></div>' +
+          '<div class="field"><label>' + esc(L('Containers', 'Recipientes')) + '</label><div style="display:flex;align-items:center;gap:6px">' +
             '<button class="btn secondary" id="maMinus" style="margin:0;padding:8px 14px">−</button><b id="maQty" style="min-width:28px;text-align:center;font-size:18px">' + a.qty + '</b>' +
             '<button class="btn secondary" id="maPlus" style="margin:0;padding:8px 14px">+</button></div></div>' +
-          operatorFieldHtml('maOperator', 'Added by', a.operator) +
         '</div>' +
-        '<button class="btn success" id="maSave" style="width:100%;margin-top:14px;padding:16px;font-size:18px">' + esc(L('Save lot', 'Guardar lote')) + '</button>' +
+        '<button class="btn" id="maAddLot" style="width:100%;padding:12px;font-size:16px">' + esc(L('+ Add this lot', '+ Agregar este lote')) + '</button>' +
+        '<div class="sub" style="margin-top:6px">' + esc(L('Scan → Enter → date → Enter adds it. Add as many as you need, then Save.', 'Escanee → Enter → fecha → Enter lo agrega. Agregue los que necesite y luego Guarde.')) + '</div>' +
+        '<div id="maLines" style="margin-top:8px"></div>' +
+        '<div class="row" style="margin-top:8px">' + operatorFieldHtml('maOperator', 'Added by', a.operator) + '</div>' +
+        '<button class="btn success" id="maSave" style="width:100%;margin-top:8px;padding:16px;font-size:18px">' +
+          esc(n ? L('Save ' + n + ' lot' + (n === 1 ? '' : 's') + ' (' + c + ' container' + (c === 1 ? '' : 's') + ')', 'Guardar ' + n + ' lote(s) (' + c + ' recipiente(s))') : L('Save', 'Guardar')) + '</button>' +
       '</div>' +
       '<div id="maAdded"></div>';
-    var each = function (attr, f) { Array.prototype.forEach.call(view.querySelectorAll('[' + attr + ']'), function (b) { b.onclick = function () { f(b.getAttribute(attr)); }; }); };
+    var each = function (attr, f) { Array.prototype.forEach.call(view.querySelectorAll('[' + attr + ']'), function (b) { b.onclick = function () { mtAddKeep(); f(b.getAttribute(attr)); }; }); };
     each('data-matype', function (t) { if (t !== a.type) { a.type = t; a.product = ''; } renderMtAdd(); });
-    each('data-maprod', function (n) {
-      a.product = n;
-      var it = mtItemFor(n, a.type);
+    each('data-maprod', function (nm) {
+      a.product = nm;
+      var it = mtItemFor(nm, a.type);
       if (it && it.supplier) a.supplier = it.supplier;   // the supplier used last time for this material
       renderMtAdd();
-      document.getElementById('maLot').focus();
     });
-    each('data-maloc', function (p) { a.location = p; a.position = ''; renderMtAdd(); });
-    each('data-mapos', function (p) { a.position = a.position === p ? '' : p; renderMtAdd(); });
+    each('data-masup', function (v) { a.supplier = a.supplier === v ? '' : v; renderMtAdd(); });
+    each('data-maplace', function (v) { a.location = v; a.onMachine = false; a.position = ''; renderMtAdd(); });
+    each('data-mamach', function (v) { a.location = v; a.onMachine = true; a.position = ''; renderMtAdd(); });
+    each('data-mapos', function (v) { a.position = a.position === v ? '' : v; renderMtAdd(); });
+    each('data-manew', function (k) { a.open = k; renderMtAdd(); var el = document.getElementById('maNew_' + k); if (el) el.focus(); });
+    each('data-manewx', function () { a.open = ''; renderMtAdd(); });
+    var addNew = function (k) {
+      var el = document.getElementById('maNew_' + k), v = el ? el.value.trim() : '';
+      if (!v) { if (el) el.focus(); return; }
+      a.extra[k].push(v); a.open = '';
+      if (k === 'type') { a.type = v; a.product = ''; }
+      if (k === 'supplier') a.supplier = v;
+      if (k === 'place') { a.location = v; a.onMachine = false; a.position = ''; }
+      if (k === 'machine') { a.location = v; a.onMachine = true; a.position = ''; }
+      renderMtAdd();
+    };
+    each('data-manewok', addNew);
+    Array.prototype.forEach.call(view.querySelectorAll('[id^="maNew_"]'), function (el) {
+      el.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); addNew(el.id.slice(6)); } };
+    });
     var bind = function (id, key) { var el = document.getElementById(id); el.oninput = el.onchange = function () { a[key] = el.value; }; };
-    bind('maSupplier', 'supplier'); bind('maLot', 'lot'); bind('maExp', 'expiration'); bind('maOperator', 'operator');
-    var other = document.getElementById('maLocOther');
-    other.oninput = function () { a.location = other.value; a.position = ''; Array.prototype.forEach.call(view.querySelectorAll('[data-maloc]'), function (b) { b.className = 'btn secondary'; }); };
-    other.onchange = function () { a.location = other.value.trim(); };   // no redraw here: it would swallow a tap on Save
+    bind('maLot', 'lot'); bind('maExp', 'expiration'); bind('maOperator', 'operator');
     document.getElementById('maLot').onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); a.lot = this.value; document.getElementById('maExp').focus(); } };
-    document.getElementById('maExp').onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); a.expiration = this.value; mtSaveAdd(); } };
+    document.getElementById('maExp').onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); a.expiration = this.value; mtAddLine(); } };
     document.getElementById('maMinus').onclick = function () { if (a.qty > 1) a.qty--; document.getElementById('maQty').textContent = a.qty; };
     document.getElementById('maPlus').onclick = function () { a.qty++; document.getElementById('maQty').textContent = a.qty; };
-    document.getElementById('maNewItem').onclick = function () { openMtItem(null, 'add', { type: a.type, supplier: a.supplier }); };
+    document.getElementById('maAddLot').onclick = function () { mtAddKeep(); mtAddLine(); };
+    document.getElementById('maNewItem').onclick = function () { mtAddKeep(); openMtItem(null, 'add', { type: a.type, supplier: a.supplier }); };
     document.getElementById('maSave').onclick = mtSaveAdd;
+    renderMtAddLines();
     renderMtAdded();
+  }
+  // Keep what's typed in the lot boxes when the screen redraws.
+  function mtAddKeep() {
+    var a = mtAdd, l = document.getElementById('maLot'), e = document.getElementById('maExp'), o = document.getElementById('maOperator');
+    if (l) a.lot = l.value; if (e) a.expiration = e.value; if (o) a.operator = o.value;
+  }
+  // The lot in the boxes goes on the list (the same lot again adds its containers).
+  function mtAddLine() {
+    var a = mtAdd, lot = String(a.lot || '').trim();
+    if (!lot) { toast(L('Scan or type the lot number', 'Escanee o escriba el número de lote')); var el = document.getElementById('maLot'); if (el) el.focus(); return; }
+    var have = a.lines.filter(function (x) { return x.lot.toLowerCase() === lot.toLowerCase(); })[0];
+    if (have) { have.qty += a.qty; if (!have.expiration) have.expiration = a.expiration; toast(L('Lot ' + lot + ': ' + have.qty + ' containers', 'Lote ' + lot + ': ' + have.qty + ' recipientes')); }
+    else a.lines.unshift({ lot: lot, expiration: a.expiration || '', qty: a.qty });
+    a.lot = ''; a.qty = 1;   // the date stays: the next lot often has the same one
+    document.getElementById('maLot').value = '';
+    document.getElementById('maQty').textContent = '1';
+    document.getElementById('maLot').focus();
+    renderMtAddLines();
+  }
+  function renderMtAddLines() {
+    var box = document.getElementById('maLines'), a = mtAdd;
+    if (!box) return;
+    var n = a.lines.length, c = a.lines.reduce(function (s, l) { return s + l.qty; }, 0);
+    var save = document.getElementById('maSave');
+    if (save) save.textContent = n ? L('Save ' + n + ' lot' + (n === 1 ? '' : 's') + ' (' + c + ' container' + (c === 1 ? '' : 's') + ')', 'Guardar ' + n + ' lote(s) (' + c + ' recipiente(s))') : L('Save', 'Guardar');
+    box.innerHTML = n ? a.lines.map(function (l, i) {
+      return '<div class="queue-item" style="padding:8px 0;align-items:center"><div style="flex:1;min-width:0"><span class="ticket-id" style="font-size:15px">' + esc(l.lot) + '</span>' +
+        (l.expiration ? ' <span class="sub">' + esc(L('expires ' + l.expiration, 'vence ' + l.expiration)) + '</span>' : '') + '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px">' +
+          '<button class="btn secondary" style="padding:6px 12px" data-maminus="' + i + '">−</button><b style="min-width:28px;text-align:center" data-maq="' + i + '">' + l.qty + '</b>' +
+          '<button class="btn secondary" style="padding:6px 12px" data-maplus="' + i + '">+</button>' +
+          '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-marm="' + i + '">Remove</button></div></div>';
+    }).join('') : '<div class="sub">' + esc(L('No lots yet.', 'Todavía no hay lotes.')) + '</div>';
+    var each = function (attr, f) { Array.prototype.forEach.call(box.querySelectorAll('[' + attr + ']'), function (b) { b.onclick = function () { f(Number(b.getAttribute(attr))); renderMtAddLines(); }; }); };
+    each('data-maplus', function (i) { a.lines[i].qty++; });
+    each('data-maminus', function (i) { if (a.lines[i].qty > 1) a.lines[i].qty--; });
+    each('data-marm', function (i) { a.lines.splice(i, 1); });
   }
   function renderMtAdded() {
     var box = document.getElementById('maAdded'), list = mtAdd.added;
     if (!box) return;
-    box.innerHTML = list.length ? '<h3 style="margin:14px 0 6px">' + esc(L('Just added (' + list.length + ')', 'Recién agregados (' + list.length + ')')) + '</h3>' + list.map(function (m) {
+    box.innerHTML = list.length ? '<h3 style="margin:14px 0 6px">' + esc(L('Saved (' + list.length + ')', 'Guardados (' + list.length + ')')) + '</h3>' + list.map(function (m) {
       return '<div class="card" style="padding:10px 14px;margin-bottom:6px"><span class="ticket-id" style="font-size:15px">' + esc(m.lot) + '</span> <b>' + esc(m.product) + '</b>' +
         (m.status === 'Loaded' ? ' <span class="badge inprogress">' + esc(L('Loaded', 'Cargado')) + '</span>' : '') +
         '<div class="sub">' + esc([L(m.qtyOnHand + ' ' + (m.container || 'container') + (m.qtyOnHand === 1 ? '' : 's'), m.qtyOnHand + ' ' + (m.container || 'recipiente') + '(s)'),
@@ -2588,31 +2667,34 @@
   }
   function mtSaveAdd() {
     var a = mtAdd;
-    var lotEl = document.getElementById('maLot'), expEl = document.getElementById('maExp');
-    if (lotEl) a.lot = lotEl.value; if (expEl) a.expiration = expEl.value;
+    mtAddKeep();
+    if (String(a.lot || '').trim()) mtAddLine();   // a lot typed but not added yet counts
     if (!a.product) { toast(L('Pick the material', 'Elija el material')); return; }
-    if (!String(a.lot || '').trim()) { toast(L('Scan or type the lot number', 'Escanee o escriba el número de lote')); if (lotEl) lotEl.focus(); return; }
     if (!String(a.location || '').trim()) { toast(L('Pick where it is', 'Elija dónde está')); return; }
+    if (!a.lines.length) { toast(L('Scan or type the lot number', 'Escanee o escriba el número de lote')); document.getElementById('maLot').focus(); return; }
     var btn = document.getElementById('maSave');
     btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
     var op = String(a.operator || '').trim();
     if (op) lastOperator = op;
-    var entry = { type: a.type, product: a.product, supplier: a.supplier, lot: a.lot.trim(), expiration: a.expiration, location: a.location.trim(), position: a.position, qty: a.qty };
-    runMutation('addMaterialLot', [entry, op, newOpId()], function (res) {
-      var m = res && res.material;
-      if (m && mtData) {   // keep the screen's data current without reloading
-        var i = mtData.materials.map(function (x) { return x.id; }).indexOf(m.id);
-        if (i === -1) mtData.materials.unshift(m); else mtData.materials[i] = m;
+    var sec = { type: a.type, product: a.product, supplier: a.supplier, location: a.location.trim(), onMachine: !!a.onMachine, position: a.position };
+    var lots = a.lines.map(function (l) { return { lot: l.lot, expiration: l.expiration, qty: l.qty }; });
+    runMutation('addMaterialLots', [sec, lots, op, newOpId()], function (res) {
+      var saved = (res && res.saved) || [];
+      if (mtData) {   // keep the screen's data current without reloading
+        saved.forEach(function (m) {
+          var i = mtData.materials.map(function (x) { return x.id; }).indexOf(m.id);
+          if (i === -1) mtData.materials.unshift(m); else mtData.materials[i] = m;
+        });
         var it = mtItemFor(a.product, a.type);
-        if (it && entry.supplier) it.supplier = entry.supplier.toUpperCase();
-        if (entry.supplier && mtData.suppliers.indexOf(entry.supplier.toUpperCase()) === -1) mtData.suppliers.push(entry.supplier.toUpperCase());
+        if (it && sec.supplier) it.supplier = sec.supplier.toUpperCase();
+        if (sec.onMachine && mtData.machines.indexOf(sec.location) === -1) mtData.machines.push(sec.location);
       }
-      if (m) { a.added = a.added.filter(function (x) { return x.id !== m.id; }); a.added.unshift(m); }
-      toast(L('Saved lot ' + entry.lot, 'Lote ' + entry.lot + ' guardado'));
-      a.lot = ''; a.expiration = ''; a.qty = 1;
+      saved.forEach(function (m) { a.added = a.added.filter(function (x) { return x.id !== m.id; }); a.added.unshift(m); });
+      toast(L('Saved ' + saved.length + ' lot(s)', saved.length + ' lote(s) guardado(s)'));
+      a.lines = []; a.lot = ''; a.qty = 1;
       if (state.view === 'materialsAdd') { renderMtAdd(); document.getElementById('maLot').focus(); }
     }, function (err) {
-      btn.disabled = false; btn.textContent = L('Save lot', 'Guardar lote');
+      btn.disabled = false; renderMtAddLines();
       toast(L('Not saved: ', 'No se guardó: ') + err.message);
     });
   }
