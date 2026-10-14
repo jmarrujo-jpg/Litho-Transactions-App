@@ -1711,8 +1711,8 @@ const base = {
     { id: 'M-00001', lot: 'OLD-1', type: 'Compound', product: 'WB-2100', supplier: 'DSM', receiver: 'R-00007', po: '55', date: '2026-08-01', expiration: '', qtyReceived: 1, qtyOnHand: 0, container: 'Pail', status: 'Used', comments: '' }];
   const G = { materials: mats, types: ['Compound', 'Powder', 'Copper', 'Ink'], products: { Compound: ['WB-2100'], Powder: ['Stripe 9'], Copper: [], Ink: [] },
     suppliers: ['AKZO', 'DSM'], containers: ['Box', 'Pail'], receivers: [{ id: 'R-00007', name: '26-09-01--AKZO--R-00007', date: '2026-09-01', supplier: 'AKZO', pos: '55' }],
-    items: [{ id: 'MI-00001', name: 'WB-2100', type: 'Compound', supplier: 'DSM', container: 'Pail', partNo: '', notes: '', active: true },
-      { id: 'MI-00002', name: 'Stripe 9', type: 'Powder', supplier: 'AKZO', container: 'Box', partNo: '', notes: '', active: true }] };
+    items: [{ id: 'MI-00001', name: 'WB-2100', type: 'Compound', supplier: 'DSM', container: 'Barrel', partNo: '', notes: '', active: true },
+      { id: 'MI-00002', name: 'Stripe 9', type: 'Powder', supplier: 'AKZO', container: 'Unit', partNo: '', notes: '', active: true }] };
   const { page, calls } = await boot(Object.assign({}, base, {
     getMaterials: () => R(G),
     receiveMaterials: (a) => R({ ok: true, receiver: 'R-00008', receiverCreated: true, lots: 2, containers: 3, saved: [] }),
@@ -1741,7 +1741,7 @@ const base = {
   ok('the same lot scanned twice counts 2 containers', qtys.join() === '1,2', qtys);
   ok('the scan box is cleared and ready for the next', (await page.$eval('#mtScan', (e) => e.value)) === '' && (await page.evaluate(() => document.activeElement.id)) === 'mtScan');
   await page.click('[data-mtrt="Powder"]');
-  ok('a new type: its container, blank product, its product list', (await page.$eval('#mtContainer', (e) => e.value)) === 'Box' && (await page.$eval('#mtProduct', (e) => e.value)) === ''
+  ok('a new type: its container, blank product, its product list', (await page.$eval('#mtContainer', (e) => e.value)) === 'Unit' && (await page.$eval('#mtProduct', (e) => e.value)) === ''
     && (await page.$eval('#mtProdList', (e) => e.innerHTML)).includes('Stripe 9'));
   await page.fill('#mtScan', 'PW-1');
   ok('save button counts lots and containers', (await page.textContent('#mtSave')).includes('Save 2 lots (3 containers)'), await page.textContent('#mtSave'));
@@ -1759,7 +1759,7 @@ const base = {
   const rc = calls.filter((c) => c.fn === 'receiveMaterials')[0];
   ok('receiveMaterials gets the delivery and every lot', rc && rc.args[0].supplier === 'DSM' && rc.args[0].po === '7731-DC' && rc.args[0].receiver === '' && rc.args[1].length === 3
     && rc.args[1].some((l) => l.lot === '24A0915' && l.qty === 2 && l.expiration === '2027-04-01' && l.product === 'WB-2100' && l.type === 'Compound')
-    && rc.args[1].some((l) => l.lot === 'PW-1' && l.type === 'Powder' && l.container === 'Box'), rc && rc.args);
+    && rc.args[1].some((l) => l.lot === 'PW-1' && l.type === 'Powder' && l.container === 'Unit'), rc && rc.args);
   ok('saved: says the receiver number to write on the slip', (await page.textContent('#modalRoot')).includes('R-00008'));
   await page.click('#modalOk'); await page.waitForTimeout(150);
   ok('back on the list after saving; nothing pending', !!(await page.$('#mtReceiveBtn')) && !(await page.textContent('#view')).includes('not saved yet'));
@@ -1939,6 +1939,66 @@ const base = {
   await page.click('#modalOk'); await page.waitForTimeout(150);
   const un = calls.filter((c) => c.fn === 'undoMaterialLoad')[0];
   ok('Undo sends that load line', un && un.args[0] === 'L-000002', un && un.args);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 46. Setup from the count sheets; stock and LOW; locations; barrels and the "not normally run" warning
+{ let items = [{ id: 'MI-00001', name: '9307G', type: 'Compound', supplier: '', container: 'Barrel', partNo: '', notes: '', active: true, unit: '', perContainer: '', reorder: '', location: '' }];
+  let mats = [{ id: 'M-00001', lot: 'A1', type: 'Compound', product: '9307G', supplier: 'DSM', receiver: '', po: '', date: '2026-09-01', expiration: '', qtyReceived: 2, qtyOnHand: 2, container: 'Barrel', status: 'In Stock', comments: '', location: 'Pallet Area' }];
+  let machineInfo = [];
+  const G = () => ({ materials: mats, items, types: ['Compound', 'Powder', 'Copper', 'Ink', 'Make-Up', 'Solution/Grease'], machines: machineInfo.map((m) => m.name), machineInfo,
+    containerFor: { Compound: 'Barrel', Powder: 'Unit', Copper: 'Gaylord' }, products: {}, suppliers: [], containers: [], receivers: [] });
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMaterials: () => R(G()),
+    setupMaterials: (a) => {
+      const seed = a[0];
+      items = seed.items.map((x, i) => Object.assign({ id: 'MI-' + (i + 1), supplier: '', partNo: '', notes: '', active: true }, x));
+      machineInfo = seed.machines.map((m) => ({ name: m.name, positions: m.positions || [], materials: m.materials || [], active: true }));
+      mats = mats.concat(seed.stock.map((x, i) => ({ id: 'M-1' + i, lot: 'START', type: x.type, product: x.name, qtyReceived: x.qty, qtyOnHand: x.qty, status: 'In Stock', container: '', location: x.location, supplier: '', receiver: '', po: '', date: seed.date, expiration: '', comments: '' })));
+      return R({ ok: true, itemsAdded: 11, itemsFilled: 1, machinesAdded: 9, lotsAdded: 12, containers: 60 });
+    },
+    loadMaterials: () => R({ ok: true, containers: 1, usedUp: [] }),
+  }));
+  await page.click('#tileMaterials'); await page.waitForSelector('#mtListBtn');
+  ok('lot cards show where they are kept', (await page.textContent('#mtList')).includes('📍 Pallet Area'));
+  await page.click('#mtListBtn'); await page.waitForSelector('#mtSetupBtn');
+  ok('the list offers the setup from the count', (await page.textContent('#mtSetupBtn')).includes('2026-10-12'));
+  await page.click('#mtSetupBtn'); await page.waitForSelector('#mtSetupSave');
+  let txt = await page.textContent('#view');
+  ok('setup preview: materials, machines and starting stock, before saving', /9307G — Compound.*Barrel = 549 lbs.*reorder at 1,098 lbs.*fills in blanks/.test(txt) && /New Copper — Copper.*Gaylord = 3,800 lbs.*will add/.test(txt)
+    && /Press 13.*Barrel 1 \/ Barrel 2.*runs 9307G/.test(txt) && /9000-63-1.*8 Barrels ≈ 4,200 lbs.*Pallet Area/.test(txt) && !calls.some((c) => c.fn === 'setupMaterials'), txt);
+  await page.click('#mtSetupSave'); await page.waitForSelector('#modalOk');
+  const su = calls.filter((c) => c.fn === 'setupMaterials')[0];
+  ok('Add all of this sends the setup', su && su.args[0].items.length === 12 && su.args[0].machines.length === 9 && su.args[0].stock.length === 12, su && su.args);
+  await page.click('#modalOk'); await page.waitForSelector('[data-mtitem]');
+  ok('done: the setup button is gone', !(await page.$('#mtSetupBtn')));
+  txt = await page.textContent('#mtItemList');
+  ok('the list shows stock as containers and amount, and the reorder point', /9307G.*In stock: 5 Barrels ≈ 2,745 lbs · reorder at 1,098 lbs/.test(txt) && /New Copper.*In stock: 6 Gaylords ≈ 22,800 lbs/.test(txt), txt);
+  ok('at or under the reorder point shows LOW (powder: 4 units = 440 lbs, reorder at 440)', /VP 102 BPA-NI\s*LOW — reorder/.test(txt), txt);
+  await page.click('#backBtn'); await page.waitForSelector('#mtLowCard');
+  ok('the Materials screen says what to reorder', /Time to reorder \(3\).*VP 102 BPA-NI.*4 Units ≈ 440 lbs left · reorder at 440 lbs.*V7257-D — 4 Cartridges left · reorder at 5/.test(await page.textContent('#mtLowCard')), await page.textContent('#mtLowCard'));
+  // Receiving: picking a material puts it where it's kept
+  await page.click('#mtReceiveBtn'); await page.waitForSelector('#mtProduct');
+  await page.fill('#mtProduct', 'New Copper');
+  ok('picking a material fills in where it is kept', (await page.inputValue('#mtLoc')) === 'Cage' && (await page.inputValue('#mtContainer')) === 'Gaylord');
+  // Load: barrels for Press 13, and a warning for a material it doesn't run
+  await page.click('#backBtn'); await page.waitForSelector('#mtLoadBtn');
+  await page.click('#mtLoadBtn'); await page.waitForSelector('#mlScan');
+  await page.fill('#mlMachine', 'Press 13');
+  ok('Press 13 offers its barrels', (await page.$$('[data-mlpos]')).length === 2);
+  await page.click('[data-mlpos="Barrel 2"]');
+  await page.fill('#mlScan', 'START'); await page.press('#mlScan', 'Enter');
+  const pick = await page.$$eval('[data-mlpick]', (els) => els.map((e) => e.textContent));
+  ok('START is on every material: pick which', pick.length === 12, pick);
+  const k = pick.findIndex((x) => x.startsWith('9000-63-1'));
+  await page.click('[data-mlpick="0:' + k + '"]');
+  ok('a material the machine doesn\'t run gets a warning', /9000-63-1 is not normally run on Press 13/.test(await page.textContent('#mlLines')));
+  await page.click('#mlSave'); await page.waitForSelector('#modalOk');
+  ok('…and the confirm says so, with the barrel', /Load onto Press 13 \(Barrel 2\)/.test(await page.textContent('#modalRoot')) && /Not normally run on Press 13: 9000-63-1/.test(await page.textContent('#modalRoot')));
+  await page.click('#modalOk'); await page.waitForTimeout(200);
+  const lc = calls.filter((c) => c.fn === 'loadMaterials')[0];
+  ok('the load is sent with the barrel', lc && lc.args[0].machine === 'Press 13' && lc.args[0].position === 'Barrel 2' && lc.args[1][0].lot === 'START' && lc.args[1][0].product === '9000-63-1', lc && lc.args);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

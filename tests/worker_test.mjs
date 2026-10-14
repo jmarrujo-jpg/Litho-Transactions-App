@@ -1299,7 +1299,7 @@ await concurrency(envBase, 'in-worker lock');
 // 37. Materials: receive a delivery by lot (one new receiver), edit, delete; retry-safe
 { const f = fresh();
   const none = await call('getMaterials', []);
-  ok('no Materials tab yet: empty list, the four types', none.ok && none.result.materials.length === 0 && none.result.types.join() === 'Compound,Powder,Copper,Ink', none);
+  ok('no Materials tab yet: empty list, the four types', none.ok && none.result.materials.length === 0 && none.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease', none);
   const noSup = await call('receiveMaterials', [{ supplier: '' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100' }], 'Jo', 'op-37-x']);
   ok('needs a supplier', !noSup.ok && /supplier/.test(noSup.error), noSup);
   const noProd = await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: '' }], 'Jo', 'op-37-y']);
@@ -1362,14 +1362,14 @@ await concurrency(envBase, 'in-worker lock');
   const a = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun', partNo: 'B-286', notes: 'keep warm' }, 'Jo', 'op-38-d']);
   const a2 = await call('saveMaterialItem', [{ name: 'Blue 286', type: 'ink', supplier: 'sun' }, 'Jo', 'op-38-d']);
   const row = f.rows(SID, 'Material List')[1];
-  ok('add an item: type spelled the app\'s way, container from the type', a.ok && row['Item ID'] === 'MI-00002' && row['Type'] === 'Ink' && row['Container'] === 'Can' && row['Part #'] === 'B-286' && row['Supplier'] === 'SUN', row);
+  ok('add an item: type spelled the app\'s way, container from the type', a.ok && row['Item ID'] === 'MI-00002' && row['Type'] === 'Ink' && row['Container'] === 'Cartridge' && row['Part #'] === 'B-286' && row['Supplier'] === 'SUN', row);
   ok('the retry adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Material List').length === 2, a2);
   const dup = await call('saveMaterialItem', [{ name: 'blue 286', type: 'Ink' }, 'Jo', 'op-38-e']);
   ok('the same name and type twice is refused', !dup.ok && /already on the Material List/.test(dup.error), dup);
   const nt = await call('saveMaterialItem', [{ name: 'Acetone', type: 'Solvent', container: 'Drum' }, 'Jo', 'op-38-f']);
   const nt2 = await call('saveMaterialItem', [{ name: 'MEK', type: 'solvent' }, 'Jo', 'op-38-g']);
   const g2 = await call('getMaterials', []);
-  ok('a new type can be added, and is matched after that', nt.ok && nt2.ok && nt2.result.item.type === 'Solvent' && g2.result.types.join() === 'Compound,Powder,Copper,Ink,Solvent', g2.result && g2.result.types);
+  ok('a new type can be added, and is matched after that', nt.ok && nt2.ok && nt2.result.item.type === 'Solvent' && g2.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease,Solvent', g2.result && g2.result.types);
   // Rename WB-2100: its lots follow
   const rn = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'WB-2100 Gold', type: 'Compound', supplier: 'DSM' }, 'Jo', 'op-38-h']);
   const lots = f.rows(SID, 'Materials');
@@ -1448,6 +1448,42 @@ await concurrency(envBase, 'in-worker lock');
   ok('undo puts the container back once and removes the line', u2.ok && String(b7['Qty On Hand']) === '1' && b7['Status'] === 'In Stock' && !f.rows(SID, 'Material Loads').some((r) => r['Load ID'] === 'L-000003'), { u, u2, b7 });
   const u3 = await call('undoMaterialLoad', ['L-000003', 'Sam', 'op-39-k']);
   ok('undo again is harmless', u3.ok && u3.result.alreadyGone && String(f.rows(SID, 'Materials')[1]['Qty On Hand']) === '1', u3);
+}
+
+// 40. Setup from the count sheets: materials (unit / per container / reorder / location), machines, START lots; again changes nothing
+{ const f = fresh();
+  await call('receiveMaterials', [{ supplier: 'DSM', location: 'Pallet Area' }, [{ lot: 'A1', type: 'Compound', product: '9307G', qty: 1 }], 'Jo', 'op-40-a']);
+  ok('receiving keeps the storage location', f.rows(SID, 'Materials')[0]['Location'] === 'Pallet Area', f.rows(SID, 'Materials')[0]);
+  const seed = { date: '2026-10-12',
+    items: [{ name: '9307G', type: 'Compound', unit: 'lbs', perContainer: 549, reorder: 1098, location: 'Pallet Area' },
+      { name: 'New Copper', type: 'Copper', unit: 'lbs', perContainer: 3800, reorder: '15,000', location: 'Cage' },
+      { name: 'MK-20', type: 'Make-Up', unit: 'btl', reorder: 4, location: 'Line 6', container: 'Bottle' }],
+    machines: [{ name: 'Press 13', positions: ['Barrel 1', 'Barrel 2'], materials: ['9307G'] }, { name: 'Line 6', materials: ['New Copper', 'MK-20'] }],
+    stock: [{ name: '9307G', type: 'Compound', qty: 3, location: 'Pallet Area' }, { name: 'New Copper', type: 'Copper', qty: 6 }, { name: 'MK-20', type: 'Make-Up', qty: 6 }] };
+  const a = await call('setupMaterials', [seed, 'Jo', 'op-40-b']);
+  const L = f.rows(SID, 'Material List'), M = f.rows(SID, 'Machines'), lots = f.rows(SID, 'Materials');
+  ok('setup: adds the missing materials and fills blanks on the one already there', a.ok && a.result.itemsAdded === 2 && a.result.itemsFilled === 1 && L.length === 3
+    && L[0]['Name'] === '9307G' && String(L[0]['Per Container']) === '549' && String(L[0]['Reorder Point']) === '1098' && L[0]['Container'] === 'Barrel'
+    && String(L[1]['Reorder Point']) === '15000' && L[1]['Container'] === 'Gaylord' && L[2]['Container'] === 'Bottle' && L[2]['Unit'] === 'btl', { a, L });
+  ok('setup: machines with their barrels and materials', M.length === 2 && M[0]['Positions'] === 'Barrel 1, Barrel 2' && M[1]['Materials'] === 'New Copper, MK-20', M);
+  ok('setup: the starting stock as START lots, at their locations', lots.length === 4 && lots[1]['Lot #'] === 'START' && String(lots[1]['Qty On Hand']) === '3' && lots[1]['Date Received'] === '2026-10-12'
+    && lots[2]['Location'] === 'Cage' && lots[3]['Location'] === 'Line 6' && lots[3]['Container'] === 'Bottle' && /Starting count/.test(lots[1]['Comments']), lots);
+  const b = await call('setupMaterials', [seed, 'Jo', 'op-40-c']);
+  ok('setup again changes nothing', b.ok && b.result.itemsAdded + b.result.itemsFilled + b.result.machinesAdded + b.result.lotsAdded === 0 && f.rows(SID, 'Materials').length === 4 && f.rows(SID, 'Machines').length === 2, b);
+  const g = await call('getMaterials', []);
+  ok('getMaterials: items carry unit / per container / reorder; machines with their barrels', g.result.items.some((i) => i.name === 'New Copper' && i.perContainer === 3800 && i.reorder === 15000 && i.unit === 'lbs')
+    && g.result.machineInfo.some((m) => m.name === 'Press 13' && m.positions.join() === 'Barrel 1,Barrel 2' && m.materials.join() === '9307G') && g.result.machines.join() === 'Line 6,Press 13', g.result);
+  const bad = await call('setupMaterials', [{ stock: [{ name: 'Nope', type: 'Ink', qty: 1 }] }, 'Jo', 'op-40-d']);
+  ok('starting stock for a material not on the list is refused', !bad.ok && /not on the Material List/.test(bad.error), bad);
+  // Load: the machine's spelling from the list, the barrel; a new machine is added
+  const ld = await call('loadMaterials', [{ machine: 'press 13', position: 'Barrel 2' }, [{ lot: 'START', product: '9307G' }], 'Sam', 'op-40-e']);
+  const line = f.rows(SID, 'Material Loads')[0];
+  ok('load: the machine as listed, and the barrel', ld.ok && line['Machine'] === 'Press 13' && line['Position'] === 'Barrel 2' && String(f.rows(SID, 'Materials')[1]['Qty On Hand']) === '2', line);
+  await call('loadMaterials', [{ machine: 'Press 99' }, [{ lot: 'START', product: 'MK-20' }], 'Sam', 'op-40-f']);
+  ok('a machine typed for the first time is added to the Machines tab', f.rows(SID, 'Machines').some((r) => r['Machine'] === 'Press 99' && r['Active'] === 'Yes'), f.rows(SID, 'Machines'));
+  // Item fields
+  const sv = await call('saveMaterialItem', [{ id: 'MI-00002', name: 'New Copper', type: 'Copper', unit: 'lbs', perContainer: 'lots', reorder: '' }, 'Jo', 'op-40-g']);
+  ok('per container must be a number', !sv.ok && /per container must be a number/.test(sv.error), sv);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
