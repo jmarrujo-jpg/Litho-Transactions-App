@@ -236,7 +236,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.92.0</span>
+      <span class="version" id="appVersion">v1.93.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -4722,11 +4722,9 @@
   function renderWorkerHome() {
     document.getElementById('view').innerHTML =
       lithoGreetingHtml() +
-      '<button class="btn" id="newJobBtn" style="' + BIG_BTN + '">+ New Job</button>' +
-      '<button class="btn" id="openJobsBtn" style="' + BIG_BTN + '">Open Jobs</button>' +
+      '<button class="btn" id="openJobsBtn" style="' + BIG_BTN + '">Open Jobs — scan tickets</button>' +
       '<button class="btn secondary" id="addTicketBtn" style="' + BIG_BTN + '">+ Add Ticket</button>';
     wireLithoGreeting();
-    document.getElementById('newJobBtn').onclick = openCreateJob;
     document.getElementById('openJobsBtn').onclick = openOpenJobs;
     document.getElementById('addTicketBtn').onclick = function () { openAddTicket(''); };
   }
@@ -7668,7 +7666,7 @@
     if (job.passMode) {
       coatingLis = (job.passes || []).map(function (p) {
         var ch = (p.changes || []).length > 1 ? ' <span class="sub">&middot; lots changed ' + ((p.changes || []).length - 1) + 'x</span>' : '';
-        return '<li><strong>Pass ' + p.pass + ':</strong> ' + esc(p.item) + (p.sub ? ' (' + esc(p.sub) + ')' : '') + ' <span class="sub">&middot; ' + esc(p.line) + ' &middot; ' + p.tickets.length + ' ticket(s)</span>' +
+        return '<li><strong>Pass ' + p.pass + ':</strong> ' + (p.pass === job.currentPass ? '<span class="badge inprogress">now</span> ' : (!p.started ? '<span class="sub">(not started)</span> ' : '')) + esc(p.item) + (p.sub ? ' (' + esc(p.sub) + ')' : '') + ' <span class="sub">&middot; ' + esc(p.line) + ' &middot; ' + p.tickets.length + ' ticket(s)</span>' +
           '<div class="sub">🧪 ' + ((p.lots || []).length ? esc(passLotText(p.lots)) : 'no lots entered') + ch + '</div></li>';
       });
     }
@@ -7723,7 +7721,7 @@
         '</div>';
 
       // Add a coating to the recipe (a pass-by-pass job goes back to its pass screen instead)
-      if (job.passMode) html += '<div class="card"><button class="btn" id="jrContinue" style="width:100%;padding:14px">▶ Continue the job — scan tickets / next pass</button></div>';
+      if (job.passMode) html += '<div class="card"><button class="btn" id="jrContinue" style="width:100%;padding:14px">▶ Open the job — scan / passes</button></div>';
       else html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Add a coating to this job</h3>' +
         '<div class="sub" style="margin-bottom:8px">Applies to every ticket already on the job.</div>' +
         '<div class="row">' +
@@ -7921,44 +7919,80 @@
     renderCreateJobSetup();
   }
 
-  // Step 1: describe the job and set up pass 1 — the line, the coating and the material lots on it.
-  // The job then runs pass by pass (renderPassJob): scan the tickets, finish the pass, set up the next.
+  // Step 1 (the foreman): describe the job, pick the line once, and list every pass — its coating and,
+  // if known, the material lots. Workers then only scan (renderPassJob).
+  var newPasses = [];   // the passes being set up: [{group, sub, item, lots}]
   function renderCreateJobSetup() {
     var view = document.getElementById('view');
     passPick = passNew(LITHO_LINES[0], []);
     pjMode = '';
-    var html = '<div class="card">' +
+    newPasses = [];
+    view.innerHTML = '<div class="card">' +
       '<h3 style="margin-top:0">New Job</h3>' +
-      '<div class="sub" style="margin-bottom:12px">Set up pass 1, then scan the tickets that go through it. When the pass is done, set up the next pass and scan the tickets again. The job is approved later in Review Jobs.</div>' +
+      '<div class="sub" style="margin-bottom:12px">Pick the line and set up every pass. Workers then just scan the tickets (and lot labels) at each pass.</div>' +
       '<div class="field"><label>Job description</label><input id="jobName" placeholder="e.g. White coat run, 7/1 morning"></div>' +
       '<div class="row">' +
         operatorFieldHtml('jobOperator') +
         '<div class="field"><label>Notes (optional)</label><input id="jobNotes" placeholder="e.g. re-run, color match"></div>' +
       '</div>' +
-      '</div>';
-    html += passSetupHtml(1, '');
-    html += '<div class="card">' +
-      '<button class="btn" id="startJobSetupBtn" style="width:100%;padding:16px;font-size:17px">Start Pass 1 — scan tickets</button>' +
-      '</div>';
-    view.innerHTML = html;
+      '<div class="sub" style="margin:6px 0">Line (the whole job runs on it)</div><div id="psLines" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
+      '</div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px">Passes</h3><div id="npList"></div></div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px" id="npTitle"></h3>' +
+        '<div class="field"><label>Can Fitting Size (sets the Size / Group)</label><select id="psCanSize"><option value="">-- pick a can size --</option></select></div>' +
+        '<div class="row">' + selectField('psGroup', 'Size / Group', rateGroups(), null) + selectField('psSub', '#OUT', [], null) +
+          selectField('psItem', 'Coating Item', [], null) + selectField('psChem', 'Chem Code', [], null) + '</div>' +
+        '<div class="sub" id="psCost"></div>' +
+        '<div class="sub" style="margin:12px 0 6px"><b>Lots on this pass</b> (optional — workers can scan them at the line)</div><div id="plBox"></div>' +
+        '<button class="btn secondary" id="npAdd" style="width:100%;margin-top:12px"></button>' +
+      '</div>' +
+      '<div class="card"><button class="btn" id="startJobSetupBtn" style="width:100%;padding:16px;font-size:17px">Create Job</button></div>';
+    renderNewPasses();
     ensureRateData(function () {
       var g = document.getElementById('psGroup');
       if (g && g.options.length < 2) rateGroups().forEach(function (x) { var o = document.createElement('option'); o.value = x; o.textContent = x; g.appendChild(o); });
       wirePassSetup(1);
     });
 
+    // The pass in the picker (if any), checked; null when the picker is empty.
+    function pickerPass(strict) {
+      var c = passCoating();
+      if (!c.group || !c.item) { if (strict) toast('Pick a size/group and coating item'); return null; }
+      if (!passLotsReady()) return false;
+      return { group: c.group, sub: c.sub, item: c.item, lots: passPick.lots.slice() };
+    }
+    function resetPicker() {
+      var it = document.getElementById('psItem');
+      if (it) it.value = '';
+      var ch = document.getElementById('psChem');
+      if (ch) ch.value = '';
+      var cost = document.getElementById('psCost');
+      if (cost) cost.textContent = '';
+      passPick.lots = []; passPick.ask = null;
+      renderPassLots();
+    }
+    document.getElementById('npAdd').onclick = function () {
+      var p = pickerPass(true);
+      if (!p) return;
+      newPasses.push(p);
+      resetPicker();
+      renderNewPasses();
+      toast('Pass ' + newPasses.length + ' added — add the next one or create the job');
+    };
     document.getElementById('startJobSetupBtn').onclick = function () {
       var jobName = document.getElementById('jobName').value.trim();
       var operator = document.getElementById('jobOperator').value.trim();
       var notes = document.getElementById('jobNotes').value;
-      var c = passCoating();
-      if (!c.group || !c.item) { toast('Pick a size/group and coating item'); return; }
+      // A pass still in the picker counts (copied, so a failed try can't add it twice).
+      var p = pickerPass(false);
+      if (p === false) return;
+      var list = newPasses.concat(p ? [p] : []);
+      if (!list.length) { toast('Set up at least one pass'); return; }
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!passLotsReady()) return;
       var btn = document.getElementById('startJobSetupBtn');
       btn.disabled = true; btn.textContent = 'Creating job…';
-      var first = { group: c.group, sub: c.sub, item: c.item, line: passPick.line, lots: passPick.lots.slice() };
-      runMutation('createJob', [jobName, operator, [first], notes, newOpId()],
+      var passes = list.map(function (x) { return { group: x.group, sub: x.sub, item: x.item, line: passPick.line, lots: x.lots }; });
+      runMutation('createJob', [jobName, operator, passes, notes, newOpId()],
         function (result) {
           lastOperator = operator;
           mtData = null;   // new lots / loads: read the materials again next time
@@ -7970,24 +8004,45 @@
           }).withFailureHandler(function () { resumeJob(result.jobId); }).getJobDetail(result.jobId);
         },
         function (err) {
-          showModal({ title: 'Could not start the job', message: err.message, confirmText: 'OK' });
-          btn.disabled = false; btn.textContent = 'Start Pass 1 — scan tickets';
+          showModal({ title: 'Could not create the job', message: err.message, confirmText: 'OK' });
+          btn.disabled = false; btn.textContent = 'Create Job';
         });
     };
   }
+  function renderNewPasses() {
+    var box = document.getElementById('npList');
+    if (!box) return;
+    box.innerHTML = newPasses.length ? newPasses.map(function (p, i) {
+      return '<div class="queue-item" style="padding:8px 0"><div style="min-width:0"><span class="ticket-id" style="font-size:15px">Pass ' + (i + 1) + ': ' + esc(p.item) + '</span> ' +
+        '<span class="sub">' + esc(p.group) + (p.sub ? ' / ' + esc(p.sub) : '') + '</span>' +
+        '<div class="sub">🧪 ' + (p.lots.length ? esc(passLotText(p.lots)) : 'lots scanned at the line') + '</div></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-nprm="' + i + '">Remove</button></div>';
+    }).join('') : '<div class="sub">No passes yet. Set up pass 1 below.</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-nprm]'), function (b) {
+      b.onclick = function () { newPasses.splice(Number(b.getAttribute('data-nprm')), 1); renderNewPasses(); };
+    });
+    var n = newPasses.length + 1;
+    var t = document.getElementById('npTitle');
+    if (t) t.textContent = 'Pass ' + n;
+    var a = document.getElementById('npAdd');
+    if (a) a.textContent = '+ Add pass ' + n + ' and set up another';
+  }
 
   // ----- Pass-by-pass jobs -----
-  // A job runs one pass at a time: the line, the coating and the material lots on it, then the
-  // tickets that went through. Tickets are scanned again for every pass. The lots can be changed
-  // part-way through a pass; tickets scanned after that get the new ones.
+  // The foreman sets up every pass; the line runs one pass at a time. Workers scan each ticket at
+  // every pass — a scan goes into the pass running now, and a ticket is never moved on by itself.
+  // When the line changes over, a worker starts the next pass. The job keeps its place overnight.
+  // The lots: set by the foreman, or scanned by workers (a lot label replaces that material's lot).
   var LITHO_LINES = ['Litho Line 3', 'Litho Line 1'];
   var passPick = null;   // the lots being picked: { line, lots:[{lot, product, type, isNew}], ask }
-  var pjMode = '';       // the pass screen's open panel: '' | 'lots' (change lots) | 'next' (set up the next pass)
+  var pjMode = '';       // the job screen's open panel: '' | 'lots' (change lots) | 'add' (foreman adds a pass)
 
   function passJobFrom(d, resumed) {
+    var passes = d.passes || [];
     return { jobId: d.jobId, description: d.description, operator: d.createdBy || '', notes: d.notes || '', resumed: !!resumed,
-      coatings: d.coatings || [], passMode: true, passes: d.passes || [], tickets: d.tickets || [] };
+      coatings: d.coatings || [], passMode: true, passes: passes, tickets: d.tickets || [], currentPass: d.currentPass || passes.length || 1 };
   }
+  function passCurrent(j) { return (j.passes || [])[(j.currentPass || 1) - 1] || (j.passes || [])[0]; }
   function passNew(line, lots) {
     return { line: line || LITHO_LINES[0], ask: null,
       lots: (lots || []).map(function (l) { return { lot: l.lot, product: l.product || '', type: l.type || '' }; }) };
@@ -7996,23 +8051,21 @@
   // A lot still typed in the box (or a question not answered) would be lost: ask first.
   function passLotsReady() {
     var box = document.getElementById('plLot');
-    if (box && box.value.trim()) { plAddLot(box.value); if (passPick.ask) { toast('Answer the question about lot ' + passPick.ask.lot + ' first'); return false; } }
+    if (box && box.value.trim()) { var v = box.value; box.value = ''; plAddLot(v); }
     if (passPick.ask) { toast('Answer the question about lot ' + passPick.ask.lot + ' first'); return false; }
     return true;
   }
 
-  // Line buttons, the coating cascade and the lots for one pass. Pass 1 also gets the can size.
+  // Line buttons, the coating cascade (with the can size if it's there) and the lots box.
   function passSetupHtml(n, group) {
     return '<div class="card"><h3 style="margin-top:0">Pass ' + n + '</h3>' +
-      '<div class="sub" style="margin-bottom:6px">Line</div><div id="psLines" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>' +
-      (n === 1 ? '<div class="field"><label>Can Fitting Size (sets the Size / Group)</label><select id="psCanSize"><option value="">-- pick a can size --</option></select></div>' : '') +
       '<div class="row">' + selectField('psGroup', 'Size / Group', rateGroups(), group || null) + selectField('psSub', '#OUT', [], null) +
         selectField('psItem', 'Coating Item', [], null) + selectField('psChem', 'Chem Code', [], null) + '</div>' +
       '<div class="sub" id="psCost"></div>' +
-      '</div>' +
-      '<div class="card"><h3 style="margin-top:0;font-size:15px">Materials on this pass</h3><div id="plBox"></div></div>';
+      '<div class="sub" style="margin:12px 0 6px"><b>Lots on this pass</b> (optional — workers can scan them at the line)</div><div id="plBox"></div>' +
+      '</div>';
   }
-  function wirePassSetup(n) {
+  function wirePassSetup() {
     var g = document.getElementById('psGroup');
     wireCoatingCascade(g, document.getElementById('psSub'), document.getElementById('psItem'), document.getElementById('psChem'),
       document.getElementById('psCost'), function (c) { return 'This coating adds ' + money(c) + ' per ticket.'; });
@@ -8040,7 +8093,7 @@
   }
 
   // The lots on a pass: scan or type each lot #. A lot in the app fills in its material; one that
-  // isn't asks for the material (typed, or picked from the list) and is added when the pass saves.
+  // isn't asks for the material (typed, or picked from the list) and is added when it's saved.
   // Lots already loaded on the line are offered as buttons.
   function plKey(l) { return String(l.lot).toLowerCase() + '|' + String(l.product || '').toLowerCase(); }
   function plPush(l) {
@@ -8050,13 +8103,16 @@
     var box = document.getElementById('plLot');
     if (box && box.focus) box.focus();
   }
+  // Every material line with this lot # (the ones still in use first).
+  function plMatches(lot) {
+    var all = ((mtData && mtData.materials) || []).filter(function (m) { return m.lot && String(m.lot).toLowerCase() === String(lot).trim().toLowerCase(); });
+    var live = all.filter(function (m) { return m.status !== 'Used'; });
+    return live.length ? live : all;
+  }
   function plAddLot(raw) {
     var lot = String(raw || '').trim();
     if (!lot) return;
-    var all = ((mtData && mtData.materials) || []).filter(function (m) { return String(m.lot).toLowerCase() === lot.toLowerCase(); });
-    var live = all.filter(function (m) { return m.status !== 'Used'; });
-    var use = live.length ? live : all;
-    var prods = [];
+    var use = plMatches(lot), prods = [];
     use.forEach(function (m) { if (prods.indexOf(m.product) === -1) prods.push(m.product); });
     if (prods.length === 1) { plPush({ lot: use[0].lot, product: prods[0], type: use[0].type }); return; }
     passPick.ask = { lot: lot, prods: prods };
@@ -8080,7 +8136,7 @@
             '<span class="sub">' + esc(l.product || '') + (l.isNew ? ' &middot; new' : '') + '</span></div>' +
             '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-plrm="' + i + '">Remove</button></div>';
         }).join('')
-      : '<div class="sub">No lots yet. Scan or type the lot number of each material on this pass.</div>';
+      : '<div class="sub">No lots yet.</div>';
     if (onLine.length) {
       html += '<div class="sub" style="margin:12px 0 6px">On ' + esc(p.line) + ' now — tap to use:</div><div style="display:flex;gap:8px;flex-wrap:wrap">' +
         onLine.map(function (m) { return '<button class="btn secondary" data-plon="' + esc(m.id) + '" style="padding:10px 12px">' + esc(m.lot) + ' &middot; ' + esc(m.product) + '</button>'; }).join('') + '</div>';
@@ -8136,43 +8192,52 @@
     lotIn.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); document.getElementById('plAdd').onclick(); } };
   }
 
-  // The job screen while it runs: the current pass (line, coating, lots), scan its tickets, change
-  // the lots, then finish the pass and set up the next one.
+  // The job at the line: every pass with what's running now, one scan box for tickets and lot
+  // labels, the tickets in the running pass, and one button when the line changes over.
   function renderPassJob() {
     var view = document.getElementById('view');
     var j = currentJob, passes = j.passes || [];
-    var cur = passes[passes.length - 1] || { pass: 1, tickets: [], lots: [], line: LITHO_LINES[0] };
+    var cur = passCurrent(j) || { pass: 1, tickets: [], lots: [], line: LITHO_LINES[0] };
+    var next = passes[cur.pass] || null;
+    var last = passes[passes.length - 1];
+    var foreman = !lithoUser || lithoUser.manager;
     var inCur = {};
     (cur.tickets || []).forEach(function (t) { inCur[t.skidId] = 1; });
-    var html = '<div class="card"><div class="ticket-id">' + esc(j.description || '(untitled job)') + '</div><div class="sub">Job ' + esc(j.jobId) + '</div>' +
-      passes.slice(0, -1).map(function (p) {
-        return '<div class="sub" style="margin-top:4px">✓ Pass ' + p.pass + ': ' + esc(p.item) + ' &middot; ' + esc(p.line) + ' &middot; ' + p.tickets.length + ' ticket(s)</div>';
-      }).join('') +
-      '<div style="margin-top:12px;padding:12px;border:2px solid var(--accent);border-radius:10px">' +
-        '<div style="font-size:19px;font-weight:700">Pass ' + cur.pass + ': ' + esc(cur.item) + (cur.sub ? ' <span class="sub">(' + esc(cur.sub) + ')</span>' : '') + '</div>' +
-        '<div class="sub">' + esc(cur.line) + '</div>' +
-        '<div style="margin-top:6px">🧪 ' + ((cur.lots || []).length ? esc(passLotText(cur.lots)) : '<span class="sub">No lots entered</span>') + '</div>' +
+    if (!mtData) mtLoad(function () {});   // so a scanned lot label is recognised
+
+    var html = '<div class="card"><div class="ticket-id">' + esc(j.description || '(untitled job)') + '</div>' +
+      '<div class="sub">Job ' + esc(j.jobId) + ' &middot; ' + esc(cur.line || '') + '</div>' +
+      '<div style="margin-top:8px">' + passes.map(function (p) {
+        var now = p.pass === cur.pass, done = p.pass < cur.pass;
+        return '<div style="padding:4px 0;' + (now ? 'font-weight:700' : 'color:var(--muted)') + '">' + (now ? '▶ ' : done ? '✓ ' : '○ ') +
+          'Pass ' + p.pass + ': ' + esc(p.item) + ' &middot; ' + (p.tickets || []).length + ' ticket(s)' + (now ? ' &middot; NOW' : (p.pass > cur.pass ? ' &middot; not started' : '')) + '</div>';
+      }).join('') + '</div>' +
+      '<div style="margin-top:10px;padding:12px;border:2px solid var(--accent);border-radius:10px">' +
+        '<div style="font-size:19px;font-weight:700">Now running: Pass ' + cur.pass + ' — ' + esc(cur.item) + (cur.sub ? ' <span class="sub">(' + esc(cur.sub) + ')</span>' : '') + '</div>' +
+        '<div style="margin-top:6px">🧪 ' + ((cur.lots || []).length ? esc(passLotText(cur.lots)) : '<span class="sub">No lots yet — scan the lot labels</span>') + '</div>' +
         ((cur.changes || []).length > 1 ? '<div class="sub">Lots changed ' + ((cur.changes || []).length - 1) + ' time(s) this pass</div>' : '') +
         (pjMode ? '' : '<button class="btn secondary" id="pjLots" style="margin-top:10px">🔄 Change lots</button>') +
       '</div></div>';
 
     if (pjMode === 'lots') {
-      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">New lots for pass ' + cur.pass + '</h3>' +
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Lots for pass ' + cur.pass + '</h3>' +
         '<div class="sub" style="margin-bottom:8px">Tickets you scan after saving get these lots. Tickets already scanned keep theirs.</div>' +
         '<div id="plBox"></div>' +
         '<button class="btn" id="pjLotsSave" style="width:100%;margin-top:12px">Save lots</button>' +
         '<button class="btn secondary" id="pjX" style="width:100%;margin-top:8px">Cancel</button></div>';
-    } else if (pjMode === 'next') {
-      html += passSetupHtml(cur.pass + 1, cur.group) +
-        '<div class="card"><button class="btn" id="pjStart" style="width:100%;padding:16px;font-size:17px">Start pass ' + (cur.pass + 1) + ' — scan tickets</button>' +
+    } else if (pjMode === 'add') {
+      html += passSetupHtml(passes.length + 1, last && last.group) +
+        '<div class="card"><button class="btn" id="pjAddSave" style="width:100%;padding:14px">Add pass ' + (passes.length + 1) + '</button>' +
         '<button class="btn secondary" id="pjX" style="width:100%;margin-top:8px">Cancel</button></div>';
     } else {
       var earlier = (j.tickets || []).filter(function (t) { return !inCur[t.skidId]; });
       html += '<div class="card" id="jobPickedTicketCard" style="display:none"></div>';
-      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Scan tickets for pass ' + cur.pass + '</h3>' +
+      html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Scan for pass ' + cur.pass + '</h3>' +
         operatorFieldHtml('jobTicketOperator', 'Your name (logged on each ticket you add)', lastOperator || (j.resumed ? '' : j.operator)) +
         searchBarHtml('jobTicketSearch') +
-        (cur.pass > 1 && earlier.length ? '<div class="sub" style="margin:12px 0 4px">On this job, not in pass ' + cur.pass + ' yet (' + earlier.length + ') — tap Add:</div><div id="pjEarlier"></div>' : '') +
+        '<div class="sub" style="margin-top:6px">Scan a ticket — or a lot label when you change a can or drum.</div>' +
+        '<div id="pjScanMsg"></div>' +
+        (cur.pass > 1 && earlier.length ? '<div class="sub" style="margin:12px 0 4px">On this job, not in pass ' + cur.pass + ' yet (' + earlier.length + '):</div><div id="pjEarlier"></div>' : '') +
         '<div id="jobQueuePicker" style="margin-top:10px"></div></div>';
       html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Tickets in pass ' + cur.pass + ' (' + (cur.tickets || []).length + ')</h3>' +
         ((cur.tickets || []).length
@@ -8182,10 +8247,15 @@
             }).join('') + '</tbody></table>'
           : '<div class="sub">None yet.</div>') + '</div>';
       html += '<div class="card">' +
-        '<button class="btn success" id="pjNext" style="width:100%;padding:16px;font-size:17px">✅ Finish pass ' + cur.pass + ' — set up pass ' + (cur.pass + 1) + '</button>' +
-        (cur.pass > 1 && !(cur.tickets || []).length ? '<button class="btn secondary" id="pjDrop" style="width:100%;margin-top:8px">Take off pass ' + cur.pass + ' (started by mistake)</button>' : '') +
-        '<div class="sub" style="margin:12px 0 8px">Tickets are logged as <strong>Pending</strong> until the job is approved in Review Jobs.</div>' +
+        (next
+          ? '<button class="btn success" id="pjNext" style="width:100%;padding:16px;font-size:17px">▶ Line changed over — start Pass ' + next.pass + ': ' + esc(next.item) + '</button>'
+          : '<div class="sub">This is the last pass. When it\'s done, the job is approved in Review Jobs.</div>') +
+        '<div class="sub" style="margin:12px 0 8px">Everything scanned is saved. If the job isn\'t finished today, open it again from Open Jobs — it carries on from this pass.</div>' +
         '<button class="btn secondary" id="finishJobBtn" style="width:100%">Done for now</button></div>';
+      if (foreman) html += '<div class="card"><h3 style="margin-top:0;font-size:15px">Foreman</h3>' +
+        '<button class="btn secondary" id="pjAdd" style="width:100%">+ Add a pass</button>' +
+        (passes.length > 1 && !(last.tickets || []).length ? '<button class="btn secondary" id="pjDrop" style="width:100%;margin-top:8px">Take off pass ' + last.pass + ' (' + esc(last.item) + ')</button>' : '') +
+        '</div>';
     }
     view.innerHTML = html;
 
@@ -8193,6 +8263,10 @@
     function reload(d) { currentJob = passJobFrom(d, j.resumed); renderPassJob(); }
     function failed(title, btn, text) {
       return function (err) { showModal({ title: title, message: err.message, confirmText: 'OK' }); if (btn) { btn.disabled = false; btn.textContent = text; } };
+    }
+    function saveLots(lots, btn, text) {
+      runMutation('setJobPassLots', [j.jobId, lots, who(), newOpId(), cur.pass],
+        function (d) { mtData = null; pjMode = ''; toast('Lots saved for pass ' + cur.pass); reload(d); }, failed('Could not save the lots', btn, text));
     }
     var lotsBtn = document.getElementById('pjLots');
     if (lotsBtn) lotsBtn.onclick = function () { pjMode = 'lots'; passPick = passNew(cur.line, cur.lots); renderPassJob(); };
@@ -8203,45 +8277,51 @@
       renderPassLots();
       document.getElementById('pjLotsSave').onclick = function () {
         if (!passLotsReady()) return;
-        var btn = this; btn.disabled = true; btn.textContent = 'Saving…';
-        runMutation('setJobPassLots', [j.jobId, passPick.lots.slice(), who(), newOpId()],
-          function (d) { mtData = null; pjMode = ''; toast('Lots changed'); reload(d); }, failed('Could not change the lots', btn, 'Save lots'));
+        this.disabled = true; this.textContent = 'Saving…';
+        saveLots(passPick.lots.slice(), this, 'Save lots');
       };
       return;
     }
-    if (pjMode === 'next') {
-      ensureRateData(function () { wirePassSetup(cur.pass + 1); });
-      document.getElementById('pjStart').onclick = function () {
+    if (pjMode === 'add') {
+      ensureRateData(function () { wirePassSetup(); });
+      document.getElementById('pjAddSave').onclick = function () {
         var c = passCoating();
         if (!c.group || !c.item) { toast('Pick a size/group and coating item'); return; }
         if (!passLotsReady()) return;
-        var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
-        runMutation('startJobPass', [j.jobId, { group: c.group, sub: c.sub, item: c.item, line: passPick.line, lots: passPick.lots.slice() }, who(), newOpId()],
-          function (d) { mtData = null; pjMode = ''; toast('Pass ' + (cur.pass + 1) + ' started'); reload(d); }, failed('Could not start the pass', btn, 'Start pass ' + (cur.pass + 1) + ' — scan tickets'));
+        var btn = this; btn.disabled = true; btn.textContent = 'Adding…';
+        runMutation('addJobPass', [j.jobId, { group: c.group, sub: c.sub, item: c.item, lots: passPick.lots.slice() }, who(), newOpId()],
+          function (d) { mtData = null; pjMode = ''; toast('Pass ' + (passes.length + 1) + ' added'); reload(d); }, failed('Could not add the pass', btn, 'Add pass ' + (passes.length + 1)));
       };
       return;
     }
 
-    document.getElementById('pjNext').onclick = function () {
-      var go = function () { pjMode = 'next'; passPick = passNew(cur.line, cur.lots); renderPassJob(); };
-      if (!(cur.tickets || []).length) showConfirm('No tickets yet', 'No tickets are in pass ' + cur.pass + '. Set up the next pass anyway?', go, 'Set up next pass');
-      else go();
+    var nextBtn = document.getElementById('pjNext');
+    if (nextBtn) nextBtn.onclick = function () {
+      var msg = 'Start pass ' + next.pass + ' (' + next.item + ')? Tickets scanned from now on go into pass ' + next.pass + '.' +
+        ((cur.tickets || []).length ? '' : ' Nothing was scanned in pass ' + cur.pass + '.');
+      showConfirm('Line changed over', msg, function () {
+        nextBtn.disabled = true;
+        runMutation('nextJobPass', [j.jobId, next.pass, who(), newOpId()], function (d) { toast('Pass ' + next.pass + ' started'); reload(d); },
+          failed('Could not start the pass', nextBtn, 'Start Pass ' + next.pass));
+      }, 'Start pass ' + next.pass);
     };
+    var addBtn = document.getElementById('pjAdd');
+    if (addBtn) addBtn.onclick = function () { pjMode = 'add'; passPick = passNew(cur.line, []); renderPassJob(); };
     var drop = document.getElementById('pjDrop');
     if (drop) drop.onclick = function () {
-      showConfirm('Take off pass ' + cur.pass, 'Take off pass ' + cur.pass + ' (' + cur.item + ')? Pass ' + (cur.pass - 1) + ' becomes the current pass again.', function () {
+      showConfirm('Take off pass ' + last.pass, 'Take off pass ' + last.pass + ' (' + last.item + ')?', function () {
         drop.disabled = true;
-        runMutation('dropJobPass', [j.jobId, cur.pass, who(), newOpId()], function (d) { toast('Pass ' + cur.pass + ' taken off'); reload(d); }, failed('Could not take off the pass', drop, 'Take off pass ' + cur.pass));
+        runMutation('dropJobPass', [j.jobId, last.pass, who(), newOpId()], function (d) { toast('Pass ' + last.pass + ' taken off'); reload(d); }, failed('Could not take off the pass', drop, 'Take off pass ' + last.pass));
       }, 'Take off', 'warn');
     };
     document.getElementById('finishJobBtn').onclick = function () { document.getElementById('backBtn').click(); };
     Array.prototype.forEach.call(document.querySelectorAll('[data-pjrm]'), function (b) {
       b.onclick = function () {
         var sk = b.getAttribute('data-pjrm'), pn = b.getAttribute('data-pjpass');
-        var t = cur.tickets.filter(function (x) { return x.skidId === sk; })[0] || {};
-        var other = passes.some(function (p) { return p !== cur && p.tickets.some(function (x) { return x.skidId === sk; }); });
+        var t = cur.tickets.filter(function (q) { return q.skidId === sk; })[0] || {};
+        var other = passes.some(function (p) { return p !== cur && (p.tickets || []).some(function (q) { return q.skidId === sk; }); });
         showConfirm('Remove ticket', other
-            ? 'Take ' + t.ticket + ' out of pass ' + cur.pass + '? Its earlier passes stay.'
+            ? 'Take ' + t.ticket + ' out of pass ' + cur.pass + '? Its other passes stay.'
             : 'Take ' + t.ticket + ' off this job? It goes back to Current.', function () {
           b.disabled = true;
           var done = function () { google.script.run.withSuccessHandler(reload).withFailureHandler(failed('Could not reload the job')).getJobDetail(j.jobId); };
@@ -8251,9 +8331,10 @@
       };
     });
 
-    // Earlier passes' tickets: one tap adds them to this pass (no sheet count — that was pass 1's).
+    // Tickets from the job's other passes: one tap (or a scan + Enter) adds them to this pass.
     var earlierBox = document.getElementById('pjEarlier');
     var search = document.getElementById('jobTicketSearch');
+    var scanMsg = document.getElementById('pjScanMsg');
     function earlierRows(term) {
       term = String(term || '').trim().toLowerCase();
       return (j.tickets || []).filter(function (t) { return !inCur[t.skidId] && (!term || String(t.ticket).toLowerCase().indexOf(term) !== -1); });
@@ -8277,21 +8358,50 @@
         b.onclick = function () { addEarlier(b.getAttribute('data-pjadd'), b); };
       });
     }
+    // A lot label scanned at the line: it replaces the running pass's lot of the same material.
+    function scanLot(code) {
+      var use = plMatches(code), prods = [];
+      use.forEach(function (m) { if (prods.indexOf(m.product) === -1) prods.push(m.product); });
+      if (prods.length !== 1) { pjMode = 'lots'; passPick = passNew(cur.line, cur.lots); renderPassJob(); plAddLot(code); return; }
+      var lot = { lot: use[0].lot, product: prods[0], type: use[0].type };
+      if ((cur.lots || []).some(function (l) { return plKey(l) === plKey(lot); })) { toast('Lot ' + lot.lot + ' is already on pass ' + cur.pass); return; }
+      var swap = (cur.lots || []).filter(function (l) { return String(l.product).toLowerCase() === String(lot.product).toLowerCase(); });
+      var keep = (cur.lots || []).filter(function (l) { return swap.indexOf(l) === -1; });
+      showConfirm('Material lot', 'Use lot ' + lot.lot + ' (' + lot.product + ') on pass ' + cur.pass + ' from now on?' +
+          (swap.length ? ' It replaces lot ' + swap.map(function (l) { return l.lot; }).join(', ') + '.' : ''), function () {
+        saveLots(keep.map(function (l) { return { lot: l.lot, product: l.product, type: l.type }; }).concat([lot]), null, '');
+      }, 'Use this lot');
+    }
+    function onScan(code) {
+      code = String(code || '').trim();
+      if (!code) return;
+      var lc = code.toLowerCase();
+      if (scanMsg) scanMsg.innerHTML = '';
+      var mine = (cur.tickets || []).filter(function (t) { return String(t.ticket).toLowerCase() === lc; })[0];
+      if (mine) { toast(mine.ticket + ' is already in pass ' + cur.pass); search.value = ''; return; }
+      var rows = earlierRows(code);
+      var exact = rows.filter(function (t) { return String(t.ticket).toLowerCase() === lc; });
+      if (exact.length === 1 || (earlierBox && rows.length === 1)) { search.value = ''; addEarlier((exact[0] || rows[0]).skidId, null); return; }
+      var cq = queueCache.filter(function (q) { return String(q.ticket).toLowerCase() === lc; });
+      if (cq.length === 1) { renderPickedTicketCard(cq[0].skidId, cq[0]); return; }
+      if (plMatches(code).length) { search.value = ''; scanLot(code); return; }
+      if (scanMsg) {
+        scanMsg.innerHTML = '<div style="margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:10px">' +
+          '<b>' + esc(code) + '</b> isn\'t a ticket or a lot in the app. <button class="btn secondary" id="pjNewLot" style="margin-top:6px">It\'s a material lot — add it</button></div>';
+        document.getElementById('pjNewLot').onclick = function () { pjMode = 'lots'; passPick = passNew(cur.line, cur.lots); renderPassJob(); plAddLot(code); };
+      }
+    }
     renderEarlier('');
-    search.oninput = function () { renderEarlier(search.value); renderJobQueuePicker(search.value); };
-    search.onkeydown = function (e) {
-      if (e.key !== 'Enter' || !earlierBox) return;
-      var rows = earlierRows(search.value);
-      var exact = rows.filter(function (t) { return String(t.ticket).toLowerCase() === search.value.trim().toLowerCase(); });
-      if (exact.length === 1 || rows.length === 1) { e.preventDefault(); search.value = ''; addEarlier((exact[0] || rows[0]).skidId, null); }
-    };
+    search.placeholder = 'Scan a ticket or lot label…';
+    search.oninput = function () { if (scanMsg) scanMsg.innerHTML = ''; renderEarlier(search.value); renderJobQueuePicker(search.value); };
+    search.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); onScan(search.value); } };
     if (search.focus) search.focus();
     if (!queueCache.length) fetchTickets(function () { renderJobQueuePicker(''); });
     else renderJobQueuePicker('');
   }
-  // A ticket just added: put it on the current pass (and the job) without reading the job again.
+  // A ticket just added: put it on the running pass (and the job) without reading the job again.
   function passAddedLocal(r) {
-    var j = currentJob, cur = j.passes[j.passes.length - 1];
+    var j = currentJob, cur = passCurrent(j);
     if (!cur || !r) return;
     var sk = r.skidId;
     if (!cur.tickets.some(function (t) { return t.skidId === sk; })) cur.tickets.push({ skidId: sk, ticket: r.ticket, lots: r.lots || passLotText(cur.lots), passNumber: r.detail && r.detail.coatings && r.detail.coatings.length ? r.detail.coatings[r.detail.coatings.length - 1].passNumber : '' });
@@ -8497,7 +8607,7 @@
       testedBwFieldHtml('jobTestedBw', entry) +
       '<div class="field"><label>Litho Notes (optional)</label>' +
         '<input id="lithoNoteInput" placeholder="Note kept with this ticket"></div>' +
-      '<button class="btn" id="addTicketToJobBtn">Add to Job</button>';
+      '<button class="btn" id="addTicketToJobBtn">' + (currentJob && currentJob.passMode ? 'Add to pass ' + passCurrent(currentJob).pass : 'Add to Job') + '</button>';
 
     if (card.scrollIntoView) card.scrollIntoView({ block: 'start' });
 

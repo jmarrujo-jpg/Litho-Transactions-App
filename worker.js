@@ -184,7 +184,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'jobpass-92', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'jobpass-93', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -372,8 +372,12 @@ async function handle(fn, args, env) {
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
     case 'startJobPass': // (jobId, {group, sub, item, line, lots[{lot, product?, type?}]}, operator, opId) a pass-by-pass job: the next pass
       return startJobPass(sheets, args[0], args[1], args[2], args[3]);
-    case 'setJobPassLots': // (jobId, lots[{lot, product?, type?}], operator, opId) change the lots on the job's current pass
-      return setJobPassLots(sheets, args[0], args[1], args[2], args[3]);
+    case 'setJobPassLots': // (jobId, lots[{lot, product?, type?}], operator, opId, passNo?) change the lots on a pass (default: the one running now)
+      return setJobPassLots(sheets, args[0], args[1], args[2], args[3], args[4]);
+    case 'addJobPass': // (jobId, {group, sub, item, lots}, operator, opId) the foreman adds a pass to the end (not started yet)
+      return addJobPass(sheets, args[0], args[1], args[2], args[3]);
+    case 'nextJobPass': // (jobId, passNo, operator, opId) the line changed over: pass passNo is now running
+      return nextJobPass(sheets, args[0], args[1], args[2], args[3]);
     case 'dropJobPass': // (jobId, passNo, operator, opId) take off the last pass while no ticket is in it
       return dropJobPass(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
@@ -973,7 +977,8 @@ async function getJobDetail(sheets, jobId) {
       });
     });
     out.passMode = true;
-    out.passes = passes;
+    out.passes = passes.map((p) => Object.assign(p, { started: passStarted(p) ? (p.started || true) : '' }));
+    out.currentPass = currentPassOf(recipe).pass;
   }
   return out;
 }
@@ -1552,12 +1557,15 @@ async function createJob(sheets, description, operator, coatings, notes, opId) {
     return { duplicate: true, jobId: prior['Job ID'], description: prior['Description'] || '', coatings: recipe, status: prior['Status'] || 'Pending' };
   }
   const jobId = fmtId('JOB-', maxIdNumber(jobs0.rows, 'Job ID', 'JOB-') + 1);
-  if (isPassJob(coatings)) {   // pass by pass: the job starts with pass 1 only (its line and lots)
-    const first = coatings[0] || {};
-    await validateCoatings(sheets, [first]);
-    const line = String(first.line || '').trim() || LITHO_LINES[0];
-    const lots = await passLots(sheets, line, first.lots, operator, subOp(opId, 'lots'), jobId + ' pass 1');
-    coatings = [passEntry(first, 1, line, lots, operator, '')];
+  if (isPassJob(coatings)) {   // pass by pass: every pass set up front on one line; pass 1 is running
+    await validateCoatings(sheets, coatings);
+    const line = String(coatings[0].line || '').trim() || LITHO_LINES[0];
+    const passes = [];
+    for (let i = 0; i < coatings.length; i++) {
+      const lots = await passLots(sheets, line, coatings[i].lots, operator, subOp(opId, i ? 'lots' + (i + 1) : 'lots'), jobId + ' pass ' + (i + 1));
+      passes.push(passEntry(coatings[i], i + 1, line, lots, operator, '', i === 0));
+    }
+    coatings = passes;
   } else await validateCoatings(sheets, coatings);
   const ens = await ensureColumn(sheets, JOBS, jobs0.headers, 'Op ID');
   await appendRowObj(sheets, JOBS, ens.headers, {
@@ -1602,7 +1610,7 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
     }
   }
   let result = null;
-  const cur = passMode ? recipe[recipe.length - 1] : null;
+  const cur = passMode ? currentPassOf(recipe) : null;
   if (cur && existing && !resuming && String(existing['Job ID'] || '').trim() === String(jobId).trim()) {
     const done = activeCoatings(await getTransactionHistory(sheets, existing['Skid ID'], existing['Ticket']))
       .some((h) => String(h.jobId).trim() === String(jobId).trim() && h.jobPass === cur.pass);
@@ -1675,9 +1683,17 @@ const LITHO_LINES = ['Litho Line 3', 'Litho Line 1'];
 const PASS_LOTS_MAX = 20, PASS_NEW_MATERIALS_MAX = 4;
 function isPassJob(recipe) { return (recipe || []).some((c) => c && (c.pass || c.line)); }
 function lotsText(lots) { return (lots || []).map((l) => l.lot + (l.product ? ' (' + l.product + ')' : '')).join(', '); }
-function passEntry(c, n, line, lots, by, op) {
+// started: when the line began running the pass ('' = not yet). Passes start in order, so the one
+// running now is the last started one (passes from before this field are all running).
+function passEntry(c, n, line, lots, by, op, started) {
   return { group: c.group, sub: c.sub || '', item: c.item, pass: n, line, lots,
-    changes: [{ at: nowStamp(), by: String(by || '').trim(), lots: lots.map((l) => l.lot) }], op: op || '' };
+    changes: [{ at: nowStamp(), by: String(by || '').trim(), lots: lots.map((l) => l.lot) }], op: op || '', started: started === false ? '' : nowStamp() };
+}
+function passStarted(c) { return !!c && (c.started === undefined || !!c.started); }
+function currentPassOf(recipe) {
+  let cur = recipe[0];
+  (recipe || []).forEach((c) => { if (passStarted(c)) cur = c; });
+  return cur;
 }
 // The lots for a pass, checked against Materials. A lot that's Loaded (or was loaded on this line
 // before) is just recorded; one In Stock is loaded onto the line (one container, on Material Loads);
@@ -1764,11 +1780,39 @@ async function startJobPass(sheets, jobId, pass, operator, opId) {
   await savePasses(sheets, j);
   return getJobDetail(sheets, jobId);
 }
+// The foreman adds a pass to the end of the job, on the job's line; it starts when the line gets to it.
+async function addJobPass(sheets, jobId, pass, operator, opId) {
+  pass = pass || {};
+  const j = await passJob(sheets, jobId);
+  if (opId && j.recipe.some((c) => c && c.op === opId)) return getJobDetail(sheets, jobId);
+  await validateCoatings(sheets, [pass]);
+  const line = (j.recipe[0] || {}).line || LITHO_LINES[0];
+  const n = j.recipe.length + 1;
+  const lots = await passLots(sheets, line, pass.lots, operator, subOp(opId, 'lots'), jobId + ' pass ' + n);
+  j.recipe.push(passEntry(pass, n, line, lots, operator, opId, false));
+  await savePasses(sheets, j);
+  return getJobDetail(sheets, jobId);
+}
+// The line changed over to the next pass. Only that pass can start (in order); starting one that's
+// already running (a retry, or two people at once) changes nothing.
+async function nextJobPass(sheets, jobId, passNo, operator, opId) {
+  const j = await passJob(sheets, jobId);
+  const target = j.recipe[num(passNo) - 1];
+  if (!target) throw new Error('Job ' + jobId + ' has no pass ' + passNo + '.');
+  if (passStarted(target)) return getJobDetail(sheets, jobId);
+  const cur = currentPassOf(j.recipe);
+  if (target.pass !== cur.pass + 1) throw new Error('Pass ' + (cur.pass + 1) + ' comes next.');
+  target.started = nowStamp();
+  target.startedBy = String(operator || '').trim();
+  await savePasses(sheets, j);
+  return getJobDetail(sheets, jobId);
+}
 // Change the lots on the current pass (a new can or drum part-way through). Tickets scanned from
 // now on get the new lots; the change is kept on the pass with the time and who did it.
-async function setJobPassLots(sheets, jobId, lots, operator, opId) {
+async function setJobPassLots(sheets, jobId, lots, operator, opId, passNo) {
   const j = await passJob(sheets, jobId);
-  const cur = j.recipe[j.recipe.length - 1];
+  const cur = passNo ? j.recipe[num(passNo) - 1] : currentPassOf(j.recipe);
+  if (!cur) throw new Error('Job ' + jobId + ' has no pass ' + passNo + '.');
   if (opId && (cur.changes || []).some((ch) => ch.op === opId)) return getJobDetail(sheets, jobId);
   const res = await passLots(sheets, cur.line, lots, operator, subOp(opId, 'lots'), jobId + ' pass ' + cur.pass + ' (lot change)');
   cur.lots = res;

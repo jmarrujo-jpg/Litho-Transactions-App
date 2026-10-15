@@ -1583,5 +1583,34 @@ await concurrency(envBase, 'in-worker lock');
   ok('the job approves as usual', ap.ok && skidRow(f, 'SKD-000001')['Status'] === 'WIP', ap);
 }
 
+// 44. Foreman sets up every pass at once (one line); scans go to the pass running now; the line
+// changing over starts the next pass (in order, once); lots can be set on a later pass.
+{ const f = fresh();
+  await call('addMaterialLots', [{ type: 'Litho Coating', product: 'White W', location: 'Ink Room' }, [{ lot: 'W1' }], 'Jonathan', 'op-44-m']);
+  const passes = [{ group: '603X408', sub: '10-OUT', item: 'SIZE', line: 'Litho Line 1' }, { group: '603X408', sub: '10-OUT', item: 'WHITE' }, { group: '603X408', sub: '10-OUT', item: 'VARNISH' }];
+  const j = await call('createJob', ['All passes', 'Fore', passes, '', 'op-44-j']);
+  const jid = j.result && j.result.jobId;
+  let d = await call('getJobDetail', [jid]);
+  ok('three passes on one line; pass 1 running, the others not started', d.ok && d.result.passes.length === 3 && d.result.passes.every((p) => p.line === 'Litho Line 1')
+    && d.result.currentPass === 1 && !!d.result.passes[0].started && !d.result.passes[1].started && !d.result.passes[2].started, d.result);
+  await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-44-a', '']);
+  const twice = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-44-a2', '']);
+  ok('a scan goes to the running pass; scanning it again does not move it on', !twice.ok && /already in pass 1/.test(twice.error) && txFor(f, 'SKD-000001').filter((r) => r['Job Pass']).length === 1, twice);
+  const skip = await call('nextJobPass', [jid, 3, 'Bob', 'op-44-n0']);
+  ok('passes start in order', !skip.ok && /Pass 2 comes next/.test(skip.error), skip);
+  const lots3 = await call('setJobPassLots', [jid, [{ lot: 'W1' }], 'Fore', 'op-44-l', 3]);
+  ok('lots can be put on a later pass', lots3.ok && lots3.result.passes[2].lots[0].lot === 'W1' && lots3.result.passes[0].lots.length === 0, lots3.result && lots3.result.passes);
+  const n2 = await call('nextJobPass', [jid, 2, 'Bob', 'op-44-n']);
+  const n2b = await call('nextJobPass', [jid, 2, 'Amy', 'op-44-n2']);
+  ok('the line changed over: pass 2 is running (again is harmless)', n2.ok && n2b.ok && n2b.result.currentPass === 2, n2b);
+  const b = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-44-b', '']);
+  ok('the next day the job is still on pass 2; the ticket goes in pass 2', b.ok && b.result.jobPass === 2, b);
+  const add = await call('addJobPass', [jid, { group: '603X408', sub: '10-OUT', item: 'SIZE' }, 'Fore', 'op-44-p']);
+  const add2 = await call('addJobPass', [jid, { group: '603X408', sub: '10-OUT', item: 'SIZE' }, 'Fore', 'op-44-p']);
+  ok('the foreman adds a pass at the end (once), not started, same line', add2.ok && add2.result.passes.length === 4 && !add2.result.passes[3].started && add2.result.passes[3].line === 'Litho Line 1' && add2.result.currentPass === 2, add2.result && add2.result.passes);
+  const dr = await call('dropJobPass', [jid, 4, 'Fore', 'op-44-d']);
+  ok('a pass not started can be taken off', dr.ok && dr.result.passes.length === 3 && dr.result.currentPass === 2, dr);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
