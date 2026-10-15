@@ -237,7 +237,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.96.0</span>
+      <span class="version" id="appVersion">v1.97.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -349,6 +349,8 @@
     "📦 Receive Materials": "📦 Recibir materiales",
     "Materials": "Materiales",
     "Plastics Department": "Departamento de Plásticos",
+    "Plastics Lines (coming soon)": "Líneas de Plásticos (pronto)",
+    "Plastics": "Plásticos",
     "Metals Materials": "Materiales de Metales",
     "Litho Materials": "Materiales de Litho",
     "Plastics Materials": "Materiales de Plásticos",
@@ -1979,7 +1981,7 @@
         // Within a count, Back steps back through the sub-screens before leaving.
         if (countMode === 'reviewPromote' || countMode === 'reviewMissing') { countMode = 'walk'; renderCount(); return; }
         if (countMode === 'missing' || countMode === 'history') { countMode = countSummary ? 'summary' : 'walk'; renderCount(); return; }
-        renderLanding(); return;
+        openLithoDept(); return;   // the count is in the Litho Department
       case 'card': case 'review': case 'job': case 'createJob': case 'addTicket': case 'openJobs': openLitho(); return;
       case 'all': openLithoDept(); return;                 // litho home -> Litho Department chooser
       case 'lithoLogin': case 'moveWip': openLithoDept(); return;
@@ -1994,7 +1996,8 @@
       case 'slitterSession': openSlitterKind(slitKind); return;  // session -> its Slitters / Scrolls home
       case 'database': renderLanding(); return;            // database home -> landing
       case 'materialsHome': renderLanding(); return;
-      case 'materials': if (mtDeptFrom === 'home') renderLanding(); else openMaterialsHome(); return;   // a department -> the department tiles
+      case 'materials': mtBackFromDept(); return;   // -> the department it was opened from, else the Materials tiles
+      case 'plasticsDept': renderLanding(); return;
       case 'materialsReceive': case 'materialsEdit': case 'materialsList': case 'materialsLoad': case 'materialsLoads': openMaterials(); return;   // the scanned lots are kept
       case 'materialsItem': if (mtItemFrom === 'receive') openMtReceive(); else if (mtItemFrom === 'add') openMtAdd(); else openMtList(); return;
       case 'materialsSetup': openMtList(); return;
@@ -2016,7 +2019,6 @@
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
       '<button class="btn" id="tilePlastics" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Plastics Department</button>' +
       (FULL_APP ? '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' : '') +
-      '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🧮&nbsp; Litho Steel Count</button>' +
       '<button class="btn secondary" id="tileMaterials" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📦&nbsp; Materials</button>' +
       (FULL_APP ? '<button class="btn secondary" id="tileDatabase" style="width:100%;padding:22px;font-size:18px">🗄️&nbsp; Database</button>' : '') +
       // Written in the language it switches TO, so whoever needs it can read it (never translated).
@@ -2025,10 +2027,8 @@
     document.getElementById('tileSearch').onclick = openSearch;
     document.getElementById('tileLitho').onclick = openLithoDept;
     document.getElementById('tileProduction').onclick = openProduction;
-    document.getElementById('tileCount').onclick = openSteelCount;
     document.getElementById('tileMaterials').onclick = openMaterialsHome;
-    // Plastics is materials only for now: its tile opens the Plastics materials screen.
-    document.getElementById('tilePlastics').onclick = function () { openMtDept('Plastics', 'home'); };
+    document.getElementById('tilePlastics').onclick = openPlasticsDept;
     document.getElementById('tileLang').onclick = function () { setLang(LANG === 'es' ? 'en' : 'es'); renderLanding(); };
     if (FULL_APP) {
       document.getElementById('tileReports').onclick = openReports;
@@ -2201,7 +2201,7 @@
   // Materials opens on one big tile per department; each tile is that department's screen (load,
   // receive, add lots, its lots and machines). The Plastics Department tile on the landing screen
   // goes straight to Plastics.
-  var mtDeptFrom = '';            // 'home' when the department was opened from the landing screen
+  var mtDeptFrom = '';            // the department screen Materials was opened from: 'lithoDept' | 'metalsHome' | 'plasticsDept'
   var MT_DEPT_ICONS = { Metals: '🔩', Litho: '🎨', Plastics: '🧴' };
   function openMaterialsHome() {
     state.view = 'materialsHome';
@@ -2218,6 +2218,22 @@
     });
   }
   function openMtDept(d, from) { mtDept = d; mtType = 'all'; mtDeptFrom = from || ''; openMaterials(); }
+  function mtBackFromDept() {
+    if (mtDeptFrom === 'lithoDept') openLithoDept();
+    else if (mtDeptFrom === 'metalsHome') openProduction();
+    else if (mtDeptFrom === 'plasticsDept') openPlasticsDept();
+    else openMaterialsHome();
+  }
+  // Plastics Department: its lines are coming soon; Materials works now.
+  function openPlasticsDept() {
+    state.view = 'plasticsDept'; state.skid = null; state.jobId = null;
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Plastics');
+    document.getElementById('view').innerHTML =
+      '<button class="btn" id="tilePlasticsLines" disabled style="' + BIG_BTN + ';opacity:.5;cursor:default">Plastics Lines (coming soon)</button>' +
+      '<button class="btn secondary" id="tilePlasticsMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>';
+    document.getElementById('tilePlasticsMat').onclick = function () { openMtDept('Plastics', 'plasticsDept'); };
+  }
   // A department's materials screen (every sub-screen comes back here).
   function openMaterials() {
     if (mtDept === 'all') { openMaterialsHome(); return; }
@@ -5202,8 +5218,12 @@
     showTabbar(false); showBack(true); setDept('Litho');
     document.getElementById('view').innerHTML =
       '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
-      (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '');
+      (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '') +
+      '<button class="btn secondary" id="tileCount" style="' + BIG_BTN + '">🧮&nbsp; Litho Steel Count</button>' +
+      '<button class="btn secondary" id="tileLithoMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>';
     document.getElementById('tileLithoLine').onclick = openLithoLogin;
+    document.getElementById('tileCount').onclick = openSteelCount;
+    document.getElementById('tileLithoMat').onclick = function () { openMtDept('Litho', 'lithoDept'); };
     if (FULL_APP) document.getElementById('tileMoveWip').onclick = openMoveWip;
   }
 
@@ -9218,6 +9238,7 @@
       '<button class="btn" id="metalsPickPress" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🛠️&nbsp; Press Department</button>' +
       '<button class="btn" id="metalsPickSlitter" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">✂️&nbsp; Slitter Department</button>' +
       '<button class="btn" id="metalsPickCoil" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🧵&nbsp; Coil Line</button>' +
+      '<button class="btn secondary" id="metalsPickMat" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">📦&nbsp; Materials</button>' +
       (FULL_APP ?
         '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
         '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
@@ -9226,6 +9247,7 @@
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
     document.getElementById('metalsPickCoil').onclick = function () { openMetalsSection('coil'); };
+    document.getElementById('metalsPickMat').onclick = function () { openMtDept('Metals', 'metalsHome'); };
     if (FULL_APP) {
       document.getElementById('metalsPickUsed').onclick = function () { openMetalsSection('used'); };
       // Print New Steel Tickets -> open the local Flask print service in a new tab.

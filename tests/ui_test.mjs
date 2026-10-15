@@ -1198,7 +1198,7 @@ const base = {
   ok('mobile gate off: a tablet gets everything', !!(await page.$('#tileDatabase')) && !!(await page.$('#tileReports')));
   await page.goto(FILE + '?view=floor'); await page.waitForTimeout(300);
   let home = await ids();
-  ok('tablet: no Reports or Database', !home.includes('tileReports') && !home.includes('tileDatabase') && home.includes('tileSearch') && home.includes('tileCount'), home);
+  ok('tablet: no Reports or Database', !home.includes('tileReports') && !home.includes('tileDatabase') && home.includes('tileSearch') && !home.includes('tileCount'), home);
   ok('tablet: version says tablet', (await page.textContent('#appVersion')).includes('tablet'));
   await page.click('#tileLitho'); await page.waitForTimeout(100);
   let litho = await ids();
@@ -1222,7 +1222,7 @@ const base = {
 }
 { const { page } = await boot(base);
   const home = await page.$$eval('#view button', (bs) => bs.map((b) => b.id));
-  ok('computer: everything shows', ['tileSearch', 'tileLitho', 'tileProduction', 'tileReports', 'tileCount', 'tileDatabase'].every((k) => home.includes(k)), home);
+  ok('computer: everything shows', ['tileSearch', 'tileLitho', 'tileProduction', 'tilePlastics', 'tileReports', 'tileDatabase'].every((k) => home.includes(k)), home);
   ok('computer: version doesn\'t say tablet', !(await page.textContent('#appVersion')).includes('tablet'));
   await page.click('#tileProduction'); await page.waitForTimeout(100);
   ok('computer: Used in Production and Print show', !!(await page.$('#metalsPickUsed')) && !!(await page.$('#metalsPrintTickets')));
@@ -2034,8 +2034,8 @@ const base = {
     updateMaterial: () => R({ ok: true }),
     removeStartLots: () => R({ ok: true, removed: 1, remaining: 0 }),
   }));
-  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('#mtAddBtn');
-  ok('Add Lots is the big button; the START lots can be removed', (await page.textContent('#mtAddBtn')).includes('Add Lots') && !!(await page.$('#mtStartRemove')));
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('#mtStartRemove');
+  ok('Add Lots is there; the START lots can be removed', (await page.textContent('#mtAddBtn')).includes('Add Lots') && !!(await page.$('#mtStartRemove')));
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-maprod]');
   ok('compound shows its material codes as buttons', (await page.$$eval('[data-maprod]', (els) => els.map((e) => e.textContent))).join() === '9000-63-1,9307G');
   ok('Added by starts as Jonathan', (await page.inputValue('#maOperator')) === 'Jonathan');
@@ -2176,7 +2176,9 @@ const base = {
     updateMaterial: (a) => R({ ok: true }), saveMachine: (a) => R({ ok: true }), saveMaterialItem: (a) => R({ ok: true, item: a[0] }),
   }));
   mats.machineInfo[0].deptSet = false;   // a row from before departments
-  await page.click('#tilePlastics'); await page.waitForSelector('[data-mtopen]');
+  await page.click('#tilePlastics'); await page.waitForSelector('#tilePlasticsMat');
+  ok('Plastics Department: Plastics Lines (coming soon), then Materials', (await page.textContent('#tilePlasticsLines')).includes('coming soon') && await page.$eval('#tilePlasticsLines', (e) => e.disabled));
+  await page.click('#tilePlasticsMat'); await page.waitForSelector('[data-mtopen]');
   await page.waitForTimeout(150);
   ok('a machine with no Department in the sheet gets it written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
   let ids = await page.$$eval('[data-mtopen]', (els) => els.map((e) => e.getAttribute('data-mtopen')));
@@ -2186,8 +2188,20 @@ const base = {
   ok('Add Lots is Plastics only (no department buttons), with its types and machines', !(await page.$('[data-madept]')) && (await page.$$('[data-matype]')).length === 1
     && !!(await page.$('[data-matype="Resin"]')) && (await page.$$eval('[data-mamach]', (els) => els.map((e) => e.getAttribute('data-mamach')))).join() === 'Injection 1');
   await page.click('#backBtn'); await page.waitForSelector('#mtLoadBtn');
+  await page.click('#backBtn'); await page.waitForSelector('#tilePlasticsMat');
+  ok('back from Plastics materials goes to the Plastics Department', true);
   await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
-  ok('back from Plastics goes to the landing screen', true);
+  await page.click('#tileLitho'); await page.waitForSelector('#tileLithoMat');
+  ok('Litho Department: Litho Line, Move To WIP, Litho Steel Count, then Materials', (await page.$$eval('#view button', (els) => els.map((e) => e.id))).join() === 'tileLithoLine,tileMoveWip,tileCount,tileLithoMat');
+  await page.click('#tileLithoMat'); await page.waitForSelector('#mtLoadBtn');
+  ok('…opens Litho materials', (await page.textContent('#deptLabel')) === 'Litho Materials');
+  await page.click('#backBtn'); await page.waitForSelector('#tileLithoMat');
+  await page.click('#backBtn'); await page.waitForSelector('#tileProduction');
+  await page.click('#tileProduction'); await page.waitForSelector('#metalsPickMat');
+  await page.click('#metalsPickMat'); await page.waitForSelector('#mtLoadBtn');
+  ok('Metals Department has Materials too', (await page.textContent('#deptLabel')) === 'Metals Materials');
+  await page.click('#backBtn'); await page.waitForSelector('#metalsPickMat');
+  await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
   await page.click('#tileMaterials'); await page.waitForSelector('[data-mthome]');
   ok('Materials: a tile per department', (await page.$$eval('[data-mthome]', (els) => els.map((e) => e.getAttribute('data-mthome')))).join() === 'Metals,Litho,Plastics');
   await page.click('[data-mthome="Litho"]'); await page.waitForSelector('[data-mtopen]');
@@ -2243,7 +2257,7 @@ const base = {
       { id: 'MR-00002', name: '26-10-01--DOW--MR-00002', date: '2026-10-01', supplier: 'DOW', pos: '', department: 'Metals', notes: '', lotCount: 0 }], suppliers: ['DOW', 'LYB'] }),
     saveMatReceiver: (a) => R({ ok: true, id: a[0].id || 'MR-00003' }), deleteMatReceiver: (a) => R({ ok: true, id: a[0] }),
   }));
-  await page.click('#tilePlastics'); await page.waitForSelector('[data-mtopen]'); await page.waitForTimeout(150);
+  await page.click('#tilePlastics'); await page.click('#tilePlasticsMat'); await page.waitForSelector('[data-mtopen]'); await page.waitForTimeout(150);
   ok('a type not on the Types tab yet gets written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
   await page.click('#mtReceiveBtn'); await page.waitForSelector('[data-mtrt]');
   ok('Receive in Plastics: only Plastics types, starting on the first', (await page.$$eval('[data-mtrt]', (els) => els.map((e) => e.getAttribute('data-mtrt')))).join() === 'Resin,Pellet'
