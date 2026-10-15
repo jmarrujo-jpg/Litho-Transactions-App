@@ -2192,7 +2192,7 @@ const base = {
   ok('back from Plastics materials goes to the Plastics Department', true);
   await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
   await page.click('#tileLitho'); await page.waitForSelector('#tileLithoMat');
-  ok('Litho Department: Litho Line, Move To WIP, Litho Steel Count, then Materials', (await page.$$eval('#view button', (els) => els.map((e) => e.id))).join() === 'tileLithoLine,tileMoveWip,tileCount,tileLithoMat');
+  ok('Litho Department: Litho Line, Litho Steel Count, Materials, then Move To WIP', (await page.$$eval('#view button', (els) => els.map((e) => e.id))).join() === 'tileLithoLine,tileCount,tileLithoMat,tileMoveWip');
   await page.click('#tileLithoMat'); await page.waitForSelector('#mtLoadBtn');
   ok('…opens Litho materials', (await page.textContent('#deptLabel')) === 'Litho Materials');
   await page.click('#backBtn'); await page.waitForSelector('#tileLithoMat');

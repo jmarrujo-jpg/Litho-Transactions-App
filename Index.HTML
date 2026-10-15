@@ -237,7 +237,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.97.0</span>
+      <span class="version" id="appVersion">v1.97.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -5218,9 +5218,9 @@
     showTabbar(false); showBack(true); setDept('Litho');
     document.getElementById('view').innerHTML =
       '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
-      (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '') +
       '<button class="btn secondary" id="tileCount" style="' + BIG_BTN + '">🧮&nbsp; Litho Steel Count</button>' +
-      '<button class="btn secondary" id="tileLithoMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>';
+      '<button class="btn secondary" id="tileLithoMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>' +
+      (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '');
     document.getElementById('tileLithoLine').onclick = openLithoLogin;
     document.getElementById('tileCount').onclick = openSteelCount;
     document.getElementById('tileLithoMat').onclick = function () { openMtDept('Litho', 'lithoDept'); };
