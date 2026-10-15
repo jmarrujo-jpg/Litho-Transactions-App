@@ -23,29 +23,6 @@ const TRANSACTIONS = 'Litho Transactions';
 const JOBS = 'Litho Jobs';
 const RATE = 'Litho Rate Table';
 
-// ---- Material-loading / receiving tabs (self-created on first touch) ----
-const DEPARTMENTS = 'Departments';
-const MACHINES = 'Machines';
-const MATERIALS = 'Materials';
-const LOTS = 'Lots';
-const STEEL_RECEIVING = 'Steel Receiving';
-const MATERIALS_RECEIVING = 'Materials Receiving';
-const MATERIAL_LOADS = 'Material Loads';
-
-// Header rows for each managed tab. The first list in each pair also tells ensureTab what to
-// seed (only Departments seeds data rows). Steel and materials receiving are deliberately two
-// separate tabs so the two receiving trails never mix.
-const TAB_HEADERS = {
-  [DEPARTMENTS]: ['Name', 'Active', 'Created At', 'Created By'],
-  [MACHINES]: ['Machine', 'Type', 'Department', 'Active', 'Created At', 'Created By'],
-  [MATERIALS]: ['Material', 'Kind', 'Department', 'Active', 'Created At', 'Created By'],
-  [LOTS]: ['Lot', 'Material', 'Kind', 'Qty', 'Department', 'Received Date', 'Received By', 'Created At'],
-  [STEEL_RECEIVING]: ['Timestamp', 'Op ID', 'Lot', 'Material', 'Qty', 'Received By', 'Department', 'Notes'],
-  [MATERIALS_RECEIVING]: ['Timestamp', 'Op ID', 'Lot', 'Material', 'Qty', 'Received By', 'Department', 'Notes'],
-  [MATERIAL_LOADS]: ['Timestamp', 'Op ID', 'Department', 'Machine', 'Material', 'Lot', 'Qty', 'Operator', 'Notes'],
-};
-const DEFAULT_DEPARTMENTS = ['Metals', 'Litho', 'Plastics'];
-
 const ADDON_SOURCE_GROUP = 'Specialty / Low Volume / Setup';
 const ADDON_ITEM_NAMES = ['SIZE', 'ENAMEL ONE SIDE', 'WHITE BASE COAT',
   'VARNISH WET-STANDARD', 'VARNISH WET-PEBBLE', 'VARNISH DRY-STANDARD', 'VARNISH DRY-PEBBLE', 'WAX ONLY',
@@ -107,14 +84,6 @@ async function handle(fn, args, env) {
     case 'getTicketCard': return getTicketCard(sheets, args[0]);
     case 'getJobsForDate': return getJobsForDate(sheets, args[0]);
     case 'getJobDetail': return getJobDetail(sheets, args[0]);
-    // ---- material loading / receiving / setup ----
-    case 'getLoadingSetup': return getLoadingSetup(sheets);
-    case 'getReceivingLog': return getReceivingLog(sheets, args[0], args[1]);
-    case 'getLoadsLog': return getLoadsLog(sheets, args[0], args[1]);
-    case 'addSetupEntry': return addSetupEntry(sheets, args[0], args[1], args[2]);
-    case 'setSetupActive': return setSetupActive(sheets, args[0], args[1], args[2], args[3]);
-    case 'recordReceiving': return recordReceiving(sheets, args[0], args[1], args[2]);
-    case 'recordLoad': return recordLoad(sheets, args[0], args[1]);
     default:
       if (WRITE_FNS.indexOf(fn) !== -1) {
         throw new Error('"' + fn + '" isn\'t on the new backend yet (Stage 2). Use the Apps Script app to make changes for now.');
@@ -195,57 +164,8 @@ async function makeSheets(env) {
       return call(base + '/values:batchUpdate',
         { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
     },
-    async tabTitles() {
-      const j = await call(base + '?fields=' + encodeURIComponent('sheets.properties.title'), { headers: auth });
-      return (j.sheets || []).map((s) => s.properties && s.properties.title).filter(Boolean);
-    },
-    async addTabs(titles) {
-      if (!titles.length) return;
-      return call(base + ':batchUpdate',
-        { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requests: titles.map((t) => ({ addSheet: { properties: { title: t } } })) }) });
-    },
   };
 }
-
-// Ensures every managed loading/receiving tab exists with its header row, creating any that are
-// missing (one metadata read + at most one addSheet batch + header writes). Departments is seeded
-// with the three default departments on first creation. Safe to call before every read/write.
-let loadingTabsReady = false;
-async function ensureLoadingTabs(sheets) {
-  if (loadingTabsReady) return;
-  const titles = await sheets.tabTitles();
-  const have = {};
-  titles.forEach((t) => { have[t] = true; });
-  const missing = Object.keys(TAB_HEADERS).filter((t) => !have[t]);
-  if (missing.length) await sheets.addTabs(missing);
-  // Write header rows for any tab that is missing or has an empty first cell.
-  for (const tab of Object.keys(TAB_HEADERS)) {
-    const headers = TAB_HEADERS[tab];
-    let firstRow = [];
-    if (!missing.includes(tab)) {
-      try { firstRow = (await sheets.read(tab + '!1:1'))[0] || []; } catch (e) { firstRow = []; }
-    }
-    if (!firstRow.length || !String(firstRow[0] || '').trim()) {
-      await sheets.update(tab + '!A1', [headers]);
-      if (tab === DEPARTMENTS) {
-        const now = nowStamp();
-        for (const name of DEFAULT_DEPARTMENTS) {
-          await sheets.append(DEPARTMENTS, [name, 'Yes', now, 'system']);
-        }
-      }
-    }
-  }
-  loadingTabsReady = true;
-}
-
-function nowStamp() {
-  try {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date()).replace(',', '');
-  } catch (e) { return new Date().toISOString().slice(0, 19).replace('T', ' '); }
-}
-function truthy(v) { const s = String(v == null ? '' : v).trim().toLowerCase(); return s === 'yes' || s === 'true' || s === '1' || s === 'y' || s === 'active'; }
 function serialToYMD(serial, tz) {
   if (!serial && serial !== 0) return '';
   const ms = Math.round((Number(serial) - 25569) * 86400 * 1000);
@@ -360,162 +280,4 @@ async function getJobDetail(sheets, jobId) {
   return { jobId: job['Job ID'], description: job['Description'], createdBy: job['Created By'], createdAt: serialToYMD(job['Created At'], TZ),
     status: job['Status'], approvedAt: job['Approved At'] ? serialToYMD(job['Approved At'], TZ) : '', approvedBy: job['Approved By'],
     coatings: recipe, coatingsSummary: job['Coatings'], notes: job['Notes'], tickets };
-}
-
-// ============================================================================================
-// Material loading, receiving, and setup (Departments / Machines / Materials / Lots).
-// These tabs are self-created; Departments seeds Metals / Litho / Plastics on first touch.
-// ============================================================================================
-
-function clean(v) { return v == null ? '' : String(v).trim(); }
-async function opIdSeen(sheets, tab, opId) {
-  if (!opId) return false;
-  const { headers, rows } = await readObjects(sheets, tab);
-  if (headers.indexOf('Op ID') === -1) return false;
-  return rows.some((r) => clean(r['Op ID']) === clean(opId));
-}
-
-// Returns every setup list (active + inactive) so the Setup screen can show and reactivate
-// everything; the Loading/Receiving screens filter to Active themselves.
-async function getLoadingSetup(sheets) {
-  await ensureLoadingTabs(sheets);
-  const dep = await readObjects(sheets, DEPARTMENTS);
-  const mac = await readObjects(sheets, MACHINES);
-  const mat = await readObjects(sheets, MATERIALS);
-  const lot = await readObjects(sheets, LOTS);
-  return {
-    departments: dep.rows.filter((r) => clean(r['Name'])).map((r) => ({
-      name: clean(r['Name']), active: truthy(r['Active']) })),
-    machines: mac.rows.filter((r) => clean(r['Machine'])).map((r) => ({
-      machine: clean(r['Machine']), type: clean(r['Type']), department: clean(r['Department']), active: truthy(r['Active']) })),
-    materials: mat.rows.filter((r) => clean(r['Material'])).map((r) => ({
-      material: clean(r['Material']), kind: clean(r['Kind']) || 'Material', department: clean(r['Department']), active: truthy(r['Active']) })),
-    lots: lot.rows.filter((r) => clean(r['Lot'])).map((r) => ({
-      lot: clean(r['Lot']), material: clean(r['Material']), kind: clean(r['Kind']) || 'Material',
-      qty: clean(r['Qty']), department: clean(r['Department']), receivedDate: clean(r['Received Date']) })),
-  };
-}
-
-async function getReceivingLog(sheets, kind, limit) {
-  await ensureLoadingTabs(sheets);
-  const tab = String(kind) === 'steel' ? STEEL_RECEIVING : MATERIALS_RECEIVING;
-  const { rows } = await readObjects(sheets, tab);
-  const out = rows.filter((r) => clean(r['Timestamp']) || clean(r['Material'])).map((r) => ({
-    timestamp: clean(r['Timestamp']), lot: clean(r['Lot']), material: clean(r['Material']),
-    qty: clean(r['Qty']), receivedBy: clean(r['Received By']), department: clean(r['Department']), notes: clean(r['Notes']) }));
-  out.reverse();
-  return limit ? out.slice(0, limit) : out;
-}
-
-async function getLoadsLog(sheets, dept, limit) {
-  await ensureLoadingTabs(sheets);
-  const { rows } = await readObjects(sheets, MATERIAL_LOADS);
-  let out = rows.filter((r) => clean(r['Timestamp']) || clean(r['Machine'])).map((r) => ({
-    timestamp: clean(r['Timestamp']), department: clean(r['Department']), machine: clean(r['Machine']),
-    material: clean(r['Material']), lot: clean(r['Lot']), qty: clean(r['Qty']), operator: clean(r['Operator']), notes: clean(r['Notes']) }));
-  if (dept) out = out.filter((r) => r.department === clean(dept));
-  out.reverse();
-  return limit ? out.slice(0, limit) : out;
-}
-
-// kind: 'department' | 'machine' | 'material' | 'lot'. Dedupes by natural key (case-insensitive).
-async function addSetupEntry(sheets, kind, data, opId) {
-  await ensureLoadingTabs(sheets);
-  data = data || {};
-  const now = nowStamp();
-  const by = clean(data.by) || 'app';
-  if (kind === 'department') {
-    const name = clean(data.name);
-    if (!name) throw new Error('Department name is required.');
-    const { rows } = await readObjects(sheets, DEPARTMENTS);
-    if (rows.some((r) => clean(r['Name']).toLowerCase() === name.toLowerCase())) return { ok: true, duplicate: true };
-    await sheets.append(DEPARTMENTS, [name, 'Yes', now, by]);
-    return { ok: true, name };
-  }
-  if (kind === 'machine') {
-    const machine = clean(data.machine);
-    if (!machine) throw new Error('Machine name is required.');
-    const { rows } = await readObjects(sheets, MACHINES);
-    if (rows.some((r) => clean(r['Machine']).toLowerCase() === machine.toLowerCase())) return { ok: true, duplicate: true };
-    await sheets.append(MACHINES, [machine, clean(data.type), clean(data.department), 'Yes', now, by]);
-    return { ok: true, machine };
-  }
-  if (kind === 'material') {
-    const material = clean(data.material);
-    if (!material) throw new Error('Material name is required.');
-    const kindVal = clean(data.kind) === 'Steel' ? 'Steel' : 'Material';
-    const { rows } = await readObjects(sheets, MATERIALS);
-    if (rows.some((r) => clean(r['Material']).toLowerCase() === material.toLowerCase())) return { ok: true, duplicate: true };
-    await sheets.append(MATERIALS, [material, kindVal, clean(data.department), 'Yes', now, by]);
-    return { ok: true, material };
-  }
-  if (kind === 'lot') {
-    const lot = clean(data.lot);
-    if (!lot) throw new Error('Lot number is required.');
-    const { rows } = await readObjects(sheets, LOTS);
-    if (rows.some((r) => clean(r['Lot']).toLowerCase() === lot.toLowerCase())) return { ok: true, duplicate: true };
-    const kindVal = clean(data.kind) === 'Steel' ? 'Steel' : 'Material';
-    await sheets.append(LOTS, [lot, clean(data.material), kindVal, clean(data.qty), clean(data.department), clean(data.receivedDate), clean(data.receivedBy), now]);
-    return { ok: true, lot };
-  }
-  throw new Error('Unknown setup kind: ' + kind);
-}
-
-// Flips the Active column for one setup row (soft delete / reactivate).
-async function setSetupActive(sheets, kind, key, active, opId) {
-  await ensureLoadingTabs(sheets);
-  const map = { department: [DEPARTMENTS, 'Name'], machine: [MACHINES, 'Machine'], material: [MATERIALS, 'Material'], lot: [LOTS, 'Lot'] };
-  const spec = map[kind];
-  if (!spec) throw new Error('Unknown setup kind: ' + kind);
-  const [tab, keyCol] = spec;
-  const { headers, rows } = await readObjects(sheets, tab);
-  const activeCol = headers.indexOf('Active');
-  if (activeCol === -1) throw new Error(tab + ' has no Active column.');
-  const row = rows.find((r) => clean(r[keyCol]).toLowerCase() === clean(key).toLowerCase());
-  if (!row) throw new Error(kind + ' not found: ' + key);
-  const colLetter = colToLetter(activeCol + 1);
-  await sheets.update(tab + '!' + colLetter + row.__row, [[active ? 'Yes' : 'No']]);
-  return { ok: true };
-}
-
-function colToLetter(n) { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
-
-// Records a receiving event into the steel OR materials log (kept separate), and upserts the Lot.
-async function recordReceiving(sheets, kind, data, opId) {
-  await ensureLoadingTabs(sheets);
-  const isSteel = String(kind) === 'steel';
-  const tab = isSteel ? STEEL_RECEIVING : MATERIALS_RECEIVING;
-  if (await opIdSeen(sheets, tab, opId)) return { ok: true, duplicate: true };
-  data = data || {};
-  const material = clean(data.material);
-  if (!material) throw new Error('Material is required.');
-  const lot = clean(data.lot);
-  const qty = clean(data.qty);
-  const receivedBy = clean(data.receivedBy);
-  const department = clean(data.department);
-  const notes = clean(data.notes);
-  const now = nowStamp();
-  const date = clean(data.receivedDate) || todayYMD();
-  await sheets.append(tab, [now, clean(opId), lot, material, qty, receivedBy, department, notes]);
-  // Upsert the lot so it shows up for loading. New lot -> create; existing -> leave as-is.
-  if (lot) {
-    const { rows } = await readObjects(sheets, LOTS);
-    if (!rows.some((r) => clean(r['Lot']).toLowerCase() === lot.toLowerCase())) {
-      await sheets.append(LOTS, [lot, material, isSteel ? 'Steel' : 'Material', qty, department, date, receivedBy, now]);
-    }
-  }
-  return { ok: true, timestamp: now };
-}
-
-async function recordLoad(sheets, data, opId) {
-  await ensureLoadingTabs(sheets);
-  if (await opIdSeen(sheets, MATERIAL_LOADS, opId)) return { ok: true, duplicate: true };
-  data = data || {};
-  const machine = clean(data.machine);
-  const material = clean(data.material);
-  if (!machine) throw new Error('Machine is required.');
-  if (!material) throw new Error('Material is required.');
-  const now = nowStamp();
-  await sheets.append(MATERIAL_LOADS, [now, clean(opId), clean(data.department), machine, material, clean(data.lot), clean(data.qty), clean(data.operator), clean(data.notes)]);
-  return { ok: true, timestamp: now };
 }
