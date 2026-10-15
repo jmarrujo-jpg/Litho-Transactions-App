@@ -1733,7 +1733,7 @@ const base = {
     receiveMaterials: (a) => R({ ok: true, receiver: 'R-00008', receiverCreated: true, lots: 2, containers: 3, saved: [] }),
     updateMaterial: () => R({ ok: true }),
   }));
-  await page.click('#tileMaterials');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]');
   await page.waitForSelector('[data-mtopen]');
   let txt = await page.textContent('#mtList');
   ok('materials list: in-stock lots only by default; expired shows', txt.includes('PW-1') && !txt.includes('OLD-1') && txt.includes('EXPIRED 2020-01-01') && txt.includes('2 of 2 left'), txt);
@@ -1826,7 +1826,7 @@ const base = {
     saveMaterialItem: (a) => { const it = Object.assign({}, a[0], { id: a[0].id || 'MI-00009' }); items = items.filter((i) => i.id !== it.id).concat([it]); return R({ ok: true, item: it }); },
     deleteMaterialItem: () => R({ ok: true }),
   }));
-  await page.click('#tileMaterials');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]');
   await page.waitForSelector('#mtListBtn');
   ok('the type chips include a type added on the list', !!(await page.waitForSelector('[data-mtt="Solvent"]', { timeout: 2000 }).catch(() => null)));
   await page.click('#mtListBtn');
@@ -1906,7 +1906,7 @@ const base = {
     getMaterialLoads: () => R(H),
     undoMaterialLoad: () => R({ ok: true }),
   }));
-  await page.click('#tileMaterials');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]');
   await page.waitForSelector('#mtLoadBtn');
   ok('the Materials screen has Receive and Load buttons', (await page.textContent('#mtReceiveBtn')).includes('Receive Materials') && (await page.textContent('#mtLoadBtn')).includes('Load Materials'));
   await page.click('#mtLoadBtn'); await page.waitForSelector('#mlScan');
@@ -1975,7 +1975,7 @@ const base = {
     },
     loadMaterials: () => R({ ok: true, containers: 1, usedUp: [] }),
   }));
-  await page.click('#tileMaterials'); await page.waitForSelector('#mtListBtn');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('[data-mtopen]');
   ok('lot cards show where they are kept', (await page.textContent('#mtList')).includes('📍 Pallet Area'));
   await page.click('#mtListBtn'); await page.waitForSelector('#mtSetupBtn');
   ok('the list offers the setup from the count', (await page.textContent('#mtSetupBtn')).includes('2026-10-12'));
@@ -2034,7 +2034,7 @@ const base = {
     updateMaterial: () => R({ ok: true }),
     removeStartLots: () => R({ ok: true, removed: 1, remaining: 0 }),
   }));
-  await page.click('#tileMaterials'); await page.waitForSelector('#mtAddBtn');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('#mtAddBtn');
   ok('Add Lots is the big button; the START lots can be removed', (await page.textContent('#mtAddBtn')).includes('Add Lots') && !!(await page.$('#mtStartRemove')));
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-maprod]');
   ok('compound shows its material codes as buttons', (await page.$$eval('[data-maprod]', (els) => els.map((e) => e.textContent))).join() === '9000-63-1,9307G');
@@ -2176,16 +2176,27 @@ const base = {
     updateMaterial: (a) => R({ ok: true }), saveMachine: (a) => R({ ok: true }), saveMaterialItem: (a) => R({ ok: true, item: a[0] }),
   }));
   mats.machineInfo[0].deptSet = false;   // a row from before departments
-  await page.evaluate(() => openMaterials()); await page.waitForSelector('[data-mtopen]');
+  await page.click('#tilePlastics'); await page.waitForSelector('[data-mtopen]');
   await page.waitForTimeout(150);
   ok('a machine with no Department in the sheet gets it written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
-  await page.click('[data-mtdept="Plastics"]'); await page.waitForTimeout(100);
   let ids = await page.$$eval('[data-mtopen]', (els) => els.map((e) => e.getAttribute('data-mtopen')));
-  ok('Materials: the Plastics button shows only Plastics lots', ids.join() === 'M-2', ids);
-  await page.click('#mtAddBtn'); await page.waitForSelector('[data-madept]');
-  ok('Add Lots starts on Plastics, with its types and machines only', (await page.getAttribute('[data-madept="Plastics"]', 'class')) === 'btn ' && (await page.$$('[data-matype]')).length === 1
+  ok('the Plastics Department tile opens Plastics materials only', ids.join() === 'M-2' && (await page.textContent('#deptLabel')) === 'Plastics Materials', ids);
+  ok('…with its machine and what is loaded on it', /Injection 1/.test(await page.textContent('#mtOnBox')) && /R-1/.test(await page.textContent('#mtOnBox')) && !/Press 13/.test(await page.textContent('#mtOnBox')));
+  await page.click('#mtAddBtn'); await page.waitForSelector('[data-matype]');
+  ok('Add Lots is Plastics only (no department buttons), with its types and machines', !(await page.$('[data-madept]')) && (await page.$$('[data-matype]')).length === 1
     && !!(await page.$('[data-matype="Resin"]')) && (await page.$$eval('[data-mamach]', (els) => els.map((e) => e.getAttribute('data-mamach')))).join() === 'Injection 1');
-  await page.click('[data-madept="Litho"]'); await page.waitForTimeout(80);
+  await page.click('#backBtn'); await page.waitForSelector('#mtLoadBtn');
+  await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
+  ok('back from Plastics goes to the landing screen', true);
+  await page.click('#tileMaterials'); await page.waitForSelector('[data-mthome]');
+  ok('Materials: a tile per department', (await page.$$eval('[data-mthome]', (els) => els.map((e) => e.getAttribute('data-mthome')))).join() === 'Metals,Litho,Plastics');
+  await page.click('[data-mthome="Litho"]'); await page.waitForSelector('[data-mtopen]');
+  await page.click('#mtLoadBtn'); await page.waitForSelector('#mlMachine');
+  ok('Load on Litho: its machines as buttons', (await page.$$eval('[data-mlm]', (els) => els.map((e) => e.getAttribute('data-mlm')))).join() === 'Litho Line 3');
+  await page.click('[data-mlm="Litho Line 3"]');
+  ok('…tapping one picks it', (await page.inputValue('#mlMachine')) === 'Litho Line 3' && !(await page.getAttribute('[data-mlm="Litho Line 3"]', 'class')).includes('secondary'));
+  await page.click('#backBtn'); await page.waitForSelector('#mtAddBtn');
+  await page.click('#mtAddBtn'); await page.waitForSelector('[data-matype]');
   ok('switching to Litho shows the litho types', !!(await page.$('[data-matype="Litho Coating"]')) && !!(await page.$('[data-maprod="Clear Size"]')) && !(await page.$('[data-matype="Resin"]')));
   // the Master File
   await page.evaluate(() => { dbTable = 'materials'; openDatabase(); }); await page.waitForSelector('[data-mfrow]');
@@ -2205,9 +2216,65 @@ const base = {
   await page.waitForSelector('[data-mft="items"]'); await page.click('[data-mft="items"]'); await page.waitForSelector('#mfAdd');
   await page.click('[data-mfd="Plastics"]'); await page.click('#mfAdd'); await page.waitForSelector('#mfSave');
   ok('a new material starts in the department picked', (await page.$eval('#mfDept', (e) => e.value)) === 'Plastics');
-  await page.fill('#mfName', 'Blue MB'); await page.fill('#mfType', 'Masterbatch'); await page.click('#mfSave'); await page.waitForTimeout(150);
+  ok('…its Type is picked from the Types list, Plastics types first', (await page.$$eval('#mfType option', (els) => els.map((e) => e.value)))[1] === 'Resin');
+  await page.fill('#mfName', 'Blue MB'); await page.selectOption('#mfType', 'Resin'); await page.click('#mfSave'); await page.waitForTimeout(150);
   const si = calls.filter((c) => c.fn === 'saveMaterialItem')[0];
-  ok('…and saves with it', si && si.args[0].name === 'Blue MB' && si.args[0].type === 'Masterbatch' && si.args[0].department === 'Plastics' && si.args[0].id === '', si && si.args);
+  ok('…and saves with it', si && si.args[0].name === 'Blue MB' && si.args[0].type === 'Resin' && si.args[0].department === 'Plastics' && si.args[0].id === '', si && si.args);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 50. Types (each with a department), Material Receivers kept apart from steel, Receive in a department
+{ const mats = {
+    materials: [{ id: 'M-1', lot: 'R-1', type: 'Resin', product: 'PP Resin 1', supplier: 'LYB', status: 'In Stock', qtyOnHand: 1, qtyReceived: 1, location: 'Silo', department: 'Plastics', receiver: 'MR-00001' }],
+    items: [{ id: 'MI-1', name: 'PP Resin 1', type: 'Resin', active: true, department: 'Plastics', deptSet: true }],
+    types: ['Compound', 'Powder', 'Resin', 'Pellet'],
+    typeInfo: [{ name: 'Compound', department: 'Metals', container: 'Barrel', active: true, saved: true }, { name: 'Powder', department: 'Metals', container: 'Unit', active: true, saved: true },
+      { name: 'Resin', department: 'Plastics', container: 'Gaylord', active: true, saved: true }, { name: 'Pellet', department: 'Plastics', container: 'Bag', active: true, saved: false }],
+    departments: ['Metals', 'Plastics', 'Litho'], machines: ['Injection 1'], machineInfo: [{ name: 'Injection 1', positions: [], materials: [], active: true, department: 'Plastics', deptSet: true }],
+    suppliers: ['LYB'], containers: [], products: {},
+    receivers: [{ id: 'MR-00002', name: '26-10-01--DOW--MR-00002', supplier: 'DOW', department: 'Metals' }, { id: 'MR-00001', name: '26-09-01--LYB--MR-00001', supplier: 'LYB', department: 'Plastics' },
+      { id: 'R-00007', name: '26-01-01--AKZO--R-00007', supplier: 'AKZO', old: true }] };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMaterials: () => R(mats),
+    receiveMaterials: () => R({ ok: true, receiver: 'MR-00003', receiverCreated: true, lots: 1, containers: 1, saved: [] }),
+    saveMaterialType: (a) => R({ ok: true, type: a[0] }),
+    getMatReceivers: () => R({ receivers: [{ id: 'MR-00001', name: '26-09-01--LYB--MR-00001', date: '2026-09-01', supplier: 'LYB', pos: 'P-1', department: 'Plastics', notes: '', lotCount: 1 },
+      { id: 'MR-00002', name: '26-10-01--DOW--MR-00002', date: '2026-10-01', supplier: 'DOW', pos: '', department: 'Metals', notes: '', lotCount: 0 }], suppliers: ['DOW', 'LYB'] }),
+    saveMatReceiver: (a) => R({ ok: true, id: a[0].id || 'MR-00003' }), deleteMatReceiver: (a) => R({ ok: true, id: a[0] }),
+  }));
+  await page.click('#tilePlastics'); await page.waitForSelector('[data-mtopen]'); await page.waitForTimeout(150);
+  ok('a type not on the Types tab yet gets written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
+  await page.click('#mtReceiveBtn'); await page.waitForSelector('[data-mtrt]');
+  ok('Receive in Plastics: only Plastics types, starting on the first', (await page.$$eval('[data-mtrt]', (els) => els.map((e) => e.getAttribute('data-mtrt')))).join() === 'Resin,Pellet'
+    && (await page.getAttribute('[data-mtrt="Resin"]', 'class')) === 'active' && (await page.inputValue('#mtContainer')) === 'Gaylord');
+  ok('…and only Plastics material receivers (no steel ones)', (await page.$$eval('#mtReceiver option', (els) => els.map((e) => e.value))).join() === ',MR-00001');
+  await page.fill('#mtSupplier', 'LYB'); await page.fill('#mtProduct', 'PP Resin 1'); await page.fill('#mtScan', 'LOT-9'); await page.press('#mtScan', 'Enter');
+  await page.click('#mtSave'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(200);
+  const rm = calls.filter((c) => c.fn === 'receiveMaterials')[0];
+  ok('the delivery is saved as Plastics', rm && rm.args[0].department === 'Plastics' && rm.args[1][0].type === 'Resin', rm && rm.args);
+  if (await page.$('#modalOk')) await page.click('#modalOk');
+  // Master File: Types
+  await page.evaluate(() => { dbTable = 'materials'; mfTab = 'types'; mfDept = 'all'; openDatabase(); }); await page.waitForSelector('[data-mfrow="Pellet"]');
+  ok('Master File tabs in setup order', (await page.$$eval('[data-mft]', (els) => els.map((e) => e.getAttribute('data-mft')))).join() === 'machines,types,items,lots');
+  await page.click('[data-mfd="Plastics"]'); await page.waitForTimeout(60);
+  ok('Types filtered by department', (await page.$$eval('[data-mfrow]', (els) => els.map((e) => e.getAttribute('data-mfrow')))).join() === 'Resin,Pellet');
+  await page.click('#mfAdd'); await page.waitForSelector('#mfSave');
+  await page.fill('#mfName', 'Colorant'); await page.fill('#mfCont', 'Box'); await page.click('#mfSave'); await page.waitForTimeout(150);
+  const st = calls.filter((c) => c.fn === 'saveMaterialType')[0];
+  ok('add a type: Plastics, its container', st && st.args[0].name === 'Colorant' && st.args[0].department === 'Plastics' && st.args[0].container === 'Box' && st.args[0].oldName === '', st && st.args);
+  // Database: Material Receivers is its own tab; steel keeps its own
+  await page.evaluate(() => { dbTable = 'mreceivers'; openDatabase(); }); await page.waitForSelector('[data-mrrow]');
+  const tabs = await page.$$eval('[data-dbt]', (els) => els.map((e) => e.textContent));
+  ok('Database: Material Receivers and Steel Receivers tabs', tabs.indexOf('Material Receivers') !== -1 && tabs.indexOf('Steel Receivers') !== -1 && tabs.indexOf('Receivers') === -1, tabs);
+  ok('material receivers listed with lot counts', (await page.$$('[data-mrrow]')).length === 2 && /MR-00001/.test(await page.textContent('#mrList')));
+  await page.click('[data-mrrow="MR-00001"]'); await page.waitForSelector('#mrSave');
+  ok('a receiver with lots can\'t be deleted', !(await page.$('#mrDelete')));
+  await page.fill('#mrPos', 'P-1, P-2'); await page.click('#mrSave'); await page.waitForTimeout(150);
+  const sr = calls.filter((c) => c.fn === 'saveMatReceiver')[0];
+  ok('edit a material receiver', sr && sr.args[0].id === 'MR-00001' && sr.args[0].pos === 'P-1, P-2' && sr.args[0].department === 'Plastics', sr && sr.args);
+  await page.waitForSelector('[data-mrrow="MR-00002"]'); await page.click('[data-mrrow="MR-00002"]'); await page.waitForSelector('#mrDelete');
+  ok('an empty one can be deleted', !!(await page.$('#mrDelete')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

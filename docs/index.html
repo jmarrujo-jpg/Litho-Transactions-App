@@ -237,7 +237,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.95.0</span>
+      <span class="version" id="appVersion">v1.96.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -348,6 +348,10 @@
     "📦 Materials": "📦 Materiales",
     "📦 Receive Materials": "📦 Recibir materiales",
     "Materials": "Materiales",
+    "Plastics Department": "Departamento de Plásticos",
+    "Metals Materials": "Materiales de Metales",
+    "Litho Materials": "Materiales de Litho",
+    "Plastics Materials": "Materiales de Plásticos",
     "Receive Materials": "Recibir materiales",
     "Find a lot": "Buscar un lote",
     "➕ Add Lots": "➕ Agregar lotes",
@@ -1989,7 +1993,8 @@
       case 'run': openProductionReview(); return;
       case 'slitterSession': openSlitterKind(slitKind); return;  // session -> its Slitters / Scrolls home
       case 'database': renderLanding(); return;            // database home -> landing
-      case 'materials': renderLanding(); return;
+      case 'materialsHome': renderLanding(); return;
+      case 'materials': if (mtDeptFrom === 'home') renderLanding(); else openMaterialsHome(); return;   // a department -> the department tiles
       case 'materialsReceive': case 'materialsEdit': case 'materialsList': case 'materialsLoad': case 'materialsLoads': openMaterials(); return;   // the scanned lots are kept
       case 'materialsItem': if (mtItemFrom === 'receive') openMtReceive(); else if (mtItemFrom === 'add') openMtAdd(); else openMtList(); return;
       case 'materialsSetup': openMtList(); return;
@@ -2009,6 +2014,7 @@
       '<button class="btn secondary" id="tileSearch" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🔎&nbsp; Search for a Ticket</button>' +
       '<button class="btn" id="tileLitho" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Litho Department</button>' +
       '<button class="btn" id="tileProduction" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Metals Department</button>' +
+      '<button class="btn" id="tilePlastics" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">Plastics Department</button>' +
       (FULL_APP ? '<button class="btn secondary" id="tileReports" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📊&nbsp; Reports</button>' : '') +
       '<button class="btn secondary" id="tileCount" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">🧮&nbsp; Litho Steel Count</button>' +
       '<button class="btn secondary" id="tileMaterials" style="width:100%;padding:22px;font-size:18px;margin-bottom:12px">📦&nbsp; Materials</button>' +
@@ -2020,7 +2026,9 @@
     document.getElementById('tileLitho').onclick = openLithoDept;
     document.getElementById('tileProduction').onclick = openProduction;
     document.getElementById('tileCount').onclick = openSteelCount;
-    document.getElementById('tileMaterials').onclick = openMaterials;
+    document.getElementById('tileMaterials').onclick = openMaterialsHome;
+    // Plastics is materials only for now: its tile opens the Plastics materials screen.
+    document.getElementById('tilePlastics').onclick = function () { openMtDept('Plastics', 'home'); };
     document.getElementById('tileLang').onclick = function () { setLang(LANG === 'es' ? 'en' : 'es'); renderLanding(); };
     if (FULL_APP) {
       document.getElementById('tileReports').onclick = openReports;
@@ -2047,13 +2055,15 @@
   function mtSaveDepts() {
     if (mtDeptsSaved) return;
     var blank = (mtData.items || []).some(function (i) { return i.id && i.deptSet === false; }) ||
-      (mtData.machineInfo || []).some(function (m) { return m.deptSet === false; });
+      (mtData.machineInfo || []).some(function (m) { return m.deptSet === false; }) ||
+      (mtData.typeInfo || []).some(function (t) { return t.saved === false; });
     if (!blank) return;
     mtDeptsSaved = true;
     runMutation('fillDepartments', [lastOperator, newOpId()], function (r) {
       if (!r || !mtData) return;
       (mtData.items || []).forEach(function (i) { if (i.id) i.deptSet = true; });
       (mtData.machineInfo || []).forEach(function (m) { m.deptSet = true; });
+      (mtData.typeInfo || []).forEach(function (t) { t.saved = true; });
     }, function () { mtDeptsSaved = false; });
   }
   // Anything without a department (an older server) gets the default: litho types/machines Litho, else Metals.
@@ -2063,11 +2073,17 @@
     (mtData.machineInfo || []).forEach(function (m) { if (!m.department) m.department = /litho/i.test(m.name) ? 'Litho' : 'Metals'; });
     (mtData.materials || []).forEach(function (m) { if (!m.department) m.department = byItem[(m.type + '|' + m.product).toLowerCase()] || mtDeptOfType(m.type); });
   }
-  function mtDeptOfType(t) { return /litho/i.test(t || '') ? 'Litho' : 'Metals'; }
+  function mtTypeInfo() { return (mtData && mtData.typeInfo) || []; }
+  function mtDeptOfType(t) {
+    var lc = String(t || '').toLowerCase(), x = mtTypeInfo().filter(function (i) { return i.name.toLowerCase() === lc; })[0];
+    return x ? x.department : /litho/i.test(t || '') ? 'Litho' : 'Metals';
+  }
   function mtInDept(x) { return mtDept === 'all' || (x.department || mtDeptOfType(x.type)) === mtDept; }
   // The types used in a department: the usual ones, plus any on its materials.
   function mtDeptTypes(d) {
-    var base = d === 'Metals' ? MT_TYPES : d === 'Litho' ? ['Litho Coating', 'Litho Ink'] : [];
+    var info = mtTypeInfo();
+    var base = info.length ? info.filter(function (t) { return t.active && t.department === d; }).map(function (t) { return t.name; })
+      : d === 'Metals' ? MT_TYPES : d === 'Litho' ? ['Litho Coating', 'Litho Ink'] : [];
     var more = mtItems().filter(function (i) { return i.department === d; }).map(function (i) { return i.type; })
       .concat(((mtData && mtData.materials) || []).filter(function (m) { return m.department === d; }).map(function (m) { return m.type; }));
     return mtUniq(base.concat(more));
@@ -2102,8 +2118,9 @@
   var mtAdd = null;               // the Add Lots form (type / material / supplier / place stay for the next lot)
 
   function mtNewRcv() {
-    return { date: todayStr(), supplier: '', receiver: '', po: '', comments: '', operator: lastOperator,
-      type: 'Compound', product: '', container: MT_CONTAINERS.Compound, location: '', expiration: '', lines: [] };
+    var type = mtDept === 'all' ? 'Compound' : (mtDeptTypes(mtDept)[0] || '');
+    return { dept: mtDept, date: todayStr(), supplier: '', receiver: '', po: '', comments: '', operator: lastOperator,
+      type: type, product: '', container: mtContainerFor(type), location: '', expiration: '', lines: [] };
   }
   function mtLoad(after) {
     google.script.run.withSuccessHandler(function (res) {
@@ -2121,7 +2138,10 @@
   function mtById(id) { return ((mtData && mtData.materials) || []).filter(function (m) { return m.id === id; })[0]; }
   // Every type: the four, plus any added on the Material List.
   function mtTypes() { return (mtData && mtData.types && mtData.types.length) ? mtData.types : MT_TYPES; }
-  function mtContainerFor(type) { return ((mtData && mtData.containerFor) || MT_CONTAINERS)[type] || ''; }
+  function mtContainerFor(type) {
+    var x = mtTypeInfo().filter(function (i) { return i.name === type; })[0];
+    return (x && x.container) || ((mtData && mtData.containerFor) || MT_CONTAINERS)[type] || '';
+  }
   function mtItems() { return (mtData && mtData.items) || []; }
   function mtNum(n) { return (Math.round(Number(n) * 10) / 10).toLocaleString('en-US'); }
   // What's in stock of one material: containers, the amount (containers × per container) and LOW
@@ -2178,10 +2198,32 @@
     return ' <span class="sub">' + esc(L('Expires ' + ymd, 'Vence ' + ymd)) + '</span>';
   }
 
-  function openMaterials() {
-    state.view = 'materials';
+  // Materials opens on one big tile per department; each tile is that department's screen (load,
+  // receive, add lots, its lots and machines). The Plastics Department tile on the landing screen
+  // goes straight to Plastics.
+  var mtDeptFrom = '';            // 'home' when the department was opened from the landing screen
+  var MT_DEPT_ICONS = { Metals: '🔩', Litho: '🎨', Plastics: '🧴' };
+  function openMaterialsHome() {
+    state.view = 'materialsHome';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Materials');
+    mtDept = 'all'; mtType = 'all'; mtDeptFrom = '';
+    var view = document.getElementById('view');
+    view.innerHTML = '<div class="sub" style="margin-bottom:10px">' + esc(L('Pick your department.', 'Elija su departamento.')) + '</div>' +
+      ['Metals', 'Litho', 'Plastics'].map(function (d) {
+        return '<button class="btn" data-mthome="' + d + '" style="width:100%;padding:26px;font-size:20px;margin-bottom:12px">' + MT_DEPT_ICONS[d] + '&nbsp; ' + esc(mtDeptName(d)) + '</button>';
+      }).join('');
+    Array.prototype.forEach.call(view.querySelectorAll('[data-mthome]'), function (b) {
+      b.onclick = function () { openMtDept(b.getAttribute('data-mthome')); };
+    });
+  }
+  function openMtDept(d, from) { mtDept = d; mtType = 'all'; mtDeptFrom = from || ''; openMaterials(); }
+  // A department's materials screen (every sub-screen comes back here).
+  function openMaterials() {
+    if (mtDept === 'all') { openMaterialsHome(); return; }
+    state.view = 'materials';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept(mtDept + ' Materials');
     renderMaterials();
     mtLoad(function () { if (state.view === 'materials') renderMtList(); });
   }
@@ -2191,10 +2233,10 @@
     var pending = mtRcv && mtRcv.lines.length;
     var chips = mtTypeChipsHtml();
     view.innerHTML =
-      '<button class="btn" id="mtAddBtn" style="width:100%;padding:24px;font-size:20px;margin-bottom:8px">➕&nbsp; Add Lots</button>' +
+      '<button class="btn" id="mtLoadBtn" style="width:100%;padding:24px;font-size:20px;margin-bottom:8px">🏭&nbsp; Load Materials</button>' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-bottom:8px">' +
         '<button class="btn secondary" id="mtReceiveBtn" style="margin:0;padding:14px;font-size:16px">📦&nbsp; Receive Materials</button>' +
-        '<button class="btn secondary" id="mtLoadBtn" style="margin:0;padding:14px;font-size:16px">🏭&nbsp; Load Materials</button>' +
+        '<button class="btn secondary" id="mtAddBtn" style="margin:0;padding:14px;font-size:16px">➕&nbsp; Add Lots</button>' +
         '<button class="btn secondary" id="mtListBtn" style="margin:0;padding:14px;font-size:16px">📋&nbsp; Material List</button>' +
         '<button class="btn secondary" id="mtHistBtn" style="margin:0;padding:14px;font-size:16px">🕘&nbsp; Load History</button>' +
       '</div>' +
@@ -2204,12 +2246,11 @@
       (pending ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;color:var(--warn);font-weight:600">' +
         esc(L(mtRcv.lines.length + ' scanned lot' + (mtRcv.lines.length === 1 ? ' is' : 's are') + ' not saved yet. Tap Receive Materials to finish.',
           mtRcv.lines.length + ' lote(s) escaneado(s) sin guardar. Toque Recibir materiales para terminar.')) + '</div>' : '') +
-      '<div id="mtLowBox"></div><div id="mtStartBox"></div>' +
+      '<div id="mtOnBox"></div><div id="mtLowBox"></div><div id="mtStartBox"></div>' +
       '<div class="row" style="align-items:flex-end;gap:8px;margin-top:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Find a lot</label><input id="mtSearch" placeholder="lot #, product, supplier, receiver, PO, location…" autocomplete="off" value="' + esc(mtSearch) + '"></div>' +
         '<button class="btn secondary" id="mtReload" style="margin:0">↻</button>' +
       '</div>' +
-      '<div style="margin-top:8px">' + mtDeptChipsHtml('mtDeptChips') + '</div>' +
       '<div class="tabbar" id="mtTypeChips" style="margin-top:8px">' + chips + '</div>' +
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="mtShowUsed"' + (mtShowUsed ? ' checked' : '') + '> Show used-up lots too</label>' +
       '<div class="sub" id="mtCount" style="margin-bottom:8px"></div>' +
@@ -2224,7 +2265,6 @@
     document.getElementById('mtReload').onclick = function () { mtData = null; document.getElementById('mtList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materials') renderMtList(); }); };
     document.getElementById('mtShowUsed').onchange = function () { mtShowUsed = this.checked; renderMtList(); };
     bindMtTypeChips();
-    bindMtDeptChips('mtDeptChips', renderMaterials);
     if (mtData) renderMtList();
   }
   function mtChipTypes() { return mtDept === 'all' ? mtTypes() : mtDeptTypes(mtDept); }
@@ -2245,6 +2285,25 @@
     });
   }
 
+  // The department's machines and the lots loaded on each now. Tap one to load it.
+  function renderMtOn() {
+    var box = document.getElementById('mtOnBox');
+    if (!box || mtDept === 'all') return;
+    var names = mtDeptMachines(mtDept);
+    if (!names.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="card"><h3 style="margin:0 0 6px">' + esc(L('On the machines now', 'En las máquinas ahora')) + '</h3>' + names.map(function (n) {
+      var on = mtData.materials.filter(function (m) { return m.status === 'Loaded' && String(m.location).toLowerCase() === n.toLowerCase(); });
+      return '<div class="queue-item" data-mton="' + esc(n) + '" style="padding:8px 0;cursor:pointer;align-items:center"><div style="min-width:0;flex:1"><b>' + esc(n) + '</b>' +
+        '<div class="sub">' + (on.length ? esc(on.map(function (m) { return m.lot + ' · ' + m.product + (m.position ? ' (' + m.position + ')' : ''); }).join(', ')) : esc(L('Nothing loaded', 'Nada cargado'))) + '</div></div>' +
+        '<span class="sub">' + esc(L('Load ›', 'Cargar ›')) + '</span></div>';
+    }).join('') + '</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mton]'), function (r) {
+      r.onclick = function () {
+        if (!mtLd || !mtLd.lines.length) { mtLd = mtNewLoad(); mtLd.machine = r.getAttribute('data-mton'); }
+        openMtLoad();
+      };
+    });
+  }
   // Materials at or under their reorder point, on top of the Materials screen.
   function renderMtLow() {
     var box = document.getElementById('mtLowBox');
@@ -2283,6 +2342,7 @@
   function renderMtList() {
     var box = document.getElementById('mtList'), cnt = document.getElementById('mtCount');
     if (!box || !mtData) return;
+    renderMtOn();
     renderMtLow();
     renderMtStart();
     var chipBox = document.getElementById('mtTypeChips');
@@ -2332,10 +2392,11 @@
     state.view = 'materialsReceive';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Receive Materials');
-    if (!mtRcv) mtRcv = mtNewRcv();
+    if (mtRcv && mtRcv.dept !== mtDept && !mtRcv.lines.length) mtRcv = null;   // another department's empty delivery
+    if (!mtRcv && mtData) mtRcv = mtNewRcv();
     if (!mtData) {
       document.getElementById('view').innerHTML = '<div id="mtLoadMsg"><div class="loading">Loading&hellip;</div></div>';
-      mtLoad(function () { if (state.view === 'materialsReceive') renderMtReceive(); });
+      mtLoad(function () { if (state.view === 'materialsReceive') { if (!mtRcv) mtRcv = mtNewRcv(); renderMtReceive(); } });
       return;
     }
     renderMtReceive();
@@ -2354,10 +2415,13 @@
 
   function renderMtReceive() {
     var r = mtRcv, view = document.getElementById('view');
-    var rcvOpts = '<option value="">New receiver (made when you save)</option>' + ((mtData && mtData.receivers) || []).slice(0, 200).map(function (x) {
+    // Material receivers only (not steel), this department's or ones without a department.
+    var rcvOpts = '<option value="">New receiver (made when you save)</option>' + ((mtData && mtData.receivers) || []).filter(function (x) {
+      return !x.old && (!x.department || mtDept === 'all' || x.department === mtDept) || x.id === r.receiver;
+    }).slice(0, 200).map(function (x) {
       return '<option value="' + esc(x.id) + '"' + (r.receiver === x.id ? ' selected' : '') + '>' + esc(x.name || x.id) + '</option>';
     }).join('');
-    var typeBtns = mtTypes().map(function (t) { return '<button data-mtrt="' + esc(t) + '"' + (r.type === t ? ' class="active"' : '') + '>' + esc(t) + '</button>'; }).join('');
+    var typeBtns = mtUniq((mtDept === 'all' ? mtTypes() : mtDeptTypes(mtDept)).concat(r.type ? [r.type] : [])).map(function (t) { return '<button data-mtrt="' + esc(t) + '"' + (r.type === t ? ' class="active"' : '') + '>' + esc(t) + '</button>'; }).join('');
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">1. The delivery</h3>' +
@@ -2541,7 +2605,7 @@
         if (btn) { btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…'); }
         var op = String(r.operator || '').trim();
         if (op) lastOperator = op;
-        var info = { date: r.date, supplier: r.supplier, receiver: r.receiver, po: r.po, comments: r.comments };
+        var info = { date: r.date, supplier: r.supplier, receiver: r.receiver, po: r.po, comments: r.comments, department: mtDept !== 'all' ? mtDept : '' };
         var lines = r.lines.map(function (l) { return { lot: l.lot, type: l.type, product: l.product, qty: l.qty, expiration: l.expiration, container: l.container, location: l.location }; });
         runMutation('receiveMaterials', [info, lines, op, newOpId()], function (res) {
           mtRcv = null; mtData = null;
@@ -2566,13 +2630,14 @@
   var MT_ADD_BY = 'Jonathan';     // "Added by" starts with this name
   function mtNewAdd() {
     var d = mtDept !== 'all' ? mtDept : 'Metals';
-    return { dept: d, type: d === 'Metals' ? 'Compound' : d === 'Litho' ? 'Litho Coating' : '', product: '', supplier: '', location: '', onMachine: false, position: '', operator: MT_ADD_BY,
+    return { dept: d, type: d === 'Metals' ? 'Compound' : d === 'Litho' ? 'Litho Coating' : (mtDeptTypes(d)[0] || ''), product: '', supplier: '', location: '', onMachine: false, position: '', operator: MT_ADD_BY,
       lot: '', expiration: '', qty: 1, lines: [], added: [], extra: { type: [], supplier: [], place: [], machine: [] }, open: '' };
   }
   function openMtAdd() {
     state.view = 'materialsAdd';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Add Lots');
+    if (mtAdd && mtDept !== 'all' && mtAdd.dept !== mtDept && !mtAdd.lines.length) mtAdd = null;   // another department's
     if (!mtAdd) mtAdd = mtNewAdd();
     if (!mtData) {
       document.getElementById('view').innerHTML = '<div id="mtLoadMsg"><div class="loading">Loading&hellip;</div></div>';
@@ -2613,10 +2678,11 @@
     var h = function (num, t) { return '<h3 style="margin:16px 0 8px">' + num + '. ' + esc(t) + '</h3>'; };
     view.innerHTML =
       '<div class="card">' +
+        (mtDept !== 'all' && a.dept === mtDept ? '' :
         '<h3 style="margin:0 0 8px">' + esc(L('Department', 'Departamento')) + '</h3>' +
           '<div style="display:flex;flex-wrap:wrap;gap:8px">' + MT_DEPTS.map(function (d) {
             return '<button class="btn ' + (a.dept === d ? '' : 'secondary') + '" style="margin:0;padding:12px 16px;font-size:16px" data-madept="' + d + '">' + esc(mtDeptName(d)) + '</button>';
-          }).join('') + '</div>' +
+          }).join('') + '</div>') +
         h(1, L('Type', 'Tipo')) + (types.length ? mtBigBtns('data-matype', types, a.type) : '<div class="sub">' + esc(L('No types yet — add one.', 'Todavía no hay tipos — agregue uno.')) + '</div>') +
           mtNewBox('type', L('New type', 'Tipo nuevo'), L('e.g. Resin', 'p. ej. Resina')) +
         h(2, L('Material', 'Material')) +
@@ -2839,6 +2905,7 @@
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">1. Which machine</h3>' +
+        (mtDept !== 'all' && mtDeptMachines(mtDept).length ? '<div id="mlMachBtns" style="margin-bottom:8px">' + mtBigBtns('data-mlm', mtDeptMachines(mtDept), d.machine) + '</div>' : '') +
         '<div class="row">' +
           '<div class="field"><label>Machine</label><input id="mlMachine" list="mlMachineList" autocomplete="off" placeholder="type it, or pick one used before" value="' + esc(d.machine) + '"><datalist id="mlMachineList">' + mtOptions((mtData && mtData.machines) || []) + '</datalist></div>' +
           operatorFieldHtml('mlOperator', 'Loaded by', d.operator) +
@@ -2860,7 +2927,16 @@
     function bind(id, key) { var el = document.getElementById(id); el.oninput = el.onchange = function () { d[key] = el.value; }; }
     bind('mlOperator', 'operator'); bind('mlNotes', 'notes');
     var mEl = document.getElementById('mlMachine');
-    mEl.oninput = mEl.onchange = function () { if (d.machine === mEl.value) return; d.machine = mEl.value; renderMlPos(); renderMtLoadLines(); };
+    var markMach = function () {
+      Array.prototype.forEach.call(view.querySelectorAll('[data-mlm]'), function (b) {
+        var on = b.getAttribute('data-mlm').toLowerCase() === String(d.machine).trim().toLowerCase();
+        b.classList.toggle('secondary', !on);
+      });
+    };
+    mEl.oninput = mEl.onchange = function () { if (d.machine === mEl.value) return; d.machine = mEl.value; markMach(); renderMlPos(); renderMtLoadLines(); };
+    Array.prototype.forEach.call(view.querySelectorAll('[data-mlm]'), function (b) {
+      b.onclick = function () { d.machine = mEl.value = b.getAttribute('data-mlm'); markMach(); renderMlPos(); renderMtLoadLines(); document.getElementById('mlScan').focus(); };
+    });
     renderMlPos();
     var scan = document.getElementById('mlScan');
     scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); mtAddLoad(scan.value); } };
@@ -3066,7 +3142,7 @@
         '<div class="field" style="flex:1;margin:0"><label>Find a material</label><input id="mtItemSearch" placeholder="name, type, supplier, part #…" autocomplete="off" value="' + esc(mtItemSearch) + '"></div>' +
         '<button class="btn secondary" id="mtItemReload" style="margin:0">↻</button>' +
       '</div>' +
-      '<div style="margin-top:8px">' + mtDeptChipsHtml('mtListDept') + '</div>' +
+      (mtDept === 'all' ? '<div style="margin-top:8px">' + mtDeptChipsHtml('mtListDept') + '</div>' : '') +   // in a department: just its materials
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin:8px 0"><input type="checkbox" id="mtShowInactive"' + (mtShowInactive ? ' checked' : '') + '> Show inactive materials too</label>' +
       '<div id="mtItemList"><div class="loading">Loading&hellip;</div></div>';
     document.getElementById('mtItemAdd').onclick = function () { openMtItem(null, 'list', mtDept !== 'all' ? { department: mtDept } : null); };
@@ -3255,7 +3331,8 @@
     var dept = v.department || (mtDept !== 'all' ? mtDept : mtDeptOfType(v.type));
     if (isNew && v.type && !v.container) v.container = mtContainerFor(v.type);
     var n = it ? mtLotCount(it) : 0;
-    var typeOpts = '<option value="">— pick one —</option>' + mtTypes().map(function (t) { return '<option value="' + esc(t) + '"' + (t === v.type ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
+    var typeList = mtUniq((mtDept === 'all' ? mtTypes() : mtDeptTypes(mtDept)).concat(v.type ? [v.type] : []));   // in a department: its types
+    var typeOpts = '<option value="">— pick one —</option>' + typeList.map(function (t) { return '<option value="' + esc(t) + '"' + (t === v.type ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
       '<option value="__new">➕ New type…</option>';
     view.innerHTML =
       '<div class="card">' +
@@ -3293,6 +3370,7 @@
       if (t === '__new') { newType.focus(); return; }
       // The type's usual container, unless one was typed in.
       if (!cont.value.trim() || cont.value === mtContainerFor(lastType)) cont.value = mtContainerFor(t);
+      if (t && mtTypeInfo().some(function (x) { return x.name === t; })) document.getElementById('mtItDept').value = mtDeptOfType(t);   // a type brings its department
       lastType = t;
     };
     function back() { if (mtItemFrom === 'receive') openMtReceive(); else if (mtItemFrom === 'add') openMtAdd(); else openMtList(); }
@@ -3416,7 +3494,7 @@
   // A spreadsheet-like admin view of the underlying tabs, read/written BY COLUMN NAME so it matches
   // exactly what the app uses (even where the sheet header has stray duplicate columns). Two tables:
   // Steel Tickets and the Transactions audit log. Tap a row to edit its fields and save back.
-  var DB_TABLE_TABS = [['master', 'Master sheet'], ['materials', 'Materials Master File'], ['receivers', 'Receivers'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
+  var DB_TABLE_TABS = [['master', 'Master sheet'], ['materials', 'Materials Master File'], ['mreceivers', 'Material Receivers'], ['receivers', 'Steel Receivers'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
   var DB_ROW_CAP = 60;                          // rows rendered at once (search to narrow beyond this)
   var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
@@ -3445,10 +3523,10 @@
     var chips = DB_TABLE_TABS.map(function (c) {
       return '<button data-dbt="' + c[0] + '"' + (dbTable === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
-    var isMaster = dbTable === 'master', isRcv = dbTable === 'receivers', isMf = dbTable === 'materials';
+    var isMaster = dbTable === 'master', isRcv = dbTable === 'receivers', isMf = dbTable === 'materials', isMr = dbTable === 'mreceivers';
     view.innerHTML =
       '<div class="tabbar dbtabs">' + chips + '</div>' +
-      (isMaster ? '<div id="msBox"></div>' : isRcv ? '<div id="rcvBox"></div>' : isMf ? '<div id="mfBox"></div>' :
+      (isMaster ? '<div id="msBox"></div>' : isRcv ? '<div id="rcvBox"></div>' : isMf ? '<div id="mfBox"></div>' : isMr ? '<div id="mrBox"></div>' :
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Search this table</label><input id="dbSearch" placeholder="filter any column…" autocomplete="off" value="' + esc(dbSearch) + '"></div>' +
         '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
@@ -3482,6 +3560,7 @@
     if (isMaster) { renderMasterSheet(); return; }
     if (isRcv) { renderReceivers(); return; }
     if (isMf) { renderMasterFile(); return; }
+    if (isMr) { renderMatReceivers(); return; }
     var s = document.getElementById('dbSearch');
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
@@ -3492,7 +3571,10 @@
   // Every material lot, the Material List and the Machines in one place, each with its Department
   // (Metals / Plastics / Litho). Search, filter by department, tap a row to fix it. A lot's department
   // is its material's (set on the Material List).
-  var mfTab = 'lots', mfDept = 'all', mfSearch = '', mfEdit = null;   // mfEdit: { kind: 'lot'|'item'|'machine', key } ('' key = new)
+  // Set up in order: Machines, Types (each with its department), Material List (a material has a
+  // type, so its department comes with it), then Lots.
+  var mfTab = 'lots', mfDept = 'all', mfSearch = '', mfEdit = null;   // mfEdit: { kind: 'lot'|'item'|'machine'|'type', key } ('' key = new)
+  var MF_KIND = { lots: 'lot', items: 'item', machines: 'machine', types: 'type' };
   var MF_CAP = 200;
   function mfRows() {
     var term = String(mfSearch || '').trim().toLowerCase();
@@ -3500,6 +3582,7 @@
     var has = function (vals) { return !term || vals.some(function (v) { return String(v == null ? '' : v).toLowerCase().indexOf(term) !== -1; }); };
     if (mfTab === 'items') return mtItems().filter(function (i) { return inD(i.department) && has([i.name, i.type, i.supplier, i.partNo, i.location, i.notes, i.id]); });
     if (mfTab === 'machines') return ((mtData && mtData.machineInfo) || []).filter(function (m) { return inD(m.department) && has([m.name, m.positions.join(' '), m.materials.join(' ')]); });
+    if (mfTab === 'types') return mtTypeInfo().filter(function (t) { return inD(t.department) && has([t.name, t.container]); });
     return ((mtData && mtData.materials) || []).filter(function (m) {
       return inD(m.department) && has([m.id, m.lot, m.product, m.type, m.supplier, m.location, m.position, m.status, m.receiver, m.po, m.comments, m.expiration]);
     });
@@ -3508,10 +3591,10 @@
     var box = document.getElementById('mfBox');
     if (!box) return;
     if (!mtData) { box.innerHTML = '<div class="loading">Loading the materials&hellip;</div>'; mtLoad(function () { if (state.view === 'database') renderMasterFile(); }); return; }
-    var counts = { lots: mtData.materials.length, items: mtItems().length, machines: (mtData.machineInfo || []).length };
-    var tabs = [['lots', 'Lots'], ['items', 'Material List'], ['machines', 'Machines']];
+    var counts = { lots: mtData.materials.length, items: mtItems().length, machines: (mtData.machineInfo || []).length, types: mtTypeInfo().length };
+    var tabs = [['machines', '1. Machines'], ['types', '2. Types'], ['items', '3. Material List'], ['lots', '4. Lots']];
     var rows = mfRows();
-    var addBtn = mfTab === 'items' ? '+ Add material' : mfTab === 'machines' ? '+ Add machine' : '';
+    var addBtn = mfTab === 'items' ? '+ Add material' : mfTab === 'machines' ? '+ Add machine' : mfTab === 'types' ? '+ Add type' : '';
     var html = '<div class="tabbar">' + tabs.map(function (t) { return '<button data-mft="' + t[0] + '"' + (mfTab === t[0] ? ' class="active"' : '') + '>' + t[1] + ' (' + counts[t[0]] + ')</button>'; }).join('') + '</div>' +
       '<div class="tabbar" style="margin-top:6px">' + ['all'].concat(MT_DEPTS).map(function (d) { return '<button data-mfd="' + d + '"' + (mfDept === d ? ' class="active"' : '') + '>' + esc(d === 'all' ? 'All departments' : d) + '</button>'; }).join('') + '</div>' +
       '<div class="row" style="align-items:flex-end;gap:8px;margin-top:8px">' +
@@ -3535,9 +3618,9 @@
     };
     document.getElementById('mfReload').onclick = function () { mtData = null; mfEdit = null; renderMasterFile(); };
     var add = document.getElementById('mfAdd');
-    if (add) add.onclick = function () { mfEdit = { kind: mfTab === 'items' ? 'item' : 'machine', key: '' }; renderMasterFile(); };
+    if (add) add.onclick = function () { mfEdit = { kind: MF_KIND[mfTab], key: '' }; renderMasterFile(); };
     Array.prototype.forEach.call(box.querySelectorAll('[data-mfrow]'), function (tr) {
-      tr.onclick = function () { mfEdit = { kind: mfTab === 'items' ? 'item' : mfTab === 'machines' ? 'machine' : 'lot', key: tr.getAttribute('data-mfrow') }; renderMasterFile(); };
+      tr.onclick = function () { mfEdit = { kind: MF_KIND[mfTab], key: tr.getAttribute('data-mfrow') }; renderMasterFile(); };
     });
     renderMfEditor();
   }
@@ -3549,6 +3632,12 @@
         ['Supplier', function (i) { return i.supplier; }], ['Container', function (i) { return i.container; }], ['Unit', function (i) { return i.unit; }],
         ['Per container', function (i) { return i.perContainer; }], ['Reorder at', function (i) { return i.reorder; }], ['In stock', function (i) { return mtStock(i).text; }],
         ['Kept at', function (i) { return i.location; }], ['Part #', function (i) { return i.partNo; }], ['Active', function (i) { return i.active ? 'Yes' : 'No'; }], ['ID', function (i) { return i.id; }]];
+    } else if (mfTab === 'types') {
+      key = function (t) { return t.name; };
+      var uses = function (t, list, f) { return list.filter(function (x) { return String(f(x)).toLowerCase() === t.name.toLowerCase(); }).length; };
+      cols = [['Dept', function (t) { return t.department; }], ['Type', function (t) { return '<b>' + esc(t.name) + '</b>'; }, true], ['Container', function (t) { return t.container; }],
+        ['Materials', function (t) { return uses(t, mtItems(), function (i) { return i.type; }); }], ['Lots', function (t) { return uses(t, mtData.materials, function (m) { return m.type; }); }],
+        ['Active', function (t) { return t.active ? 'Yes' : 'No'; }]];
     } else if (mfTab === 'machines') {
       key = function (m) { return m.name; };
       cols = [['Dept', function (m) { return m.department; }], ['Machine', function (m) { return '<b>' + esc(m.name) + '</b>'; }, true], ['Positions', function (m) { return m.positions.join(', '); }],
@@ -3601,11 +3690,19 @@
       var v = it || { name: '', type: '', supplier: '', container: '', unit: '', perContainer: '', reorder: '', location: '', partNo: '', notes: '', active: true, department: mfDept !== 'all' ? mfDept : 'Metals' };
       html = '<h3 style="margin-top:0">' + (it ? esc(it.name) + ' <span class="sub">' + esc(it.id || 'not saved on the list yet') + '</span>' : 'Add material') + '</h3>' + grid +
         mfInput('mfName', 'Material name', v.name) + mfInput('mfDept', 'Department', v.department, { options: MT_DEPTS }) +
-        mfInput('mfType', 'Type', v.type, { list: mtTypes().concat(['Litho Coating', 'Litho Ink']) }) + mfInput('mfSup', 'Supplier', v.supplier, { list: suppliers }) +
+        mfInput('mfType', 'Type', v.type, { options: [''].concat(mtUniq((v.type ? [v.type] : []).concat(mfDept !== 'all' ? mtDeptTypes(mfDept) : [], mtTypes()))) }) + mfInput('mfSup', 'Supplier', v.supplier, { list: suppliers }) +
         mfInput('mfCont', 'Container', v.container, { list: mtContainerList() }) + mfInput('mfUnit', 'Unit', v.unit, { list: ['lbs', 'ea', 'btl', 'gal'] }) +
         mfInput('mfPer', 'Amount in one container', v.perContainer) + mfInput('mfReorder', 'Reorder point', v.reorder) +
         mfInput('mfLoc', 'Kept at', v.location, { list: mtPlaces() }) + mfInput('mfPart', 'Part #', v.partNo) + mfInput('mfNotes', 'Notes', v.notes) +
         mfInput('mfActive', 'Active', v.active ? 'Yes' : 'No', { options: ['Yes', 'No'] }) + '</div>';
+    } else if (e.kind === 'type') {
+      var ty = e.key ? mtTypeInfo().filter(function (x) { return x.name === e.key; })[0] : null;
+      var tv = ty || { name: '', department: mfDept !== 'all' ? mfDept : 'Metals', container: '', active: true };
+      html = '<h3 style="margin-top:0">' + (ty ? esc(ty.name) : 'Add type') + '</h3>' + grid +
+        mfInput('mfName', 'Type name', tv.name) + mfInput('mfDept', 'Department', tv.department, { options: MT_DEPTS }) +
+        mfInput('mfCont', 'Usual container', tv.container, { list: mtContainerList() }) +
+        mfInput('mfActive', 'Active', tv.active ? 'Yes' : 'No', { options: ['Yes', 'No'] }) + '</div>' +
+        '<div class="sub" style="margin-bottom:8px">Materials of this type are in this department. ' + (ty ? 'Renaming a type renames it on its materials and lots.' : '') + '</div>';
     } else {
       var mc = e.key ? ((mtData.machineInfo || []).filter(function (x) { return x.name === e.key; })[0]) : null;
       var w = mc || { name: '', positions: [], materials: [], active: true, department: mfDept !== 'all' ? mfDept : 'Metals' };
@@ -3620,7 +3717,11 @@
       (e.kind === 'lot' ? '<button class="btn danger" id="mfDelete">Delete lot</button>' : '') +
       '<button class="btn success" id="mfSave" style="flex:1">Save</button></div></div>';
     document.getElementById('mfCancel').onclick = function () { mfEdit = null; renderMasterFile(); };
-    var done = function (msg) { return function () { toast(msg); mtData = null; mfEdit = null; renderMasterFile(); }; };
+    var done = function (msg) { return function (res) { toast(res && res.duplicate ? msg.replace(/ saved$/, ' is already on the list') : msg); mtData = null; mfEdit = null; renderMasterFile(); }; };
+    var typeEl = document.getElementById('mfType'), deptEl = document.getElementById('mfDept');
+    if (e.kind === 'item' && typeEl && deptEl) typeEl.onchange = function () {   // a type brings its department
+      if (mtTypeInfo().some(function (x) { return x.name === typeEl.value; })) deptEl.value = mtDeptOfType(typeEl.value);
+    };
     var fail = function (btn) { return function (err) { btn.disabled = false; btn.textContent = 'Save'; showModal({ title: 'Not saved', message: err.message, confirmText: 'OK' }); }; };
     var save = document.getElementById('mfSave');
     save.onclick = function () {
@@ -3646,6 +3747,14 @@
         var go = function () { save.disabled = true; save.textContent = 'Saving…'; runMutation('saveMaterialItem', [out, lastOperator, newOpId()], done(out.name + ' saved'), fail(save)); };
         if (it && n && (out.name !== it.name || out.type !== it.type)) showConfirm('Rename ' + it.name + '?', 'The ' + n + ' lot(s) received as ' + it.name + ' are renamed too.', go, 'Rename');
         else go();
+      } else if (e.kind === 'type') {
+        var tname = mfVal('mfName');
+        if (!tname) { toast('Enter the type name'); return; }
+        var to = { name: tname, oldName: e.key || '', department: mfVal('mfDept'), container: mfVal('mfCont'), active: mfVal('mfActive') !== 'No' };
+        var used = e.key ? mtItems().filter(function (i) { return i.type === e.key; }).length + mtData.materials.filter(function (m) { return m.type === e.key; }).length : 0;
+        var goT = function () { save.disabled = true; save.textContent = 'Saving…'; runMutation('saveMaterialType', [to, lastOperator, newOpId()], done(tname + ' saved'), fail(save)); };
+        if (used && tname !== e.key) showConfirm('Rename ' + e.key + '?', 'The ' + used + ' material(s) and lot(s) of this type are renamed too.', goT, 'Rename');
+        else goT();
       } else {
         var name = mfVal('mfName');
         if (!name) { toast('Enter the machine name'); return; }
@@ -3659,6 +3768,89 @@
       var m = mtById(e.key);
       showConfirm('Delete lot ' + m.lot + '?', 'Only for a lot saved by mistake. This can\'t be undone.', function () {
         runMutation('deleteMaterial', [m.id, lastOperator, newOpId()], done('Lot ' + m.lot + ' deleted'), function (err) { showModal({ title: 'Not deleted', message: err.message, confirmText: 'OK' }); });
+      }, 'Delete', 'danger');
+    };
+  }
+
+  // ---------------- Database: Material Receivers ----------------
+  // Deliveries of materials, numbered MR-00001 — kept apart from the steel Receivers. Receiving
+  // materials makes one; here you can add one, fix one, or delete an empty one.
+  var mrData = null, mrSel = '', mrSearch = '';
+  function renderMatReceivers() {
+    var box = document.getElementById('mrBox');
+    if (!box) return;
+    if (!mrData) {
+      box.innerHTML = '<div class="loading">Loading the material receivers&hellip;</div>';
+      google.script.run.withSuccessHandler(function (res) {
+        mrData = res || { receivers: [], suppliers: [] };
+        if (state.view === 'database' && dbTable === 'mreceivers') renderMatReceivers();
+      }).withFailureHandler(function (err) {
+        box.innerHTML = '<div class="card empty">Could not load the material receivers: ' + esc(err.message) + '</div>';
+      }).getMatReceivers();
+      return;
+    }
+    box.innerHTML =
+      '<div class="sub" style="margin-bottom:8px">Material deliveries only. Steel receivers are on the Steel Receivers tab.</div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Search</label><input id="mrSearch" autocomplete="off" placeholder="MR #, supplier, PO…" value="' + esc(mrSearch) + '"></div>' +
+        '<button class="btn" id="mrNew" style="margin:0">+ New receiver</button>' +
+        '<button class="btn secondary" id="mrReload" style="margin:0">↻</button>' +
+      '</div>' +
+      '<div id="mrEditor"></div><div id="mrList" style="margin-top:8px"></div>';
+    var s = document.getElementById('mrSearch');
+    s.oninput = function () { mrSearch = s.value; renderMrList(); };
+    document.getElementById('mrNew').onclick = function () { mrSel = 'new'; renderMrEditor(); };
+    document.getElementById('mrReload').onclick = function () { mrData = null; mrSel = ''; renderMatReceivers(); };
+    renderMrEditor();
+    renderMrList();
+  }
+  function renderMrList() {
+    var box = document.getElementById('mrList');
+    if (!box) return;
+    var term = String(mrSearch || '').trim().toLowerCase();
+    var rows = mrData.receivers.filter(function (r) {
+      return !term || [r.id, r.name, r.supplier, r.pos, r.department, r.notes].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
+    });
+    if (!rows.length) { box.innerHTML = '<div class="card empty">' + (mrData.receivers.length ? 'No receivers match.' : 'No material receivers yet. Receiving materials makes one.') + '</div>'; return; }
+    box.innerHTML = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table><thead><tr><th>Receiver</th><th>Date</th><th>Supplier</th><th>POs</th><th>Dept</th><th>Lots</th><th>Notes</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr data-mrrow="' + esc(r.id) + '" style="cursor:pointer' + (mrSel === r.id ? ';background:#eef2ff' : '') + '"><td><b>' + esc(r.id) + '</b></td><td>' + esc(r.date) + '</td><td>' + esc(r.supplier) + '</td><td>' + esc(r.pos) +
+          '</td><td>' + esc(r.department) + '</td><td>' + r.lotCount + '</td><td>' + esc(r.notes) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mrrow]'), function (tr) {
+      tr.onclick = function () { mrSel = tr.getAttribute('data-mrrow'); renderMrEditor(); renderMrList(); };
+    });
+  }
+  function renderMrEditor() {
+    var box = document.getElementById('mrEditor');
+    if (!box) return;
+    var r = mrSel && mrSel !== 'new' ? mrData.receivers.filter(function (x) { return x.id === mrSel; })[0] : null;
+    if (!mrSel || (mrSel !== 'new' && !r)) { mrSel = ''; box.innerHTML = ''; return; }
+    var v = r || { date: todayStr(), supplier: '', pos: '', department: '', link: '', notes: '', lotCount: 0 };
+    box.innerHTML = '<div class="card" style="margin-top:10px;border:2px solid var(--accent)">' +
+      '<h3 style="margin-top:0">' + (r ? esc(r.name) + ' <span class="sub">' + r.lotCount + ' lot(s)</span>' : 'New material receiver') + '</h3>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px">' +
+        mfInput('mrDate', 'Date received', v.date, { type: 'date' }) + mfInput('mrSup', 'Supplier', v.supplier, { list: mrData.suppliers || [] }) +
+        mfInput('mrPos', 'PO #', v.pos) + mfInput('mrDept', 'Department', v.department, { options: [''].concat(MT_DEPTS) }) +
+        mfInput('mrLink', 'Drive link (optional)', v.link) + mfInput('mrNotes', 'Notes', v.notes) +
+      '</div>' +
+      '<div class="row" style="gap:8px"><button class="btn secondary" id="mrCancel">Cancel</button>' +
+      (r && !r.lotCount ? '<button class="btn danger" id="mrDelete">Delete</button>' : '') +
+      '<button class="btn success" id="mrSave" style="flex:1">Save</button></div></div>';
+    var after = function (msg) { return function () { toast(msg); mrData = null; mtData = null; mrSel = ''; renderMatReceivers(); }; };
+    document.getElementById('mrCancel').onclick = function () { mrSel = ''; renderMrEditor(); renderMrList(); };
+    var save = document.getElementById('mrSave');
+    save.onclick = function () {
+      var out = { id: r ? r.id : '', date: mfVal('mrDate'), supplier: mfVal('mrSup'), pos: mfVal('mrPos'), department: mfVal('mrDept'), link: mfVal('mrLink'), notes: mfVal('mrNotes') };
+      if (!out.supplier) { toast('Enter the supplier'); return; }
+      save.disabled = true; save.textContent = 'Saving…';
+      runMutation('saveMatReceiver', [out, lastOperator, newOpId()], function (res) { after(((res && res.id) || 'Receiver') + ' saved')(); },
+        function (err) { save.disabled = false; save.textContent = 'Save'; showModal({ title: 'Not saved', message: err.message, confirmText: 'OK' }); });
+    };
+    var del = document.getElementById('mrDelete');
+    if (del) del.onclick = function () {
+      showConfirm('Delete ' + r.id + '?', 'Only for a receiver made by mistake. Its number is not used again.', function () {
+        runMutation('deleteMatReceiver', [r.id, lastOperator, newOpId()], after(r.id + ' deleted'), function (err) { showModal({ title: 'Not deleted', message: err.message, confirmText: 'OK' }); });
       }, 'Delete', 'danger');
     };
   }

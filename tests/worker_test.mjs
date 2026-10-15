@@ -1299,14 +1299,15 @@ await concurrency(envBase, 'in-worker lock');
 // 37. Materials: receive a delivery by lot (one new receiver), edit, delete; retry-safe
 { const f = fresh();
   const none = await call('getMaterials', []);
-  ok('no Materials tab yet: empty list, the four types', none.ok && none.result.materials.length === 0 && none.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease', none);
+  ok('no Materials tab yet: empty list, the four types', none.ok && none.result.materials.length === 0 && none.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease,Litho Coating,Litho Ink' && none.result.typeInfo[6].department === 'Litho', none);
   const noSup = await call('receiveMaterials', [{ supplier: '' }, [{ lot: 'A1', type: 'Compound', product: 'WB-2100' }], 'Jo', 'op-37-x']);
   ok('needs a supplier', !noSup.ok && /supplier/.test(noSup.error), noSup);
   const noProd = await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: '' }], 'Jo', 'op-37-y']);
   ok('needs a product name', !noProd.ok && /product/.test(noProd.error), noProd);
   const badExp = await call('receiveMaterials', [{ supplier: 'DSM' }, [{ lot: 'A1', type: 'Compound', product: 'P', expiration: 'soon' }], 'Jo', 'op-37-z']);
   ok('a bad expiration date is refused', !badExp.ok && /expiration date must be a date/.test(badExp.error), badExp);
-  ok('nothing saved by the refused tries', !f.rows(SID, 'Receivers').length);
+  ok('nothing saved by the refused tries', !f.rows(SID, 'Material Receivers').length);
+  ok('the steel Receivers tab is never touched', !f.rows(SID, 'Receivers').length);
   // Lost answer: the rows land but the reply fails; the retry must not add them twice.
   f.faults.push({ match: (r) => r.kind === 'append' && r.decoded.includes('Materials'), mode: 'after', status: 503, times: 1 });
   const lots = [{ lot: '24A0915', type: 'compound', product: 'WB-2100', qty: 1, expiration: '2027-04-01', container: 'Pail' },
@@ -1318,18 +1319,19 @@ await concurrency(envBase, 'in-worker lock');
   const m = f.rows(SID, 'Materials');
   ok('the same lot scanned twice is one row with 2 containers', a.ok && m.length === 3 && m[0]['Lot #'] === '24A0915' && String(m[0]['Qty Received']) === '2' && String(m[0]['Qty On Hand']) === '2', m);
   ok('type spelled the app\'s way; expiration and container kept', m[0]['Type'] === 'Compound' && m[0]['Expiration Date'] === '2027-04-01' && m[0]['Container'] === 'Pail' && m[2]['Type'] === 'Powder', m[0]);
-  ok('one new receiver for the delivery, every lot on it with the PO', f.rows(SID, 'Receivers').length === 1 && m.every((r) => r['Receiver'] === 'R-00001' && r['PO #'] === '7731-DC' && r['Supplier'] === 'DSM'), [f.rows(SID, 'Receivers'), m]);
-  ok('the receiver notes say what came on it', /Materials: Compound, Powder/.test(f.rows(SID, 'Receivers')[0]['Notes']), f.rows(SID, 'Receivers')[0]);
-  ok('the retry adds nothing (no second receiver or lots)', a2.ok && a2.result.duplicate && f.rows(SID, 'Receivers').length === 1 && f.rows(SID, 'Materials').length === 3, a2);
+  ok('one new receiver for the delivery, every lot on it with the PO', f.rows(SID, 'Material Receivers').length === 1 && m.every((r) => r['Receiver'] === 'MR-00001' && r['PO #'] === '7731-DC' && r['Supplier'] === 'DSM'), [f.rows(SID, 'Material Receivers'), m]);
+  ok('the receiver notes say what came on it', /^Compound, Powder$/.test(f.rows(SID, 'Material Receivers')[0]['Notes']), f.rows(SID, 'Material Receivers')[0]);
+  ok('a material receiver, not a steel one', !f.rows(SID, 'Receivers').length && f.rows(SID, 'Material Receivers')[0]['Supplier'] === 'DSM', f.rows(SID, 'Material Receivers'));
+  ok('the retry adds nothing (no second receiver or lots)', a2.ok && a2.result.duplicate && f.rows(SID, 'Material Receivers').length === 1 && f.rows(SID, 'Materials').length === 3, a2);
   ok('numbered M-00001.. and In Stock', m.map((r) => r['Material ID']).join() === 'M-00001,M-00002,M-00003' && m.every((r) => r['Status'] === 'In Stock'), m.map((r) => r['Material ID']));
   // A second delivery onto an existing receiver
-  const b = await call('receiveMaterials', [{ supplier: 'Elektrisola', receiver: 'r-00001' }, [{ lot: 'K88213', type: 'Copper', product: '0.059 wire', container: 'Gaylord' }], 'Jo', 'op-37-b']);
-  ok('onto a picked receiver: no new receiver', b.ok && f.rows(SID, 'Receivers').length === 1 && f.rows(SID, 'Materials')[3]['Receiver'] === 'R-00001', b);
+  const b = await call('receiveMaterials', [{ supplier: 'Elektrisola', receiver: 'mr-00001' }, [{ lot: 'K88213', type: 'Copper', product: '0.059 wire', container: 'Gaylord' }], 'Jo', 'op-37-b']);
+  ok('onto a picked receiver: no new receiver', b.ok && f.rows(SID, 'Material Receivers').length === 1 && f.rows(SID, 'Materials')[3]['Receiver'] === 'MR-00001', b);
   const bad = await call('receiveMaterials', [{ supplier: 'X', receiver: 'R-09999' }, [{ lot: 'Z', type: 'Ink', product: 'Blue' }], 'Jo', 'op-37-c']);
   ok('an unknown receiver is refused', !bad.ok && /R-09999 not found/.test(bad.error), bad);
   const g = await call('getMaterials', []);
   ok('product names offered per type', g.ok && g.result.products.Compound.join() === 'WB-2100' && g.result.products.Powder.join() === 'Stripe 9' && g.result.products.Copper.join() === '0.059 wire', g.result && g.result.products);
-  ok('newest lot first; receivers listed to pick', g.result.materials[0].id === 'M-00004' && g.result.receivers[0].id === 'R-00001' && g.result.containers.join() === 'Gaylord,Pail', g.result);
+  ok('newest lot first; receivers listed to pick', g.result.materials[0].id === 'M-00004' && g.result.receivers[0].id === 'MR-00001' && g.result.containers.join() === 'Gaylord,Pail', g.result);
   // Edit
   const e1 = await call('updateMaterial', ['M-00001', { 'Qty On Hand': 0 }, 'Jo', 'op-37-e']);
   ok('on hand 0 -> Used', e1.ok && f.rows(SID, 'Materials')[0]['Status'] === 'Used' && String(f.rows(SID, 'Materials')[0]['Qty On Hand']) === '0', f.rows(SID, 'Materials')[0]);
@@ -1338,15 +1340,17 @@ await concurrency(envBase, 'in-worker lock');
   const e3 = await call('updateMaterial', ['M-00001', { 'Qty On Hand': -1 }, 'Jo', 'op-37-g']);
   ok('a negative count is refused', !e3.ok && /whole number/.test(e3.error), e3);
   // The receiver can't be deleted while lots are on it; its list counts them
-  const rc = await call('getReceivers', []);
-  ok('the Receivers list counts material lots', rc.ok && rc.result.receivers[0].materialCount === 4, rc.result && rc.result.receivers);
-  const dr = await call('deleteReceiver', ['R-00001', '', 'op-37-h']);
-  ok('a receiver with lots on it can\'t be deleted', !dr.ok && /material lot/.test(dr.error), dr);
+  const rc = await call('getMatReceivers', []);
+  ok('the Material Receivers list counts lots', rc.ok && rc.result.receivers[0].id === 'MR-00001' && rc.result.receivers[0].lotCount === 4 && /--DSM--MR-00001$/.test(rc.result.receivers[0].name), rc.result && rc.result.receivers);
+  const dr = await call('deleteMatReceiver', ['MR-00001', '', 'op-37-h']);
+  ok('a receiver with lots on it can\'t be deleted', !dr.ok && /4 lot/.test(dr.error), dr);
+  const sr = await call('getReceivers', []);
+  ok('the steel Receivers list does not show it', sr.ok && !sr.result.receivers.length, sr.result && sr.result.receivers);
   // Delete a lot
   const d = await call('deleteMaterial', ['M-00002', 'Jo', 'op-37-i']);
   const d2 = await call('deleteMaterial', ['M-00002', 'Jo', 'op-37-i']);
   ok('delete a lot; again is harmless', d.ok && d2.ok && d2.result.alreadyGone && f.rows(SID, 'Materials').map((r) => r['Material ID']).join() === 'M-00001,M-00003,M-00004', f.rows(SID, 'Materials').map((r) => r['Material ID']));
-  const n = await call('receiveMaterials', [{ supplier: 'DSM', receiver: 'R-00001' }, [{ lot: 'NEW', type: 'Ink', product: 'Blue' }], 'Jo', 'op-37-j']);
+  const n = await call('receiveMaterials', [{ supplier: 'DSM', receiver: 'MR-00001' }, [{ lot: 'NEW', type: 'Ink', product: 'Blue' }], 'Jo', 'op-37-j']);
   ok('a deleted M-number is not reused', n.ok && n.result.saved[0].id === 'M-00005', n.result && n.result.saved);
 }
 
@@ -1369,7 +1373,7 @@ await concurrency(envBase, 'in-worker lock');
   const nt = await call('saveMaterialItem', [{ name: 'Acetone', type: 'Solvent', container: 'Drum' }, 'Jo', 'op-38-f']);
   const nt2 = await call('saveMaterialItem', [{ name: 'MEK', type: 'solvent' }, 'Jo', 'op-38-g']);
   const g2 = await call('getMaterials', []);
-  ok('a new type can be added, and is matched after that', nt.ok && nt2.ok && nt2.result.item.type === 'Solvent' && g2.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease,Solvent', g2.result && g2.result.types);
+  ok('a new type can be added, and is matched after that', nt.ok && nt2.ok && nt2.result.item.type === 'Solvent' && g2.result.types.join() === 'Compound,Powder,Copper,Ink,Make-Up,Solution/Grease,Litho Coating,Litho Ink,Solvent', g2.result && g2.result.types);
   // Rename WB-2100: its lots follow
   const rn = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'WB-2100 Gold', type: 'Compound', supplier: 'DSM' }, 'Jo', 'op-38-h']);
   const lots = f.rows(SID, 'Materials');
@@ -1654,6 +1658,56 @@ await concurrency(envBase, 'in-worker lock');
   ok('again: nothing to fill, a set department is kept', b.ok && b.result.items === 0 && b.result.machines === 0 && f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Press 13')[0]['Department'] === 'Plastics', b);
   const g = await call('getMaterials', []);
   ok('rows now say their department is written', g.result.machineInfo.every((x) => x.deptSet) && g.result.items.every((x) => x.deptSet), g.result.machineInfo);
+}
+
+// 47. Material Types (with departments) and Material Receivers kept apart from steel
+{ const f = fresh();
+  const p = await call('saveMaterialType', [{ name: 'Resin', department: 'plastics', container: 'Bag' }, 'Jo', 'op-47-a']);
+  const p2 = await call('saveMaterialType', [{ name: 'resin', department: 'Plastics' }, 'Jo', 'op-47-b']);
+  ok('add a Plastics type; adding it again hands it back', p.ok && p.result.created && p2.ok && p2.result.duplicate && f.rows(SID, 'Material Types').length === 1
+    && f.rows(SID, 'Material Types')[0]['Department'] === 'Plastics' && f.rows(SID, 'Material Types')[0]['Container'] === 'Bag', f.rows(SID, 'Material Types'));
+  const it = await call('saveMaterialItem', [{ name: 'PP 5520', type: 'resin' }, 'Jo', 'op-47-c']);
+  ok('a material of that type takes its department', it.ok && it.result.item.type === 'Resin' && f.rows(SID, 'Material List')[0]['Department'] === 'Plastics', f.rows(SID, 'Material List'));
+  const r = await call('receiveMaterials', [{ supplier: 'Braskem', po: 'P-1', department: 'Plastics' }, [{ lot: 'BR1', type: 'Resin', product: 'PP 5520', qty: 3 }], 'Jo', 'op-47-d']);
+  const mr = f.rows(SID, 'Material Receivers');
+  ok('receiving makes MR-00001 for Plastics; steel Receivers untouched', r.ok && r.result.receiver === 'MR-00001' && mr.length === 1 && mr[0]['Department'] === 'Plastics'
+    && !f.rows(SID, 'Receivers').length, { r, mr });
+  const g = await call('getMaterials', []);
+  ok('the lot is Plastics; the type list says so', g.result.materials[0].department === 'Plastics' && g.result.typeInfo.filter((x) => x.name === 'Resin')[0].department === 'Plastics'
+    && g.result.typeInfo.filter((x) => x.name === 'Compound')[0].saved === false, g.result.typeInfo);
+  // fillDepartments puts the usual types (and any in use) on the Material Types tab
+  const fd = await call('fillDepartments', ['Jo', 'op-47-e']);
+  const tt = f.rows(SID, 'Material Types');
+  ok('fillDepartments adds the missing types once', fd.ok && fd.result.types === 8 && tt.length === 9 && tt.filter((x) => x['Type'] === 'Litho Ink')[0]['Department'] === 'Litho'
+    && tt.filter((x) => x['Type'] === 'Compound')[0]['Container'] === 'Barrel', tt);
+  const fd2 = await call('fillDepartments', ['Jo', 'op-47-f']);
+  ok('again adds nothing', fd2.ok && fd2.result.types === 0 && f.rows(SID, 'Material Types').length === 9, fd2);
+  // Rename a type: the material and the lot follow
+  const rn = await call('saveMaterialType', [{ oldName: 'Resin', name: 'Pellets', department: 'Plastics' }, 'Jo', 'op-47-g']);
+  ok('renaming a type renames it on the material and its lots', rn.ok && rn.result.renamed === 2 && f.rows(SID, 'Material List')[0]['Type'] === 'Pellets'
+    && f.rows(SID, 'Materials')[0]['Type'] === 'Pellets' && f.rows(SID, 'Material Types').filter((x) => x['Type'] === 'Resin').length === 0, rn);
+  const cl = await call('saveMaterialType', [{ oldName: 'Pellets', name: 'Compound' }, 'Jo', 'op-47-h']);
+  ok('renaming onto another type is refused', !cl.ok && /already on the Types list/.test(cl.error), cl);
+  const off = await call('saveMaterialType', [{ oldName: 'Make-Up', name: 'Make-Up', department: 'Metals', active: false }, 'Jo', 'op-47-i']);
+  const g2 = await call('getMaterials', []);
+  ok('an inactive type is left off the list to pick from', off.ok && g2.result.types.indexOf('Make-Up') === -1 && g2.result.typeInfo.some((x) => x.name === 'Make-Up' && !x.active), g2.result.types);
+  // Material receivers: edit, list, delete only when empty
+  const nr = await call('saveMatReceiver', [{ supplier: 'dow', date: '2026-10-14', department: 'Plastics' }, 'Jo', 'op-47-j']);
+  const nr2 = await call('saveMatReceiver', [{ supplier: 'dow', date: '2026-10-14', department: 'Plastics' }, 'Jo', 'op-47-j']);
+  ok('a new material receiver is MR-00002; the retry hands it back', nr.ok && nr.result.id === 'MR-00002' && nr2.result.duplicate && f.rows(SID, 'Material Receivers').length === 2, nr2);
+  const ed = await call('saveMatReceiver', [{ id: 'MR-00002', supplier: 'Dow', date: '2026-10-15', pos: 'P-9', department: 'Plastics' }, 'Jo', 'op-47-k']);
+  ok('edit a material receiver', ed.ok && f.rows(SID, 'Material Receivers')[1]['POs'] === 'P-9' && f.rows(SID, 'Material Receivers')[1]['File Name'] === '26-10-15--DOW--MR-00002', f.rows(SID, 'Material Receivers')[1]);
+  const lst = await call('getMatReceivers', []);
+  ok('listed newest first with lot counts', lst.ok && lst.result.receivers.map((x) => x.id + ':' + x.lotCount).join() === 'MR-00002:0,MR-00001:1', lst.result);
+  const dl = await call('deleteMatReceiver', ['MR-00002', 'Jo', 'op-47-l']);
+  ok('an empty material receiver can be deleted', dl.ok && f.rows(SID, 'Material Receivers').length === 1, dl);
+  // A lot still on an old steel receiver keeps it, and it's shown (not offered for new deliveries)
+  await call('saveReceiver', [{ supplier: 'DSM', date: '2026-01-02' }, 'Jo', 'op-47-m']);
+  const up = await call('updateMaterial', ['M-00001', { 'Receiver': 'R-00001' }, 'Jo', 'op-47-n']);
+  const g3 = await call('getMaterials', []);
+  ok('an old R- receiver still works on a lot and is listed as old', up.ok && g3.result.receivers.some((x) => x.id === 'R-00001' && x.old) && g3.result.receivers.some((x) => x.id === 'MR-00001' && !x.old), g3.result.receivers);
+  const bad = await call('updateMaterial', ['M-00001', { 'Receiver': 'MR-00077' }, 'Jo', 'op-47-o']);
+  ok('an unknown material receiver is refused', !bad.ok && /MR-00077 not found/.test(bad.error), bad);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
