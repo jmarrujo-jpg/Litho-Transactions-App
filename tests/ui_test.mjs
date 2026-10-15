@@ -2055,7 +2055,7 @@ const base = {
   ok('Save says how many lots and containers', /Save 2 lots \(4 containers\)/.test(await page.textContent('#maSave')));
   await page.click('#maSave'); await page.waitForTimeout(200);
   let ad = calls.filter((c) => c.fn === 'addMaterialLots');
-  ok('Save sends the section and every lot at once, no receiver or PO', ad.length === 1 && JSON.stringify(ad[0].args[0]) === JSON.stringify({ type: 'Compound', product: '9000-63-1', supplier: 'DOW', location: 'Pallet Area', onMachine: false, position: '' })
+  ok('Save sends the section and every lot at once, no receiver or PO', ad.length === 1 && JSON.stringify(ad[0].args[0]) === JSON.stringify({ type: 'Compound', product: '9000-63-1', supplier: 'DOW', location: 'Pallet Area', onMachine: false, position: '', department: 'Metals' })
     && JSON.stringify(ad[0].args[1].map((l) => [l.lot, l.qty])) === JSON.stringify([['B-3', 1], ['B-2', 2], ['B-1', 2]]) && ad[0].args[2] === 'Jonathan', ad[0] && ad[0].args);
   ok('after Save: the list is empty, the section stays, ready to scan', !(await page.$('[data-maq]')) && /Saved \(3\)/.test(await page.textContent('#maAdded'))
     && (await page.getAttribute('[data-maplace="Pallet Area"]', 'class')) === 'btn ' && (await page.evaluate(() => document.activeElement.id)) === 'maLot');
@@ -2153,6 +2153,58 @@ const base = {
   // Review Jobs shows the passes and an Open button
   await page.evaluate(() => { openJob('JOB-000020'); }); await page.waitForSelector('#jrContinue');
   ok('Review shows each pass with its lots, no Add Coating', /Pass 1:.*SIZE/.test(await page.textContent('#view')) && /ZZ-9/.test(await page.textContent('#view')) && !(await page.$('#jrAddCoatingBtn')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 49. Departments + the Materials Master File: Materials filters by department; Add Lots for
+// Plastics shows only its types and machines; the Master File edits lots, materials and machines.
+{ const mats = {
+    materials: [
+      { id: 'M-1', lot: 'C-1', type: 'Compound', product: '9307G', supplier: 'DOW', status: 'In Stock', qtyOnHand: 2, qtyReceived: 2, location: 'Cage', department: 'Metals' },
+      { id: 'M-2', lot: 'R-1', type: 'Resin', product: 'PP Resin 1', supplier: 'LYB', status: 'Loaded', qtyOnHand: 1, qtyReceived: 1, location: 'Injection 1', department: 'Plastics' },
+      { id: 'M-3', lot: 'CS1', type: 'Litho Coating', product: 'Clear Size', supplier: 'PPG', status: 'In Stock', qtyOnHand: 1, qtyReceived: 1, location: 'Ink Room', department: 'Litho' }],
+    items: [{ id: 'MI-1', name: '9307G', type: 'Compound', active: true, department: 'Metals' }, { id: 'MI-2', name: 'PP Resin 1', type: 'Resin', active: true, department: 'Plastics' },
+      { id: 'MI-3', name: 'Clear Size', type: 'Litho Coating', active: true, department: 'Litho' }],
+    types: ['Compound', 'Powder', 'Copper', 'Ink', 'Make-Up', 'Solution/Grease', 'Resin', 'Litho Coating'], departments: ['Metals', 'Plastics', 'Litho'],
+    machines: ['Press 13', 'Injection 1', 'Litho Line 3'],
+    machineInfo: [{ name: 'Press 13', positions: [], materials: [], active: true, department: 'Metals' }, { name: 'Injection 1', positions: ['Hopper'], materials: [], active: true, department: 'Plastics' },
+      { name: 'Litho Line 3', positions: [], materials: [], active: true, department: 'Litho' }],
+    suppliers: ['DOW', 'LYB', 'PPG'], containers: [], receivers: [], products: {} };
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getMaterials: () => R(mats),
+    updateMaterial: (a) => R({ ok: true }), saveMachine: (a) => R({ ok: true }), saveMaterialItem: (a) => R({ ok: true, item: a[0] }),
+  }));
+  await page.evaluate(() => openMaterials()); await page.waitForSelector('[data-mtopen]');
+  await page.click('[data-mtdept="Plastics"]'); await page.waitForTimeout(100);
+  let ids = await page.$$eval('[data-mtopen]', (els) => els.map((e) => e.getAttribute('data-mtopen')));
+  ok('Materials: the Plastics button shows only Plastics lots', ids.join() === 'M-2', ids);
+  await page.click('#mtAddBtn'); await page.waitForSelector('[data-madept]');
+  ok('Add Lots starts on Plastics, with its types and machines only', (await page.getAttribute('[data-madept="Plastics"]', 'class')) === 'btn ' && (await page.$$('[data-matype]')).length === 1
+    && !!(await page.$('[data-matype="Resin"]')) && (await page.$$eval('[data-mamach]', (els) => els.map((e) => e.getAttribute('data-mamach')))).join() === 'Injection 1');
+  await page.click('[data-madept="Litho"]'); await page.waitForTimeout(80);
+  ok('switching to Litho shows the litho types', !!(await page.$('[data-matype="Litho Coating"]')) && !!(await page.$('[data-maprod="Clear Size"]')) && !(await page.$('[data-matype="Resin"]')));
+  // the Master File
+  await page.evaluate(() => { dbTable = 'materials'; openDatabase(); }); await page.waitForSelector('[data-mfrow]');
+  ok('Master File: every lot with its department', (await page.$$('[data-mfrow]')).length === 3 && /Plastics/.test(await page.textContent('#mfBox')));
+  await page.click('[data-mfd="Litho"]'); await page.waitForTimeout(80);
+  ok('…filtered by department', (await page.$$('[data-mfrow]')).length === 1);
+  await page.click('[data-mfd="all"]'); await page.click('[data-mfrow="M-1"]'); await page.waitForSelector('#mfSave');
+  await page.fill('#mfLoc', 'Pallet Area'); await page.fill('#mfOnHand', '1'); await page.click('#mfSave'); await page.waitForTimeout(150);
+  const um = calls.filter((c) => c.fn === 'updateMaterial')[0];
+  ok('editing a lot sends only what changed', um && um.args[0] === 'M-1' && JSON.stringify(um.args[1]) === '{"Qty On Hand":"1","Location":"Pallet Area"}', um && um.args);
+  await page.waitForSelector('[data-mft="machines"]'); await page.click('[data-mft="machines"]'); await page.waitForSelector('[data-mfrow="Injection 1"]');
+  ok('Machines: what is loaded on each', /R-1/.test(await page.textContent('#mfBox')));
+  await page.click('[data-mfrow="Injection 1"]'); await page.waitForSelector('#mfSave');
+  await page.fill('#mfName', 'Injection 01'); await page.fill('#mfPos', 'Hopper, Side'); await page.click('#mfSave'); await page.waitForTimeout(150);
+  const sm = calls.filter((c) => c.fn === 'saveMachine')[0];
+  ok('renaming a machine sends the old name', sm && sm.args[0].oldName === 'Injection 1' && sm.args[0].name === 'Injection 01' && sm.args[0].positions === 'Hopper, Side' && sm.args[0].department === 'Plastics', sm && sm.args);
+  await page.waitForSelector('[data-mft="items"]'); await page.click('[data-mft="items"]'); await page.waitForSelector('#mfAdd');
+  await page.click('[data-mfd="Plastics"]'); await page.click('#mfAdd'); await page.waitForSelector('#mfSave');
+  ok('a new material starts in the department picked', (await page.$eval('#mfDept', (e) => e.value)) === 'Plastics');
+  await page.fill('#mfName', 'Blue MB'); await page.fill('#mfType', 'Masterbatch'); await page.click('#mfSave'); await page.waitForTimeout(150);
+  const si = calls.filter((c) => c.fn === 'saveMaterialItem')[0];
+  ok('…and saves with it', si && si.args[0].name === 'Blue MB' && si.args[0].type === 'Masterbatch' && si.args[0].department === 'Plastics' && si.args[0].id === '', si && si.args);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

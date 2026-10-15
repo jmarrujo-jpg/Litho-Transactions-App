@@ -1612,5 +1612,28 @@ await concurrency(envBase, 'in-worker lock');
   ok('a pass not started can be taken off', dr.ok && dr.result.passes.length === 3 && dr.result.currentPass === 2, dr);
 }
 
+// 45. Departments: Metals / Plastics / Litho on materials and machines; lots take their material's;
+// machines can be added, edited and renamed (lots on it move with it).
+{ const f = fresh();
+  await call('setupMaterials', [{ items: [{ name: '9307G', type: 'Compound' }], machines: [{ name: 'Press 13' }] }, 'Jo', 'op-45-a']);
+  const pi = await call('saveMaterialItem', [{ name: 'PP Resin 1', type: 'Resin', department: 'plastics' }, 'Jo', 'op-45-b']);
+  ok('a Plastics material', pi.ok && pi.result.item.department === 'Plastics' && f.rows(SID, 'Material List').some((r) => r['Name'] === 'PP Resin 1' && r['Department'] === 'Plastics'), pi);
+  const m1 = await call('saveMachine', [{ name: 'Injection 1', positions: ['Hopper'], department: 'Plastics' }, 'Jo', 'op-45-c']);
+  const m1b = await call('saveMachine', [{ name: 'Injection 1', department: 'Plastics' }, 'Jo', 'op-45-c']);
+  ok('a Plastics machine (adding it again hands it back)', m1.ok && m1.result.created && m1b.ok && m1b.result.duplicate && f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Injection 1').length === 1, { m1, m1b });
+  await call('addMaterialLots', [{ type: 'Resin', product: 'PP Resin 1', location: 'Injection 1', onMachine: true }, [{ lot: 'R1' }], 'Jo', 'op-45-d']);
+  await call('addMaterialLots', [{ type: 'Masterbatch', product: 'Blue MB', location: 'Bin 4', department: 'Plastics' }, [{ lot: 'B1' }], 'Jo', 'op-45-e']);
+  const g = await call('getMaterials', []);
+  const dep = (lot) => g.result.materials.filter((m) => m.lot === lot)[0].department;
+  ok('lots take their material\'s department; a new material from Add Lots keeps the one picked', g.ok && dep('R1') === 'Plastics' && dep('B1') === 'Plastics'
+    && g.result.items.filter((i) => i.name === '9307G')[0].department === 'Metals' && g.result.departments.join() === 'Metals,Plastics,Litho', g.result.items);
+  ok('machines carry a department', g.result.machineInfo.filter((m) => m.name === 'Injection 1')[0].department === 'Plastics' && g.result.machineInfo.filter((m) => m.name === 'Press 13')[0].department === 'Metals', g.result.machineInfo);
+  const rn = await call('saveMachine', [{ oldName: 'Injection 1', name: 'Injection 01', positions: 'Hopper, Side', department: 'Plastics' }, 'Jo', 'op-45-f']);
+  ok('renaming a machine moves its lots', rn.ok && rn.result.movedLots === 1 && f.rows(SID, 'Materials').filter((r) => r['Lot #'] === 'R1')[0]['Location'] === 'Injection 01'
+    && f.rows(SID, 'Machines').some((r) => r['Machine'] === 'Injection 01' && r['Positions'] === 'Hopper, Side'), { rn, m: f.rows(SID, 'Machines') });
+  const cl = await call('saveMachine', [{ oldName: 'Injection 01', name: 'Press 13' }, 'Jo', 'op-45-g']);
+  ok('renaming onto another machine is refused', !cl.ok && /already on the Machines list/.test(cl.error), cl);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

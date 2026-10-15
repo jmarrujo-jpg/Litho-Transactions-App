@@ -66,12 +66,17 @@ const MATERIAL_LIST = 'Material List';
 // Unit / Per Container / Reorder Point: "a barrel of 9307G is 549 lbs; reorder at 1,098 lbs" — the
 // screens show stock as containers and amount, and LOW at or under the reorder point.
 const MATERIAL_LIST_HEADERS = ['Item ID', 'Name', 'Type', 'Supplier', 'Container', 'Part #', 'Notes', 'Active',
-  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location'];
+  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location', 'Department'];
+// Which department a material (or machine) belongs to. Set on the Material List / Machines; a lot
+// takes its material's. Not set: litho types and machines are Litho, everything else Metals.
+const DEPARTMENTS = ['Metals', 'Plastics', 'Litho'];
+function deptIn(v) { return DEPARTMENTS.filter((d) => d.toLowerCase() === String(v || '').trim().toLowerCase())[0] || ''; }
+function deptOf(type, set) { return deptIn(set) || (/litho/i.test(String(type || '')) ? 'Litho' : 'Metals'); }
 const MATERIAL_CONTAINERS = { Compound: 'Barrel', Powder: 'Unit', Copper: 'Gaylord', Ink: 'Cartridge', 'Make-Up': 'Cartridge', 'Solution/Grease': 'Cartridge' };
 // Machines that materials are loaded onto: their spots (Barrel 1, Barrel 2) and the materials they
 // normally run (loading anything else gets a warning, not a block). A machine typed on Load is added.
 const MACHINES = 'Machines';
-const MACHINE_HEADERS = ['Machine', 'Positions', 'Materials', 'Active', 'Created At', 'Last Updated At'];
+const MACHINE_HEADERS = ['Machine', 'Positions', 'Materials', 'Active', 'Created At', 'Last Updated At', 'Department'];
 // Loading: scanning a lot onto a machine takes containers out of inventory (Qty On Hand; 0 = Used).
 // Every lot loaded is its own line here — when, which machine, how many containers, who — so a day's
 // production can be traced to the lots that went into it and when each was changed.
@@ -184,7 +189,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'jobpass-93', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'matdept-94', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -356,6 +361,8 @@ async function handle(fn, args, env) {
       return addMaterialLot(sheets, args[0], args[1], args[2]);
     case 'removeStartLots': // (operator, opId) delete the setup's START lots (up to 20 per call)
       return removeStartLots(sheets, args[0], args[1]);
+    case 'saveMachine': // ({name, oldName?, positions[], materials[], department, active}, operator, opId) add or edit a machine
+      return saveMachine(sheets, args[0], args[1], args[2]);
     case 'deleteMaterialItem': // (itemId, operator, opId) only while no lot was received under it
       return deleteMaterialItem(sheets, args[0], args[1], args[2]);
     case 'keepReceiverNumbers': // (operator, opId) write every receiver's kept mill / ticket numbers up to date
@@ -2786,7 +2793,10 @@ async function getMaterials(sheets) {
   let loads = [];
   try { loads = (await readObjects(sheets, MATERIAL_LOADS)).rows.map(loadOut).filter((l) => l.id); } catch (e) { loads = []; }
   const machineInfo = await readMachines(sheets);
-  return { materials, items, types, machines: machineList(loads, machineInfo), machineInfo, containerFor: MATERIAL_CONTAINERS, products, suppliers: Object.keys(sup).sort(), containers: Object.keys(cont).sort(), receivers };
+  const deptByItem = {};
+  items.forEach((i) => { deptByItem[itemKey(i.name, i.type)] = i.department; });
+  materials.forEach((m) => { m.department = deptByItem[itemKey(m.product, m.type)] || deptOf(m.type); });
+  return { materials, items, types, departments: DEPARTMENTS, machines: machineList(loads, machineInfo), machineInfo, containerFor: MATERIAL_CONTAINERS, products, suppliers: Object.keys(sup).sort(), containers: Object.keys(cont).sort(), receivers };
 }
 
 // Save one delivery: every scanned lot gets a row, all on the same receiver and PO. With no receiver
@@ -2926,7 +2936,7 @@ function itemOut(o) {
     active: String(o['Active'] || '').trim().toLowerCase() !== 'no', createdAt: String(o['Created At'] || ''),
     createdBy: String(o['Created By'] || ''), updatedAt: String(o['Last Updated At'] || ''),
     unit: String(o['Unit'] || '').trim(), perContainer: optNum(o['Per Container']), reorder: optNum(o['Reorder Point']),
-    location: String(o['Location'] || '').trim() };
+    location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']) };
 }
 function optNum(v) { const s = String(v == null ? '' : v).trim(); return s === '' ? '' : num(s); }
 // '' or a number of 0 or more (decimals allowed: 52.5 lbs).
@@ -2946,7 +2956,7 @@ function missingItems(items, lots) {
     const k = itemKey(l.product, l.type);
     if (!l.product || !l.type || have[k]) return;
     have[k] = 1;
-    add.push({ name: l.product, type: l.type, supplier: l.supplier || '', container: l.container || '' });
+    add.push({ name: l.product, type: l.type, supplier: l.supplier || '', container: l.container || '', department: deptIn(l.department) });
   });
   return add;
 }
@@ -2966,7 +2976,7 @@ async function syncMaterialList(sheets, t, lots) {
   let next = maxIdNumber(t.rows, 'Item ID', 'MI-');
   const ts = nowStamp();
   const objs = add.map((a) => ({ 'Item ID': 'MI-' + ('00000' + (++next)).slice(-5), 'Name': a.name, 'Type': a.type, 'Supplier': a.supplier,
-    'Container': a.container, 'Active': 'Yes', 'Created At': ts, 'Created By': 'From received lots', 'Last Updated At': ts }));
+    'Container': a.container, 'Active': 'Yes', 'Created At': ts, 'Created By': 'From received lots', 'Last Updated At': ts, 'Department': deptOf(a.type, a.department) }));
   await sheets.appendMany(MATERIAL_LIST, objs.map((o) => t.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
     () => columnHas(sheets, MATERIAL_LIST, t.headers, 'Item ID', objs[0]['Item ID']));
   Object.assign(t, await readTab(sheets, MATERIAL_LIST));
@@ -2995,7 +3005,8 @@ async function saveMaterialItem(sheets, item, operator, opId) {
     'Container': String(item.container || '').trim() || MATERIAL_CONTAINERS[type] || '', 'Part #': String(item.partNo == null ? '' : item.partNo).trim(),
     'Notes': String(item.notes || '').trim(), 'Active': item.active === false ? 'No' : 'Yes', 'Last Updated At': ts,
     'Unit': String(item.unit || '').trim(), 'Per Container': amountIn(item.perContainer, 'The amount per container'),
-    'Reorder Point': amountIn(item.reorder, 'The reorder point'), 'Location': String(item.location || '').trim() };
+    'Reorder Point': amountIn(item.reorder, 'The reorder point'), 'Location': String(item.location || '').trim(),
+    'Department': deptOf(type, item.department) };
   let id = String(item.id || '').trim().toUpperCase();
   if (!id && opId) {
     const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
@@ -3072,8 +3083,47 @@ function machineList(loads, machines) {
 }
 function splitList(v) { return String(v || '').split(/[,;\n]/).map((x) => x.trim()).filter(Boolean); }
 function machineOut(o) {
-  return { name: String(o['Machine'] || '').trim(), positions: splitList(o['Positions']), materials: splitList(o['Materials']),
-    active: String(o['Active'] || '').trim().toLowerCase() !== 'no' };
+  const name = String(o['Machine'] || '').trim();
+  return { name, positions: splitList(o['Positions']), materials: splitList(o['Materials']),
+    active: String(o['Active'] || '').trim().toLowerCase() !== 'no', department: deptIn(o['Department']) || (/litho/i.test(name) ? 'Litho' : 'Metals') };
+}
+// Add (no oldName) or edit a machine on the Machines tab. Renaming one moves the lots on it (their
+// Location) to the new name; the load history keeps the name it had then.
+async function saveMachine(sheets, m, operator, opId) {
+  m = m || {};
+  const name = String(m.name || '').trim();
+  if (!name) throw new Error('Enter the machine name.');
+  const old = String(m.oldName || '').trim();
+  const t = await machinesTab(sheets);
+  const find = (n) => t.rows.filter((r) => String(r['Machine'] || '').trim().toLowerCase() === n.toLowerCase())[0];
+  const o = old ? find(old) : null;
+  if (old && !o) throw new Error('Machine ' + old + ' not found.');
+  const clash = find(name);
+  // Adding a name that's already there (a retry, or added twice) hands back that machine.
+  if (clash && !old) return { ok: true, machine: machineOut(clash), duplicate: true };
+  if (clash && clash !== o) throw new Error(name + ' is already on the Machines list.');
+  const list = (v) => (Array.isArray(v) ? v : splitList(v)).map((x) => String(x).trim()).filter(Boolean).join(', ');
+  const ts = nowStamp();
+  const f = { 'Machine': name, 'Positions': list(m.positions), 'Materials': list(m.materials), 'Active': m.active === false ? 'No' : 'Yes',
+    'Department': deptIn(m.department) || (/litho/i.test(name) ? 'Litho' : 'Metals'), 'Last Updated At': ts };
+  let moved = 0;
+  if (o) {
+    if (old.toLowerCase() !== name.toLowerCase() || old !== name) {
+      const lt = await lotsTab(sheets);
+      const data = [];
+      lt.rows.forEach((r) => {
+        if (String(r['Location'] || '').trim().toLowerCase() !== old.toLowerCase()) return;
+        moved++;
+        data.push({ range: "'" + MATERIALS + "'!" + colLetter(lt.map['Location']) + r.__row, values: [[name]] });
+      });
+      if (data.length) await sheets.batchUpdate(data);
+    }
+    await stampCells(sheets, MACHINES, o.__row, t.map, f);
+    return { ok: true, machine: machineOut(Object.assign({}, o, f)), movedLots: moved };
+  }
+  const obj = Object.assign({ 'Created At': ts }, f);
+  await appendRowObj(sheets, MACHINES, t.headers, obj);
+  return { ok: true, machine: machineOut(obj), created: true };
 }
 async function readMachines(sheets) {
   try { return (await readObjects(sheets, MACHINES)).rows.map(machineOut).filter((m) => m.name); } catch (e) { return []; }
@@ -3374,7 +3424,7 @@ async function addMaterialLots(sheets, c, lots, operator, opId) {
   if (data.length) await sheets.batchUpdate(data);
   // Best effort: remember the supplier / put a new material on the list / a new machine on the Machines tab.
   try {
-    if (!item) await syncMaterialList(sheets, lst, [Object.assign({}, saved[0], { supplier })]);
+    if (!item) await syncMaterialList(sheets, lst, [Object.assign({}, saved[0], { supplier, department: c.department })]);
     else if (supplier && item.supplier !== supplier) {
       const row = lst.rows.filter((r) => String(r['Item ID'] || '').trim() === item.id)[0];
       if (row) await stampCells(sheets, MATERIAL_LIST, row.__row, lst.map, { 'Supplier': supplier, 'Last Updated At': ts });
@@ -3384,7 +3434,8 @@ async function addMaterialLots(sheets, c, lots, operator, opId) {
     try {
       const mt = await machinesTab(sheets);
       if (!mt.rows.some((r) => String(r['Machine'] || '').trim().toLowerCase() === location.toLowerCase())) {
-        await appendRowObj(sheets, MACHINES, mt.headers, { 'Machine': location, 'Positions': position, 'Active': 'Yes', 'Created At': ts, 'Last Updated At': ts });
+        await appendRowObj(sheets, MACHINES, mt.headers, { 'Machine': location, 'Positions': position, 'Active': 'Yes', 'Created At': ts, 'Last Updated At': ts,
+          'Department': deptIn(c.department) || deptOf(type) });
       }
     } catch (err) { /* the lots are saved */ }
   }

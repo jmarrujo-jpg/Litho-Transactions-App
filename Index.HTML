@@ -38,12 +38,13 @@
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
     padding: 10px 14px; font-size: 14px; cursor: pointer;
   }
-  .tabbar { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tabbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .tabbar button {
     flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; color: var(--muted);
   }
   .tabbar button.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .tabbar.dbtabs button { flex: 1 1 auto; }   /* five tables: wrap onto two rows on a phone */
   .searchrow { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .searchwrap { position: relative; flex: 1; min-width: 0; height: 48px; }
   .searchwrap input {
@@ -236,7 +237,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.93.0</span>
+      <span class="version" id="appVersion">v1.94.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2035,6 +2036,46 @@
   var MT_TYPES = ['Compound', 'Powder', 'Copper', 'Ink', 'Make-Up', 'Solution/Grease'];
   var MT_CONTAINERS = { Compound: 'Barrel', Powder: 'Unit', Copper: 'Gaylord', Ink: 'Cartridge', 'Make-Up': 'Cartridge', 'Solution/Grease': 'Cartridge' };
   var MT_PLACES = ['Cage', 'Pallet Area', 'Storage Room'];
+  // Departments: every material and machine belongs to one (set on the Material List / Machines;
+  // a lot takes its material's). The Materials screens show one department, or all.
+  var MT_DEPTS = ['Metals', 'Plastics', 'Litho'];
+  var mtDept = 'all';
+  function mtDeptName(d) { return d === 'all' ? L('All', 'Todos') : d === 'Metals' ? L('Metals', 'Metales') : d === 'Plastics' ? L('Plastics', 'Plásticos') : d; }
+  // Anything without a department (an older server) gets the default: litho types/machines Litho, else Metals.
+  function mtFillDepts() {
+    var byItem = {};
+    (mtData.items || []).forEach(function (i) { if (!i.department) i.department = mtDeptOfType(i.type); byItem[(i.type + '|' + i.name).toLowerCase()] = i.department; });
+    (mtData.machineInfo || []).forEach(function (m) { if (!m.department) m.department = /litho/i.test(m.name) ? 'Litho' : 'Metals'; });
+    (mtData.materials || []).forEach(function (m) { if (!m.department) m.department = byItem[(m.type + '|' + m.product).toLowerCase()] || mtDeptOfType(m.type); });
+  }
+  function mtDeptOfType(t) { return /litho/i.test(t || '') ? 'Litho' : 'Metals'; }
+  function mtInDept(x) { return mtDept === 'all' || (x.department || mtDeptOfType(x.type)) === mtDept; }
+  // The types used in a department: the usual ones, plus any on its materials.
+  function mtDeptTypes(d) {
+    var base = d === 'Metals' ? MT_TYPES : d === 'Litho' ? ['Litho Coating', 'Litho Ink'] : [];
+    var more = mtItems().filter(function (i) { return i.department === d; }).map(function (i) { return i.type; })
+      .concat(((mtData && mtData.materials) || []).filter(function (m) { return m.department === d; }).map(function (m) { return m.type; }));
+    return mtUniq(base.concat(more));
+  }
+  // A department's machines (machines only known from old loads count as Metals).
+  function mtDeptMachines(d) {
+    var info = (mtData && mtData.machineInfo) || [], known = {};
+    info.forEach(function (m) { known[m.name.toLowerCase()] = 1; });
+    return mtUniq(info.filter(function (m) { return m.active && m.department === d; }).map(function (m) { return m.name; })
+      .concat(d === 'Metals' ? ((mtData && mtData.machines) || []).filter(function (n) { return !known[String(n).toLowerCase()]; }) : []));
+  }
+  function mtDeptChipsHtml(id) {
+    return '<div class="tabbar" id="' + id + '">' + ['all'].concat(MT_DEPTS).map(function (d) {
+      return '<button data-mtdept="' + d + '"' + (mtDept === d ? ' class="active"' : '') + '>' + esc(mtDeptName(d)) + '</button>';
+    }).join('') + '</div>';
+  }
+  function bindMtDeptChips(id, after) {
+    var box = document.getElementById(id);
+    if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mtdept]'), function (b) {
+      b.onclick = function () { mtDept = b.getAttribute('data-mtdept'); mtType = 'all'; after(); };
+    });
+  }
   var MT_CAP = 100;               // lots drawn at once (search to narrow beyond this)
   var MT_SOON_DAYS = 30;          // expiring within this many days shows in orange
   var mtData = null;              // getMaterials result
@@ -2052,6 +2093,7 @@
   function mtLoad(after) {
     google.script.run.withSuccessHandler(function (res) {
       mtData = res || { materials: [], products: {}, suppliers: [], containers: [], receivers: [] };
+      mtFillDepts();
       if (after) after();
     }).withFailureHandler(function (err) {
       var b = document.getElementById(state.view === 'materials' ? 'mtList' : 'mtLoadMsg');
@@ -2151,6 +2193,7 @@
         '<div class="field" style="flex:1;margin:0"><label>Find a lot</label><input id="mtSearch" placeholder="lot #, product, supplier, receiver, PO, location…" autocomplete="off" value="' + esc(mtSearch) + '"></div>' +
         '<button class="btn secondary" id="mtReload" style="margin:0">↻</button>' +
       '</div>' +
+      '<div style="margin-top:8px">' + mtDeptChipsHtml('mtDeptChips') + '</div>' +
       '<div class="tabbar" id="mtTypeChips" style="margin-top:8px">' + chips + '</div>' +
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="mtShowUsed"' + (mtShowUsed ? ' checked' : '') + '> Show used-up lots too</label>' +
       '<div class="sub" id="mtCount" style="margin-bottom:8px"></div>' +
@@ -2165,10 +2208,12 @@
     document.getElementById('mtReload').onclick = function () { mtData = null; document.getElementById('mtList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materials') renderMtList(); }); };
     document.getElementById('mtShowUsed').onchange = function () { mtShowUsed = this.checked; renderMtList(); };
     bindMtTypeChips();
+    bindMtDeptChips('mtDeptChips', renderMaterials);
     if (mtData) renderMtList();
   }
+  function mtChipTypes() { return mtDept === 'all' ? mtTypes() : mtDeptTypes(mtDept); }
   function mtTypeChipsHtml() {
-    return [['all', 'All']].concat(mtTypes().map(function (t) { return [t, t]; })).map(function (c) {
+    return [['all', 'All']].concat(mtChipTypes().map(function (t) { return [t, t]; })).map(function (c) {
       return '<button data-mtt="' + esc(c[0]) + '"' + (mtType === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
   }
@@ -2188,7 +2233,7 @@
   function renderMtLow() {
     var box = document.getElementById('mtLowBox');
     if (!box) return;
-    var low = mtLowItems();
+    var low = mtLowItems().filter(mtInDept);
     box.innerHTML = low.length ? '<div class="card" id="mtLowCard" style="border-left:4px solid var(--bad,#b91c1c);background:#fdecec;cursor:pointer">' +
       '<div style="font-weight:700;color:var(--bad,#b91c1c);margin-bottom:4px">' + esc(L('⚠ Time to reorder (' + low.length + ')', '⚠ Hay que volver a pedir (' + low.length + ')')) + '</div>' +
       low.map(function (i) { var st = mtStock(i); return '<div class="sub"><b>' + esc(i.name) + '</b> — ' + esc(L(st.text + ' left · reorder at ' + st.reorderText, 'quedan ' + st.text + ' · pedir en ' + st.reorderText)) + '</div>'; }).join('') +
@@ -2225,9 +2270,10 @@
     renderMtLow();
     renderMtStart();
     var chipBox = document.getElementById('mtTypeChips');
-    if (chipBox && chipBox.querySelectorAll('[data-mtt]').length !== mtTypes().length + 1) { chipBox.innerHTML = mtTypeChipsHtml(); bindMtTypeChips(); }
+    if (chipBox && chipBox.querySelectorAll('[data-mtt]').length !== mtChipTypes().length + 1) { chipBox.innerHTML = mtTypeChipsHtml(); bindMtTypeChips(); }
     var term = String(mtSearch || '').trim().toLowerCase();
     var rows = mtData.materials.filter(function (m) {
+      if (!mtInDept(m)) return false;
       if (mtType !== 'all' && m.type !== mtType) return false;
       if (!mtShowUsed && m.status === 'Used' && !term) return false;
       return !term || [m.lot, m.product, m.supplier, m.receiver, m.po, m.type, m.id, m.comments, m.location].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
@@ -2240,7 +2286,8 @@
     box.innerHTML = rows.slice(0, MT_CAP).map(function (m) {
       var used = m.status === 'Used', loaded = m.status === 'Loaded';
       return '<div class="card" data-mtopen="' + esc(m.id) + '" style="padding:12px 14px;margin-bottom:8px;cursor:pointer' + (used ? ';opacity:.6' : '') + '">' +
-        '<div><span class="ticket-id" style="font-size:16px">' + esc(m.lot) + '</span> <span class="badge production">' + esc(m.type) + '</span> ' +
+        '<div><span class="ticket-id" style="font-size:16px">' + esc(m.lot) + '</span> ' + (mtDept === 'all' && m.department && m.department !== 'Metals' ? '<span class="badge wip">' + esc(mtDeptName(m.department)) + '</span> ' : '') +
+          '<span class="badge production">' + esc(m.type) + '</span> ' +
           '<b>' + esc(m.product) + '</b>' + (used ? ' <span class="badge used">Used</span>' : '') +
           (loaded ? ' <span class="badge inprogress">' + esc(L('Loaded', 'Cargado')) + '</span>' : '') + mtExpiryHtml(m.expiration) +
           (loaded ? ' <button class="btn secondary" data-mtusedup="' + esc(m.id) + '" style="padding:4px 10px;font-size:13px;margin:0 0 0 6px">' + esc(L('Used up', 'Se terminó')) + '</button>' : '') + '</div>' +
@@ -2502,7 +2549,8 @@
   // stays picked, so the next batch is just scan, scan, scan, Save.
   var MT_ADD_BY = 'Jonathan';     // "Added by" starts with this name
   function mtNewAdd() {
-    return { type: 'Compound', product: '', supplier: '', location: '', onMachine: false, position: '', operator: MT_ADD_BY,
+    var d = mtDept !== 'all' ? mtDept : 'Metals';
+    return { dept: d, type: d === 'Metals' ? 'Compound' : d === 'Litho' ? 'Litho Coating' : '', product: '', supplier: '', location: '', onMachine: false, position: '', operator: MT_ADD_BY,
       lot: '', expiration: '', qty: 1, lines: [], added: [], extra: { type: [], supplier: [], place: [], machine: [] }, open: '' };
   }
   function openMtAdd() {
@@ -2537,19 +2585,27 @@
   }
   function renderMtAdd() {
     var a = mtAdd, view = document.getElementById('view');
-    var types = mtUniq(mtTypes().concat(a.extra.type, [a.type]));
-    var names = mtListNames(a.type);
+    if (!a.dept) a.dept = 'Metals';
+    var types = mtUniq(mtDeptTypes(a.dept).concat(a.extra.type, [a.type]));
+    var names = mtItems().filter(function (i) { return i.active && i.type === a.type && (i.department || mtDeptOfType(i.type)) === a.dept; }).map(function (i) { return i.name; });
     var suppliers = mtUniq(mtItems().map(function (i) { return i.supplier; }).concat(((mtData && mtData.materials) || []).map(function (m) { return m.supplier; }), a.extra.supplier, [a.supplier]));
-    var machines = mtUniq(((mtData && mtData.machines) || []).concat(a.extra.machine, a.onMachine ? [a.location] : []));
-    var places = mtUniq(mtPlaces().concat(a.extra.place, !a.onMachine ? [a.location] : [])).filter(function (p) { return !machines.some(function (m) { return m.toLowerCase() === p.toLowerCase(); }); });
+    var machines = mtUniq(mtDeptMachines(a.dept).concat(a.extra.machine, a.onMachine ? [a.location] : []));
+    var allMachines = mtUniq(((mtData && mtData.machines) || []).concat(((mtData && mtData.machineInfo) || []).map(function (m) { return m.name; }), machines));
+    var places = mtUniq(mtPlaces().concat(a.extra.place, !a.onMachine ? [a.location] : [])).filter(function (p) { return !allMachines.some(function (m) { return m.toLowerCase() === p.toLowerCase(); }); });
     var mach = a.onMachine ? mtMachine(a.location) : null, pos = (mach && mach.positions) || [];
     var n = a.lines.length, c = a.lines.reduce(function (s, l) { return s + l.qty; }, 0);
     var h = function (num, t) { return '<h3 style="margin:16px 0 8px">' + num + '. ' + esc(t) + '</h3>'; };
     view.innerHTML =
       '<div class="card">' +
-        '<h3 style="margin:0 0 8px">1. ' + esc(L('Type', 'Tipo')) + '</h3>' + mtBigBtns('data-matype', types, a.type) + mtNewBox('type', L('New type', 'Tipo nuevo'), L('e.g. Solvent', 'p. ej. Solvente')) +
+        '<h3 style="margin:0 0 8px">' + esc(L('Department', 'Departamento')) + '</h3>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px">' + MT_DEPTS.map(function (d) {
+            return '<button class="btn ' + (a.dept === d ? '' : 'secondary') + '" style="margin:0;padding:12px 16px;font-size:16px" data-madept="' + d + '">' + esc(mtDeptName(d)) + '</button>';
+          }).join('') + '</div>' +
+        h(1, L('Type', 'Tipo')) + (types.length ? mtBigBtns('data-matype', types, a.type) : '<div class="sub">' + esc(L('No types yet — add one.', 'Todavía no hay tipos — agregue uno.')) + '</div>') +
+          mtNewBox('type', L('New type', 'Tipo nuevo'), L('e.g. Resin', 'p. ej. Resina')) +
         h(2, L('Material', 'Material')) +
-          (names.length ? mtBigBtns('data-maprod', names, a.product) : '<div class="sub">' + esc(L('No ' + a.type + ' on the Material List yet.', 'Todavía no hay ' + a.type + ' en la lista de materiales.')) + '</div>') +
+          (!a.type ? '<div class="sub">' + esc(L('Pick the type first.', 'Primero elija el tipo.')) + '</div>' :
+            names.length ? mtBigBtns('data-maprod', names, a.product) : '<div class="sub">' + esc(L('No ' + a.type + ' on the Material List yet.', 'Todavía no hay ' + a.type + ' en la lista de materiales.')) + '</div>') +
           '<button class="btn secondary" id="maNewItem" style="margin:8px 0 0;padding:8px 12px;font-size:14px">➕ ' + esc(L('New material', 'Material nuevo')) + '</button>' +
         h(3, L('Supplier', 'Proveedor')) +
           (suppliers.length ? mtBigBtns('data-masup', suppliers, a.supplier) : '') + mtNewBox('supplier', L('New supplier', 'Proveedor nuevo'), L('supplier name', 'nombre del proveedor')) +
@@ -2579,6 +2635,13 @@
       '</div>' +
       '<div id="maAdded"></div>';
     var each = function (attr, f) { Array.prototype.forEach.call(view.querySelectorAll('[' + attr + ']'), function (b) { b.onclick = function () { mtAddKeep(); f(b.getAttribute(attr)); }; }); };
+    each('data-madept', function (d) {
+      if (d !== a.dept) {
+        a.dept = d; a.type = mtDeptTypes(d)[0] || ''; a.product = '';
+        if (a.onMachine) { a.location = ''; a.position = ''; a.onMachine = false; }
+      }
+      renderMtAdd();
+    });
     each('data-matype', function (t) { if (t !== a.type) { a.type = t; a.product = ''; } renderMtAdd(); });
     each('data-maprod', function (nm) {
       a.product = nm;
@@ -2613,7 +2676,7 @@
     document.getElementById('maMinus').onclick = function () { if (a.qty > 1) a.qty--; document.getElementById('maQty').textContent = a.qty; };
     document.getElementById('maPlus').onclick = function () { a.qty++; document.getElementById('maQty').textContent = a.qty; };
     document.getElementById('maAddLot').onclick = function () { mtAddKeep(); mtAddLine(); };
-    document.getElementById('maNewItem').onclick = function () { mtAddKeep(); openMtItem(null, 'add', { type: a.type, supplier: a.supplier }); };
+    document.getElementById('maNewItem').onclick = function () { mtAddKeep(); openMtItem(null, 'add', { type: a.type, supplier: a.supplier, department: a.dept }); };
     document.getElementById('maSave').onclick = mtSaveAdd;
     renderMtAddLines();
     renderMtAdded();
@@ -2669,6 +2732,7 @@
     var a = mtAdd;
     mtAddKeep();
     if (String(a.lot || '').trim()) mtAddLine();   // a lot typed but not added yet counts
+    if (!a.type) { toast(L('Pick the type', 'Elija el tipo')); return; }
     if (!a.product) { toast(L('Pick the material', 'Elija el material')); return; }
     if (!String(a.location || '').trim()) { toast(L('Pick where it is', 'Elija dónde está')); return; }
     if (!a.lines.length) { toast(L('Scan or type the lot number', 'Escanee o escriba el número de lote')); document.getElementById('maLot').focus(); return; }
@@ -2676,18 +2740,21 @@
     btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
     var op = String(a.operator || '').trim();
     if (op) lastOperator = op;
-    var sec = { type: a.type, product: a.product, supplier: a.supplier, location: a.location.trim(), onMachine: !!a.onMachine, position: a.position };
+    var sec = { type: a.type, product: a.product, supplier: a.supplier, location: a.location.trim(), onMachine: !!a.onMachine, position: a.position, department: a.dept };
     var lots = a.lines.map(function (l) { return { lot: l.lot, expiration: l.expiration, qty: l.qty }; });
     runMutation('addMaterialLots', [sec, lots, op, newOpId()], function (res) {
       var saved = (res && res.saved) || [];
       if (mtData) {   // keep the screen's data current without reloading
         saved.forEach(function (m) {
+          m.department = a.dept;
           var i = mtData.materials.map(function (x) { return x.id; }).indexOf(m.id);
           if (i === -1) mtData.materials.unshift(m); else mtData.materials[i] = m;
         });
         var it = mtItemFor(a.product, a.type);
         if (it && sec.supplier) it.supplier = sec.supplier.toUpperCase();
         if (sec.onMachine && mtData.machines.indexOf(sec.location) === -1) mtData.machines.push(sec.location);
+        if (sec.onMachine && !(mtData.machineInfo || []).some(function (x) { return x.name.toLowerCase() === sec.location.toLowerCase(); }))
+          (mtData.machineInfo = mtData.machineInfo || []).push({ name: sec.location, positions: sec.position ? [sec.position] : [], materials: [], active: true, department: a.dept });
       }
       saved.forEach(function (m) { a.added = a.added.filter(function (x) { return x.id !== m.id; }); a.added.unshift(m); });
       toast(L('Saved ' + saved.length + ' lot(s)', saved.length + ' lote(s) guardado(s)'));
@@ -2983,12 +3050,14 @@
         '<div class="field" style="flex:1;margin:0"><label>Find a material</label><input id="mtItemSearch" placeholder="name, type, supplier, part #…" autocomplete="off" value="' + esc(mtItemSearch) + '"></div>' +
         '<button class="btn secondary" id="mtItemReload" style="margin:0">↻</button>' +
       '</div>' +
+      '<div style="margin-top:8px">' + mtDeptChipsHtml('mtListDept') + '</div>' +
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin:8px 0"><input type="checkbox" id="mtShowInactive"' + (mtShowInactive ? ' checked' : '') + '> Show inactive materials too</label>' +
       '<div id="mtItemList"><div class="loading">Loading&hellip;</div></div>';
-    document.getElementById('mtItemAdd').onclick = function () { openMtItem(null, 'list'); };
+    document.getElementById('mtItemAdd').onclick = function () { openMtItem(null, 'list', mtDept !== 'all' ? { department: mtDept } : null); };
     var s = document.getElementById('mtItemSearch');
     s.oninput = function () { mtItemSearch = s.value; renderMtItemList(); };
     document.getElementById('mtShowInactive').onchange = function () { mtShowInactive = this.checked; renderMtItemList(); };
+    bindMtDeptChips('mtListDept', openMtList);
     document.getElementById('mtItemReload').onclick = function () { mtData = null; document.getElementById('mtItemList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materialsList') renderMtItemList(); }); };
     if (mtData) renderMtItemList();
     else mtLoad(function () { if (state.view === 'materialsList') renderMtItemList(); });
@@ -3007,11 +3076,12 @@
     var term = String(mtItemSearch || '').trim().toLowerCase();
     var all = mtItems();
     var rows = all.filter(function (i) {
+      if (!mtInDept(i)) return false;
       if (!mtShowInactive && !i.active && !term) return false;
       return !term || [i.name, i.type, i.supplier, i.partNo, i.container, i.notes, i.location].some(function (v) { return String(v || '').toLowerCase().indexOf(term) !== -1; });
     });
     if (!rows.length) {
-      box.innerHTML = '<div class="card empty">' + (all.length ? 'No materials match.' : 'No materials on the list yet. Tap Add Material to add the first one.') + '</div>';
+      box.innerHTML = '<div class="card empty">' + (all.length ? (mtDept !== 'all' && !term ? 'No ' + mtDeptName(mtDept) + ' materials yet. Tap Add Material to add the first one.' : 'No materials match.') : 'No materials on the list yet. Tap Add Material to add the first one.') + '</div>';
       return;
     }
     var html = '', lastType = null;
@@ -3165,7 +3235,8 @@
     var view = document.getElementById('view');
     var isNew = !it, saved = it && it.id;
     var v = it || { name: (pre && pre.name) || '', type: (pre && pre.type) || '', supplier: (pre && pre.supplier) || '', container: (pre && pre.container) || '',
-      partNo: '', notes: '', active: true, unit: '', perContainer: '', reorder: '', location: (pre && pre.location) || '' };
+      partNo: '', notes: '', active: true, unit: '', perContainer: '', reorder: '', location: (pre && pre.location) || '', department: (pre && pre.department) || '' };
+    var dept = v.department || (mtDept !== 'all' ? mtDept : mtDeptOfType(v.type));
     if (isNew && v.type && !v.container) v.container = mtContainerFor(v.type);
     var n = it ? mtLotCount(it) : 0;
     var typeOpts = '<option value="">— pick one —</option>' + mtTypes().map(function (t) { return '<option value="' + esc(t) + '"' + (t === v.type ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
@@ -3179,6 +3250,7 @@
           '<div class="field"><label>Material name</label><input id="mtItName" autocomplete="off" placeholder="e.g. WB-2100" value="' + esc(v.name) + '"></div>' +
           '<div class="field"><label>Type</label><select id="mtItType">' + typeOpts + '</select>' +
             '<input id="mtItNewType" autocomplete="off" placeholder="new type, e.g. Solvent" style="display:none;margin-top:6px"></div>' +
+          '<div class="field"><label>Department</label><select id="mtItDept">' + MT_DEPTS.map(function (d) { return '<option value="' + d + '"' + (d === dept ? ' selected' : '') + '>' + esc(mtDeptName(d)) + '</option>'; }).join('') + '</select></div>' +
           '<div class="field"><label>Supplier (optional)</label><input id="mtItSupplier" list="mtItSupList" autocomplete="off" value="' + esc(v.supplier) + '"><datalist id="mtItSupList">' + mtOptions((mtData && mtData.suppliers) || []) + '</datalist></div>' +
           '<div class="field"><label>Container</label><input id="mtItContainer" list="mtItContList" autocomplete="off" value="' + esc(v.container) + '"><datalist id="mtItContList">' + mtOptions(mtContainerList()) + '</datalist></div>' +
           '<div class="field"><label>Unit</label><input id="mtItUnit" list="mtItUnitList" autocomplete="off" placeholder="lbs, ea, btl" value="' + esc(v.unit || '') + '"><datalist id="mtItUnitList">' + mtOptions(['lbs', 'ea', 'btl']) + '</datalist></div>' +
@@ -3216,7 +3288,8 @@
         partNo: document.getElementById('mtItPart').value.trim(),
         unit: document.getElementById('mtItUnit').value.trim(), perContainer: document.getElementById('mtItPer').value.trim(),
         reorder: document.getElementById('mtItReorder').value.trim(), location: document.getElementById('mtItLoc').value.trim(),
-        notes: document.getElementById('mtItNotes').value.trim(), active: it ? document.getElementById('mtItActive').checked : true };
+        notes: document.getElementById('mtItNotes').value.trim(), active: it ? document.getElementById('mtItActive').checked : true,
+        department: document.getElementById('mtItDept').value };
       if (!out.name) { toast(L('Enter the material name', 'Escriba el nombre del material')); document.getElementById('mtItName').focus(); return; }
       if (!out.type) { toast(L('Pick the type', 'Elija el tipo')); (typeSel.value === '__new' ? newType : typeSel).focus(); return; }
       var rename = saved && n && (out.name !== it.name || out.type !== it.type);
@@ -3227,7 +3300,7 @@
           var item = (res && res.item) || out;
           mtData = null;
           toast(L('Saved ' + item.name, item.name + ' guardado'));
-          if (mtItemFrom === 'add' && mtAdd && item.active !== false) { mtAdd.type = item.type; mtAdd.product = item.name; if (item.supplier) mtAdd.supplier = item.supplier; }
+          if (mtItemFrom === 'add' && mtAdd && item.active !== false) { mtAdd.dept = item.department || out.department; mtAdd.type = item.type; mtAdd.product = item.name; if (item.supplier) mtAdd.supplier = item.supplier; }
           if (mtItemFrom === 'receive' && mtRcv && item.active !== false) {
             // Back to receiving with the new material picked.
             mtRcv.product = item.name; mtRcv.type = item.type; mtRcv.container = item.container || mtContainerFor(item.type);
@@ -3327,7 +3400,7 @@
   // A spreadsheet-like admin view of the underlying tabs, read/written BY COLUMN NAME so it matches
   // exactly what the app uses (even where the sheet header has stray duplicate columns). Two tables:
   // Steel Tickets and the Transactions audit log. Tap a row to edit its fields and save back.
-  var DB_TABLE_TABS = [['master', 'Master sheet'], ['receivers', 'Receivers'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
+  var DB_TABLE_TABS = [['master', 'Master sheet'], ['materials', 'Materials Master File'], ['receivers', 'Receivers'], ['steel', 'Steel Tickets'], ['tx', 'Transactions']];
   var DB_ROW_CAP = 60;                          // rows rendered at once (search to narrow beyond this)
   var dbTable = 'master';
   var dbData = { steel: null, tx: null };       // cache: { headers, rows }
@@ -3356,10 +3429,10 @@
     var chips = DB_TABLE_TABS.map(function (c) {
       return '<button data-dbt="' + c[0] + '"' + (dbTable === c[0] ? ' class="active"' : '') + '>' + esc(c[1]) + '</button>';
     }).join('');
-    var isMaster = dbTable === 'master', isRcv = dbTable === 'receivers';
+    var isMaster = dbTable === 'master', isRcv = dbTable === 'receivers', isMf = dbTable === 'materials';
     view.innerHTML =
-      '<div class="tabbar">' + chips + '</div>' +
-      (isMaster ? '<div id="msBox"></div>' : isRcv ? '<div id="rcvBox"></div>' :
+      '<div class="tabbar dbtabs">' + chips + '</div>' +
+      (isMaster ? '<div id="msBox"></div>' : isRcv ? '<div id="rcvBox"></div>' : isMf ? '<div id="mfBox"></div>' :
       '<div class="row" style="align-items:flex-end;gap:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Search this table</label><input id="dbSearch" placeholder="filter any column…" autocomplete="off" value="' + esc(dbSearch) + '"></div>' +
         '<button class="btn secondary" id="dbReload" style="margin:0">↻</button>' +
@@ -3392,10 +3465,186 @@
     document.getElementById('dbSnapshotBtn').onclick = dbRunSnapshot;
     if (isMaster) { renderMasterSheet(); return; }
     if (isRcv) { renderReceivers(); return; }
+    if (isMf) { renderMasterFile(); return; }
     var s = document.getElementById('dbSearch');
     s.oninput = function () { dbSearch = s.value; renderDbTable(); };
     document.getElementById('dbReload').onclick = function () { dbData[dbTable] = null; loadDbAndRender(); };
     loadDbAndRender();
+  }
+
+  // ---------------- Database: Materials Master File ----------------
+  // Every material lot, the Material List and the Machines in one place, each with its Department
+  // (Metals / Plastics / Litho). Search, filter by department, tap a row to fix it. A lot's department
+  // is its material's (set on the Material List).
+  var mfTab = 'lots', mfDept = 'all', mfSearch = '', mfEdit = null;   // mfEdit: { kind: 'lot'|'item'|'machine', key } ('' key = new)
+  var MF_CAP = 200;
+  function mfRows() {
+    var term = String(mfSearch || '').trim().toLowerCase();
+    var inD = function (d) { return mfDept === 'all' || d === mfDept; };
+    var has = function (vals) { return !term || vals.some(function (v) { return String(v == null ? '' : v).toLowerCase().indexOf(term) !== -1; }); };
+    if (mfTab === 'items') return mtItems().filter(function (i) { return inD(i.department) && has([i.name, i.type, i.supplier, i.partNo, i.location, i.notes, i.id]); });
+    if (mfTab === 'machines') return ((mtData && mtData.machineInfo) || []).filter(function (m) { return inD(m.department) && has([m.name, m.positions.join(' '), m.materials.join(' ')]); });
+    return ((mtData && mtData.materials) || []).filter(function (m) {
+      return inD(m.department) && has([m.id, m.lot, m.product, m.type, m.supplier, m.location, m.position, m.status, m.receiver, m.po, m.comments, m.expiration]);
+    });
+  }
+  function renderMasterFile() {
+    var box = document.getElementById('mfBox');
+    if (!box) return;
+    if (!mtData) { box.innerHTML = '<div class="loading">Loading the materials&hellip;</div>'; mtLoad(function () { if (state.view === 'database') renderMasterFile(); }); return; }
+    var counts = { lots: mtData.materials.length, items: mtItems().length, machines: (mtData.machineInfo || []).length };
+    var tabs = [['lots', 'Lots'], ['items', 'Material List'], ['machines', 'Machines']];
+    var rows = mfRows();
+    var addBtn = mfTab === 'items' ? '+ Add material' : mfTab === 'machines' ? '+ Add machine' : '';
+    var html = '<div class="tabbar">' + tabs.map(function (t) { return '<button data-mft="' + t[0] + '"' + (mfTab === t[0] ? ' class="active"' : '') + '>' + t[1] + ' (' + counts[t[0]] + ')</button>'; }).join('') + '</div>' +
+      '<div class="tabbar" style="margin-top:6px">' + ['all'].concat(MT_DEPTS).map(function (d) { return '<button data-mfd="' + d + '"' + (mfDept === d ? ' class="active"' : '') + '>' + esc(d === 'all' ? 'All departments' : d) + '</button>'; }).join('') + '</div>' +
+      '<div class="row" style="align-items:flex-end;gap:8px;margin-top:8px">' +
+        '<div class="field" style="flex:1;margin:0"><label>Search</label><input id="mfSearch" autocomplete="off" placeholder="any column…" value="' + esc(mfSearch) + '"></div>' +
+        (addBtn ? '<button class="btn" id="mfAdd" style="margin:0">' + addBtn + '</button>' : '') +
+        '<button class="btn secondary" id="mfReload" style="margin:0">↻</button>' +
+      '</div>' +
+      '<div id="mfEditor"></div>' +
+      '<div class="sub" style="margin:8px 0">' + rows.length + ' row(s)' + (rows.length > MF_CAP ? ' — showing ' + MF_CAP + ', search to narrow' : '') + '. Tap a row to edit it.</div>' +
+      '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">' + mfTableHtml(rows.slice(0, MF_CAP)) + '</div>';
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mft]'), function (b) { b.onclick = function () { mfTab = b.getAttribute('data-mft'); mfEdit = null; renderMasterFile(); }; });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mfd]'), function (b) { b.onclick = function () { mfDept = b.getAttribute('data-mfd'); renderMasterFile(); }; });
+    var s = document.getElementById('mfSearch');
+    s.oninput = function () {
+      mfSearch = s.value;
+      var pos = s.selectionStart;
+      renderMasterFile();
+      var s2 = document.getElementById('mfSearch');
+      if (s2) { s2.focus(); try { s2.setSelectionRange(pos, pos); } catch (e) {} }
+    };
+    document.getElementById('mfReload').onclick = function () { mtData = null; mfEdit = null; renderMasterFile(); };
+    var add = document.getElementById('mfAdd');
+    if (add) add.onclick = function () { mfEdit = { kind: mfTab === 'items' ? 'item' : 'machine', key: '' }; renderMasterFile(); };
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mfrow]'), function (tr) {
+      tr.onclick = function () { mfEdit = { kind: mfTab === 'items' ? 'item' : mfTab === 'machines' ? 'machine' : 'lot', key: tr.getAttribute('data-mfrow') }; renderMasterFile(); };
+    });
+    renderMfEditor();
+  }
+  function mfTableHtml(rows) {
+    var cols, key;
+    if (mfTab === 'items') {
+      key = function (i) { return i.id || ('name:' + i.type + '|' + i.name); };
+      cols = [['Dept', function (i) { return i.department; }], ['Material', function (i) { return '<b>' + esc(i.name) + '</b>'; }, true], ['Type', function (i) { return i.type; }],
+        ['Supplier', function (i) { return i.supplier; }], ['Container', function (i) { return i.container; }], ['Unit', function (i) { return i.unit; }],
+        ['Per container', function (i) { return i.perContainer; }], ['Reorder at', function (i) { return i.reorder; }], ['In stock', function (i) { return mtStock(i).text; }],
+        ['Kept at', function (i) { return i.location; }], ['Part #', function (i) { return i.partNo; }], ['Active', function (i) { return i.active ? 'Yes' : 'No'; }], ['ID', function (i) { return i.id; }]];
+    } else if (mfTab === 'machines') {
+      key = function (m) { return m.name; };
+      cols = [['Dept', function (m) { return m.department; }], ['Machine', function (m) { return '<b>' + esc(m.name) + '</b>'; }, true], ['Positions', function (m) { return m.positions.join(', '); }],
+        ['Runs', function (m) { return m.materials.join(', '); }], ['Loaded now', function (m) {
+          return mtData.materials.filter(function (x) { return x.status === 'Loaded' && String(x.location).toLowerCase() === m.name.toLowerCase(); }).map(function (x) { return x.lot; }).join(', ');
+        }], ['Active', function (m) { return m.active ? 'Yes' : 'No'; }]];
+    } else {
+      key = function (m) { return m.id; };
+      cols = [['Dept', function (m) { return m.department; }], ['Lot #', function (m) { return '<b>' + esc(m.lot) + '</b>'; }, true], ['Material', function (m) { return m.product; }],
+        ['Type', function (m) { return m.type; }], ['Status', function (m) { return m.status; }], ['On hand', function (m) { return m.qtyOnHand + ' of ' + m.qtyReceived; }],
+        ['Container', function (m) { return m.container; }], ['Location', function (m) { return m.location + (m.position ? ' · ' + m.position : ''); }],
+        ['Supplier', function (m) { return m.supplier; }], ['Expires', function (m) { return m.expiration; }], ['Received', function (m) { return m.date; }],
+        ['Receiver', function (m) { return m.receiver; }], ['PO #', function (m) { return m.po; }], ['Comments', function (m) { return m.comments; }], ['ID', function (m) { return m.id; }]];
+    }
+    if (!rows.length) return '<div class="card empty">Nothing here' + (mfDept !== 'all' ? ' for ' + esc(mfDept) : '') + (mfSearch ? ' matches' : ' yet') + '.</div>';
+    return '<table><thead><tr>' + cols.map(function (c) { return '<th>' + c[0] + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      rows.map(function (r) {
+        var k = key(r), on = mfEdit && mfEdit.key === k;
+        return '<tr data-mfrow="' + esc(k) + '" style="cursor:pointer' + (on ? ';background:#eef2ff' : '') + (r.status === 'Used' || r.active === false ? ';opacity:.6' : '') + '">' +
+          cols.map(function (c) { var v = c[1](r); return '<td>' + (c[2] ? v : esc(v == null ? '' : v)) + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table>';
+  }
+  function mfInput(id, label, val, extra) {
+    extra = extra || {};
+    if (extra.options) return '<div class="field"><label>' + esc(label) + '</label><select id="' + id + '">' + extra.options.map(function (o) {
+      return '<option value="' + esc(o) + '"' + (String(o) === String(val) ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select></div>';
+    return '<div class="field"><label>' + esc(label) + '</label><input id="' + id + '"' + (extra.type ? ' type="' + extra.type + '"' : '') + (extra.list ? ' list="' + id + 'L"' : '') +
+      ' autocomplete="off" value="' + esc(val == null ? '' : val) + '">' + (extra.list ? '<datalist id="' + id + 'L">' + mtOptions(extra.list) + '</datalist>' : '') + '</div>';
+  }
+  function mfVal(id) { var el = document.getElementById(id); return el ? String(el.value).trim() : ''; }
+  function renderMfEditor() {
+    var box = document.getElementById('mfEditor');
+    if (!box || !mfEdit) { if (box) box.innerHTML = ''; return; }
+    var e = mfEdit, html = '', grid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px">';
+    var suppliers = (mtData.suppliers || []), places = mtUniq(mtPlaces().concat(mtData.machines || []));
+    if (e.kind === 'lot') {
+      var m = mtById(e.key);
+      if (!m) { mfEdit = null; box.innerHTML = ''; return; }
+      html = '<h3 style="margin-top:0">Lot ' + esc(m.lot) + ' <span class="sub">' + esc(m.id) + ' · ' + esc(m.department) + ' (set on the Material List)</span></h3>' + grid +
+        mfInput('mfLot', 'Lot #', m.lot) + mfInput('mfProduct', 'Material', m.product, { list: mtItems().map(function (i) { return i.name; }) }) +
+        mfInput('mfType', 'Type', m.type, { list: mtTypes() }) + mfInput('mfStatus', 'Status', m.status, { options: ['In Stock', 'Loaded', 'Used'] }) +
+        mfInput('mfOnHand', 'Containers on hand', m.qtyOnHand, { type: 'number' }) + mfInput('mfRecv', 'Containers received', m.qtyReceived, { type: 'number' }) +
+        mfInput('mfCont', 'Container', m.container, { list: mtContainerList() }) + mfInput('mfLoc', 'Location', m.location, { list: places }) +
+        mfInput('mfPos', 'Position', m.position) + mfInput('mfSup', 'Supplier', m.supplier, { list: suppliers }) +
+        mfInput('mfExp', 'Expiration date', m.expiration, { type: 'date' }) + mfInput('mfDate', 'Date received', m.date, { type: 'date' }) +
+        mfInput('mfRcv', 'Receiver', m.receiver) + mfInput('mfPo', 'PO #', m.po) + mfInput('mfCom', 'Comments', m.comments) +
+        '</div>';
+    } else if (e.kind === 'item') {
+      var it = e.key ? mtItems().filter(function (i) { return (i.id || ('name:' + i.type + '|' + i.name)) === e.key; })[0] : null;
+      var v = it || { name: '', type: '', supplier: '', container: '', unit: '', perContainer: '', reorder: '', location: '', partNo: '', notes: '', active: true, department: mfDept !== 'all' ? mfDept : 'Metals' };
+      html = '<h3 style="margin-top:0">' + (it ? esc(it.name) + ' <span class="sub">' + esc(it.id || 'not saved on the list yet') + '</span>' : 'Add material') + '</h3>' + grid +
+        mfInput('mfName', 'Material name', v.name) + mfInput('mfDept', 'Department', v.department, { options: MT_DEPTS }) +
+        mfInput('mfType', 'Type', v.type, { list: mtTypes().concat(['Litho Coating', 'Litho Ink']) }) + mfInput('mfSup', 'Supplier', v.supplier, { list: suppliers }) +
+        mfInput('mfCont', 'Container', v.container, { list: mtContainerList() }) + mfInput('mfUnit', 'Unit', v.unit, { list: ['lbs', 'ea', 'btl', 'gal'] }) +
+        mfInput('mfPer', 'Amount in one container', v.perContainer) + mfInput('mfReorder', 'Reorder point', v.reorder) +
+        mfInput('mfLoc', 'Kept at', v.location, { list: mtPlaces() }) + mfInput('mfPart', 'Part #', v.partNo) + mfInput('mfNotes', 'Notes', v.notes) +
+        mfInput('mfActive', 'Active', v.active ? 'Yes' : 'No', { options: ['Yes', 'No'] }) + '</div>';
+    } else {
+      var mc = e.key ? ((mtData.machineInfo || []).filter(function (x) { return x.name === e.key; })[0]) : null;
+      var w = mc || { name: '', positions: [], materials: [], active: true, department: mfDept !== 'all' ? mfDept : 'Metals' };
+      html = '<h3 style="margin-top:0">' + (mc ? esc(mc.name) : 'Add machine') + '</h3>' + grid +
+        mfInput('mfName', 'Machine name', w.name) + mfInput('mfDept', 'Department', w.department, { options: MT_DEPTS }) +
+        mfInput('mfPos', 'Positions (comma between)', w.positions.join(', ')) + mfInput('mfRuns', 'Materials it runs (comma between)', w.materials.join(', ')) +
+        mfInput('mfActive', 'Active', w.active ? 'Yes' : 'No', { options: ['Yes', 'No'] }) + '</div>' +
+        (mc ? '<div class="sub" style="margin-bottom:8px">Renaming a machine moves the lots on it to the new name.</div>' : '');
+    }
+    box.innerHTML = '<div class="card" style="margin-top:10px;border:2px solid var(--accent)">' + html +
+      '<div class="row" style="gap:8px"><button class="btn secondary" id="mfCancel">Cancel</button>' +
+      (e.kind === 'lot' ? '<button class="btn danger" id="mfDelete">Delete lot</button>' : '') +
+      '<button class="btn success" id="mfSave" style="flex:1">Save</button></div></div>';
+    document.getElementById('mfCancel').onclick = function () { mfEdit = null; renderMasterFile(); };
+    var done = function (msg) { return function () { toast(msg); mtData = null; mfEdit = null; renderMasterFile(); }; };
+    var fail = function (btn) { return function (err) { btn.disabled = false; btn.textContent = 'Save'; showModal({ title: 'Not saved', message: err.message, confirmText: 'OK' }); }; };
+    var save = document.getElementById('mfSave');
+    save.onclick = function () {
+      if (e.kind === 'lot') {
+        var m = mtById(e.key);
+        var now = { 'Lot #': mfVal('mfLot'), 'Product': mfVal('mfProduct'), 'Type': mfVal('mfType'), 'Status': mfVal('mfStatus'), 'Qty On Hand': mfVal('mfOnHand'),
+          'Qty Received': mfVal('mfRecv'), 'Container': mfVal('mfCont'), 'Location': mfVal('mfLoc'), 'Position': mfVal('mfPos'), 'Supplier': mfVal('mfSup'),
+          'Expiration Date': mfVal('mfExp'), 'Date Received': mfVal('mfDate'), 'Receiver': mfVal('mfRcv'), 'PO #': mfVal('mfPo'), 'Comments': mfVal('mfCom') };
+        var was = { 'Lot #': m.lot, 'Product': m.product, 'Type': m.type, 'Status': m.status, 'Qty On Hand': m.qtyOnHand, 'Qty Received': m.qtyReceived, 'Container': m.container,
+          'Location': m.location, 'Position': m.position, 'Supplier': m.supplier, 'Expiration Date': m.expiration, 'Date Received': m.date, 'Receiver': m.receiver, 'PO #': m.po, 'Comments': m.comments };
+        var ch = {};
+        Object.keys(now).forEach(function (k) { if (String(now[k]) !== String(was[k] == null ? '' : was[k])) ch[k] = now[k]; });
+        if (!Object.keys(ch).length) { mfEdit = null; renderMasterFile(); return; }
+        save.disabled = true; save.textContent = 'Saving…';
+        runMutation('updateMaterial', [m.id, ch, lastOperator, newOpId()], done('Lot ' + (now['Lot #'] || m.lot) + ' saved'), fail(save));
+      } else if (e.kind === 'item') {
+        var it = e.key ? mtItems().filter(function (i) { return (i.id || ('name:' + i.type + '|' + i.name)) === e.key; })[0] : null;
+        var out = { id: it && it.id ? it.id : '', name: mfVal('mfName'), type: mfVal('mfType'), department: mfVal('mfDept'), supplier: mfVal('mfSup'), container: mfVal('mfCont'),
+          unit: mfVal('mfUnit'), perContainer: mfVal('mfPer'), reorder: mfVal('mfReorder'), location: mfVal('mfLoc'), partNo: mfVal('mfPart'), notes: mfVal('mfNotes'), active: mfVal('mfActive') !== 'No' };
+        if (!out.name) { toast('Enter the material name'); return; }
+        if (!out.type) { toast('Enter the type'); return; }
+        var n = it ? mtLotCount(it) : 0;
+        var go = function () { save.disabled = true; save.textContent = 'Saving…'; runMutation('saveMaterialItem', [out, lastOperator, newOpId()], done(out.name + ' saved'), fail(save)); };
+        if (it && n && (out.name !== it.name || out.type !== it.type)) showConfirm('Rename ' + it.name + '?', 'The ' + n + ' lot(s) received as ' + it.name + ' are renamed too.', go, 'Rename');
+        else go();
+      } else {
+        var name = mfVal('mfName');
+        if (!name) { toast('Enter the machine name'); return; }
+        var mo = { name: name, oldName: e.key || '', department: mfVal('mfDept'), positions: mfVal('mfPos'), materials: mfVal('mfRuns'), active: mfVal('mfActive') !== 'No' };
+        save.disabled = true; save.textContent = 'Saving…';
+        runMutation('saveMachine', [mo, lastOperator, newOpId()], done(name + ' saved'), fail(save));
+      }
+    };
+    var del = document.getElementById('mfDelete');
+    if (del) del.onclick = function () {
+      var m = mtById(e.key);
+      showConfirm('Delete lot ' + m.lot + '?', 'Only for a lot saved by mistake. This can\'t be undone.', function () {
+        runMutation('deleteMaterial', [m.id, lastOperator, newOpId()], done('Lot ' + m.lot + ' deleted'), function (err) { showModal({ title: 'Not deleted', message: err.message, confirmText: 'OK' }); });
+      }, 'Delete', 'danger');
+    };
   }
 
   // ---------------- Database: Master sheet ----------------
