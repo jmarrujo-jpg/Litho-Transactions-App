@@ -71,6 +71,7 @@ const MATERIAL_LIST_HEADERS = ['Item ID', 'Name', 'Type', 'Supplier', 'Container
 // takes its material's. Not set: litho types and machines are Litho, everything else Metals.
 const DEPARTMENTS = ['Metals', 'Plastics', 'Litho'];
 function deptIn(v) { return DEPARTMENTS.filter((d) => d.toLowerCase() === String(v || '').trim().toLowerCase())[0] || ''; }
+function out0Type(lines) { return (lines && lines[0] && lines[0]['Type']) || ''; }
 function deptOf(type, set) { return deptIn(set) || (/litho/i.test(String(type || '')) ? 'Litho' : 'Metals'); }
 const MATERIAL_CONTAINERS = { Compound: 'Barrel', Powder: 'Unit', Copper: 'Gaylord', Ink: 'Cartridge', 'Make-Up': 'Cartridge', 'Solution/Grease': 'Cartridge' };
 // Machines that materials are loaded onto: their spots (Barrel 1, Barrel 2) and the materials they
@@ -189,7 +190,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'matdept-94', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'matdept-95', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -361,6 +362,8 @@ async function handle(fn, args, env) {
       return addMaterialLot(sheets, args[0], args[1], args[2]);
     case 'removeStartLots': // (operator, opId) delete the setup's START lots (up to 20 per call)
       return removeStartLots(sheets, args[0], args[1]);
+    case 'fillDepartments': // (operator, opId) write the Department on every material / machine row missing one
+      return fillDepartments(sheets, args[0], args[1]);
     case 'saveMachine': // ({name, oldName?, positions[], materials[], department, active}, operator, opId) add or edit a machine
       return saveMachine(sheets, args[0], args[1], args[2]);
     case 'deleteMaterialItem': // (itemId, operator, opId) only while no lot was received under it
@@ -2936,7 +2939,7 @@ function itemOut(o) {
     active: String(o['Active'] || '').trim().toLowerCase() !== 'no', createdAt: String(o['Created At'] || ''),
     createdBy: String(o['Created By'] || ''), updatedAt: String(o['Last Updated At'] || ''),
     unit: String(o['Unit'] || '').trim(), perContainer: optNum(o['Per Container']), reorder: optNum(o['Reorder Point']),
-    location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']) };
+    location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']), deptSet: !!deptIn(o['Department']) };
 }
 function optNum(v) { const s = String(v == null ? '' : v).trim(); return s === '' ? '' : num(s); }
 // '' or a number of 0 or more (decimals allowed: 52.5 lbs).
@@ -3085,7 +3088,30 @@ function splitList(v) { return String(v || '').split(/[,;\n]/).map((x) => x.trim
 function machineOut(o) {
   const name = String(o['Machine'] || '').trim();
   return { name, positions: splitList(o['Positions']), materials: splitList(o['Materials']),
-    active: String(o['Active'] || '').trim().toLowerCase() !== 'no', department: deptIn(o['Department']) || (/litho/i.test(name) ? 'Litho' : 'Metals') };
+    active: String(o['Active'] || '').trim().toLowerCase() !== 'no', department: deptIn(o['Department']) || (/litho/i.test(name) ? 'Litho' : 'Metals'),
+    deptSet: !!deptIn(o['Department']) };
+}
+// Write the Department on every Material List and Machines row that doesn't have one yet (the
+// column is added if it's missing): litho types / machines named Litho get Litho, the rest Metals.
+// Only blanks are filled, so running it again changes nothing.
+async function fillDepartments(sheets, operator, opId) {
+  const lst = await materialListTab(sheets);
+  const mt = await machinesTab(sheets);
+  const data = [];
+  let items = 0, machines = 0;
+  lst.rows.forEach((r) => {
+    if (!String(r['Name'] || '').trim() || deptIn(r['Department'])) return;
+    data.push({ range: "'" + MATERIAL_LIST + "'!" + colLetter(lst.map['Department']) + r.__row, values: [[deptOf(r['Type'])]] });
+    items++;
+  });
+  mt.rows.forEach((r) => {
+    const name = String(r['Machine'] || '').trim();
+    if (!name || deptIn(r['Department'])) return;
+    data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Department']) + r.__row, values: [[/litho/i.test(name) ? 'Litho' : 'Metals']] });
+    machines++;
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return { ok: true, items, machines };
 }
 // Add (no oldName) or edit a machine on the Machines tab. Renaming one moves the lots on it (their
 // Location) to the new name; the load history keeps the name it had then.
@@ -3218,7 +3244,8 @@ async function loadMaterials(sheets, info, scans, operator, opId) {
     try {
       const mt = await machinesTab(sheets);
       if (!mt.rows.some((r) => String(r['Machine'] || '').trim().toLowerCase() === machine.toLowerCase())) {
-        await appendRowObj(sheets, MACHINES, mt.headers, { 'Machine': machine, 'Active': 'Yes', 'Created At': ts2, 'Last Updated At': ts2 });
+        await appendRowObj(sheets, MACHINES, mt.headers, { 'Machine': machine, 'Active': 'Yes', 'Created At': ts2, 'Last Updated At': ts2,
+          'Department': deptIn(info.department) || (/litho/i.test(machine) ? 'Litho' : deptOf(out0Type(lines))) });
       }
     } catch (e) { /* the load is saved; the machine is still listed from its load lines */ }
   }
@@ -3298,7 +3325,7 @@ async function setupMaterials(sheets, seed, operator, opId) {
       return;
     }
     const o = Object.assign({ 'Item ID': 'MI-' + ('00000' + (++nextItem)).slice(-5), 'Name': name, 'Type': type, 'Active': 'Yes',
-      'Created At': ts, 'Created By': 'Setup', 'Last Updated At': ts }, f);
+      'Created At': ts, 'Created By': 'Setup', 'Last Updated At': ts, 'Department': deptOf(type, it.department) }, f);
     byKey[itemKey(name, type)] = o;
     newItems.push(o);
   });
@@ -3319,7 +3346,7 @@ async function setupMaterials(sheets, seed, operator, opId) {
       if (n) { cell(MACHINES, mt.map, ex.__row, 'Last Updated At', ts); machinesFilled++; }
       return;
     }
-    const o = Object.assign({ 'Machine': name, 'Active': 'Yes', 'Created At': ts, 'Last Updated At': ts }, f);
+    const o = Object.assign({ 'Machine': name, 'Active': 'Yes', 'Created At': ts, 'Last Updated At': ts, 'Department': deptIn(m.department) || (/litho/i.test(name) ? 'Litho' : 'Metals') }, f);
     byM[name.toLowerCase()] = o;
     newMachines.push(o);
   });

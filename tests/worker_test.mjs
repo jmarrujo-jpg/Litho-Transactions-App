@@ -1635,5 +1635,26 @@ await concurrency(envBase, 'in-worker lock');
   ok('renaming onto another machine is refused', !cl.ok && /already on the Machines list/.test(cl.error), cl);
 }
 
+// 46. fillDepartments: the Department column is added and every blank row gets one; again changes nothing
+{ const f = fresh();
+  await call('setupMaterials', [{ items: [{ name: '9307G', type: 'Compound' }], machines: [{ name: 'Press 13' }, { name: 'Litho Line 3' }] }, 'Jo', 'op-46-a']);
+  // (setup now writes it; blank it out to look like rows from before)
+  ok('setup writes the department itself', f.rows(SID, 'Machines').every((r) => r['Department'] === (/Litho/.test(r['Machine']) ? 'Litho' : 'Metals'))
+    && f.rows(SID, 'Material List').every((r) => r['Department'] === 'Metals'), f.rows(SID, 'Machines'));
+  for (const tab of ['Machines', 'Material List']) {
+    const t = f.book(SID).tabs[tab], c = t.rows[0].indexOf('Department');
+    t.rows.slice(1).forEach((r) => { r[c] = ''; });
+  }
+  const a = await call('fillDepartments', ['Jo', 'op-46-b']);
+  const m = f.rows(SID, 'Machines'), l = f.rows(SID, 'Material List');
+  ok('blanks filled: Press 13 Metals, Litho Line 3 Litho, 9307G Metals', a.ok && m.filter((r) => r['Machine'] === 'Press 13')[0]['Department'] === 'Metals'
+    && m.filter((r) => r['Machine'] === 'Litho Line 3')[0]['Department'] === 'Litho' && l.filter((r) => r['Name'] === '9307G')[0]['Department'] === 'Metals', { a, m, l });
+  await call('saveMachine', [{ oldName: 'Press 13', name: 'Press 13', department: 'Plastics' }, 'Jo', 'op-46-c']);
+  const b = await call('fillDepartments', ['Jo', 'op-46-d']);
+  ok('again: nothing to fill, a set department is kept', b.ok && b.result.items === 0 && b.result.machines === 0 && f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Press 13')[0]['Department'] === 'Plastics', b);
+  const g = await call('getMaterials', []);
+  ok('rows now say their department is written', g.result.machineInfo.every((x) => x.deptSet) && g.result.items.every((x) => x.deptSet), g.result.machineInfo);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

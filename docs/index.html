@@ -237,7 +237,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.94.0</span>
+      <span class="version" id="appVersion">v1.95.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2041,6 +2041,21 @@
   var MT_DEPTS = ['Metals', 'Plastics', 'Litho'];
   var mtDept = 'all';
   function mtDeptName(d) { return d === 'all' ? L('All', 'Todos') : d === 'Metals' ? L('Metals', 'Metales') : d === 'Plastics' ? L('Plastics', 'Plásticos') : d; }
+  // Rows on the Material List / Machines tabs with no Department written yet get it written once
+  // (litho ones Litho, the rest Metals), so the sheet says it rather than the app guessing.
+  var mtDeptsSaved = false;
+  function mtSaveDepts() {
+    if (mtDeptsSaved) return;
+    var blank = (mtData.items || []).some(function (i) { return i.id && i.deptSet === false; }) ||
+      (mtData.machineInfo || []).some(function (m) { return m.deptSet === false; });
+    if (!blank) return;
+    mtDeptsSaved = true;
+    runMutation('fillDepartments', [lastOperator, newOpId()], function (r) {
+      if (!r || !mtData) return;
+      (mtData.items || []).forEach(function (i) { if (i.id) i.deptSet = true; });
+      (mtData.machineInfo || []).forEach(function (m) { m.deptSet = true; });
+    }, function () { mtDeptsSaved = false; });
+  }
   // Anything without a department (an older server) gets the default: litho types/machines Litho, else Metals.
   function mtFillDepts() {
     var byItem = {};
@@ -2093,6 +2108,7 @@
   function mtLoad(after) {
     google.script.run.withSuccessHandler(function (res) {
       mtData = res || { materials: [], products: {}, suppliers: [], containers: [], receivers: [] };
+      mtSaveDepts();
       mtFillDepts();
       if (after) after();
     }).withFailureHandler(function (err) {

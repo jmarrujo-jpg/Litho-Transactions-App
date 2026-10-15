@@ -2175,7 +2175,10 @@ const base = {
     getMaterials: () => R(mats),
     updateMaterial: (a) => R({ ok: true }), saveMachine: (a) => R({ ok: true }), saveMaterialItem: (a) => R({ ok: true, item: a[0] }),
   }));
+  mats.machineInfo[0].deptSet = false;   // a row from before departments
   await page.evaluate(() => openMaterials()); await page.waitForSelector('[data-mtopen]');
+  await page.waitForTimeout(150);
+  ok('a machine with no Department in the sheet gets it written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
   await page.click('[data-mtdept="Plastics"]'); await page.waitForTimeout(100);
   let ids = await page.$$eval('[data-mtopen]', (els) => els.map((e) => e.getAttribute('data-mtopen')));
   ok('Materials: the Plastics button shows only Plastics lots', ids.join() === 'M-2', ids);
