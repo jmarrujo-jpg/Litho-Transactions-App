@@ -109,31 +109,41 @@ const base = {
   await page.close();
 }
 
-// ---- 3. Create Job: a failed Start doesn't double the picker coating; retry reuses opId
+// ---- 3. Create Job: pass 1 (line, coating, lots); a failed Start sends the same pass again with the same opId
 { let n = 0;
+  const pjob = (args) => ({ jobId: 'JOB-000009', description: 'Blue', createdBy: 'Ann', passMode: true, tickets: [],
+    coatings: args, passes: [{ group: '603X408', sub: '10-OUT', item: 'SIZE', pass: 1, line: 'Litho Line 3', lots: [{ lot: 'CS1', product: 'Clear Size' }], changes: [{}], tickets: [] }] });
   const { page, calls } = await boot(Object.assign({}, base, {
-    createJob: (args) => (++n === 1 ? { ok: false, error: 'Sheets API 503: unavailable' } : R({ jobId: 'JOB-000009', coatings: args[2] })),
+    createJob: (args) => (++n === 1 ? { ok: false, error: 'Sheets API 503: unavailable' } : R({ jobId: 'JOB-000009', coatings: args[2], passMode: true })),
+    getJobDetail: () => R(pjob([])),
+    getMaterials: () => R({ materials: [{ id: 'M-1', lot: 'CS1', product: 'Clear Size', type: 'Litho Coating', status: 'In Stock', location: 'Coater Room' }], items: [], types: [] }),
     getAllTickets: () => R([ticket('SKD-1', '100', 'Current')]),
   }));
   await page.evaluate(() => openCreateJob());
-  await page.waitForSelector('#jobGroupSelect option[value="603X408"]', { state: 'attached' });
-  await page.selectOption('#jobGroupSelect', '603X408');
+  await page.waitForSelector('#psGroup option[value="603X408"]', { state: 'attached' });
+  ok('the line defaults to Litho Line 3', (await page.$eval('[data-plline="Litho Line 3"]', (b) => !b.classList.contains('secondary'))));
+  await page.selectOption('#psGroup', '603X408');
   await page.waitForTimeout(100);
-  ok('#OUT defaults to highest', (await page.$eval('#jobSubSelect', (s) => s.value)) === '10-OUT');
-  await page.selectOption('#jobItemSelect', 'SIZE');
+  ok('#OUT defaults to highest', (await page.$eval('#psSub', (s) => s.value)) === '10-OUT');
+  await page.selectOption('#psItem', 'SIZE');
+  await page.waitForSelector('#plLot');
+  await page.fill('#plLot', 'cs1'); await page.press('#plLot', 'Enter');
+  ok('a known lot fills in its material', (await page.textContent('#plBox')).includes('Clear Size'));
   await page.fill('#jobOperator', '');
   await page.click('#startJobSetupBtn');                  // no operator -> toast
   await page.fill('#jobOperator', 'Ann');
   await page.click('#startJobSetupBtn');                  // server fails
-  await page.waitForTimeout(300);
+  await page.waitForSelector('#modalOk'); await page.click('#modalOk');
   await page.click('#startJobSetupBtn');                  // works
   await page.waitForSelector('#jobTicketSearch');
   const cj = calls.filter((c) => c.fn === 'createJob');
   ok('two createJob calls', cj.length === 2, cj.length);
-  ok('each sent ONE coating (not 2 or 3)', cj.every((c) => c.args[2].length === 1), cj.map((c) => c.args[2].length));
+  ok('each sent pass 1 only, with its line and lot', cj.every((c) => c.args[2].length === 1 && c.args[2][0].line === 'Litho Line 3' && c.args[2][0].item === 'SIZE' && c.args[2][0].lots.length === 1 && c.args[2][0].lots[0].lot === 'CS1'), cj.map((c) => c.args[2]));
   ok('retry reused the opId', cj[0].args[4] === cj[1].args[4], cj.map((c) => c.args[4]));
   ok('ticket search has focus', await page.evaluate(() => document.activeElement && document.activeElement.id === 'jobTicketSearch'));
   ok('name field prefilled with creator on a new job', (await page.$eval('#jobTicketOperator', (el) => el.value)) === 'Ann');
+  ok('the pass screen shows pass 1 and its lot', /Pass 1: SIZE/.test(await page.textContent('#view')) && (await page.textContent('#view')).includes('CS1 (Clear Size)'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
 
@@ -2073,6 +2083,58 @@ const base = {
   await page.click('#backBtn'); await page.waitForSelector('#mtStartRemove');
   await page.click('#mtStartRemove'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(150);
   ok('Remove the START lots asks first, then removes them', calls.some((c) => c.fn === 'removeStartLots'));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 48. Pass-by-pass job: pass 2 re-scans tickets from pass 1; change lots (a new lot asks for its
+// material); finish the pass and set up the next; Review shows the passes with Continue.
+{ const P = (n, item, tickets, lots) => ({ group: '603X408', sub: '10-OUT', item, pass: n, line: 'Litho Line 3', lots: lots || [], changes: [{}], tickets: tickets || [] });
+  let job = { jobId: 'JOB-000020', description: 'Blue run', createdBy: 'Ann', status: 'Pending', passMode: true, notes: '',
+    tickets: [{ skidId: 'SKD-1', ticket: '100' }, { skidId: 'SKD-2', ticket: '101' }],
+    passes: [P(1, 'SIZE', [{ skidId: 'SKD-1', ticket: '100', passNumber: 1 }, { skidId: 'SKD-2', ticket: '101', passNumber: 1 }]), P(2, 'VARNISH', [], [{ lot: 'V1', product: 'Varnish 9' }])] };
+  job.coatings = job.passes;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getJobDetail: () => R(job),
+    getMaterials: () => R({ materials: [{ id: 'M-7', lot: 'V2', product: 'Varnish 9', type: 'Litho Coating', status: 'Loaded', location: 'Litho Line 3' }], items: [{ name: 'Varnish 9', type: 'Litho Coating', active: true }], types: ['Litho Coating'] }),
+    jobAddTicket: (a) => { const tk = a[1] === 'SKD-1' ? '100' : '101'; job.passes[1].tickets.push({ skidId: a[1], ticket: tk, passNumber: 2 });
+      return R({ skidId: a[1], ticket: tk, jobId: a[0], jobPass: 2, lots: 'V1 (Varnish 9)', detail: { coatings: [{ passNumber: 2 }] } }); },
+    setJobPassLots: (a) => { job.passes[1].lots = a[1]; job.passes[1].changes = [{}, {}]; return R(job); },
+    startJobPass: (a) => { job.passes.push(P(3, a[1].item, [], a[1].lots)); return R(job); },
+  }));
+  await page.evaluate(() => resumeJob('JOB-000020'));
+  await page.waitForSelector('#pjEarlier [data-pjadd]');
+  ok('pass 2 lists the job\'s tickets to re-scan', (await page.$$('#pjEarlier [data-pjadd]')).length === 2 && /Pass 2: VARNISH/.test(await page.textContent('#view')));
+  await page.fill('#jobTicketOperator', 'Bob');
+  await page.click('[data-pjadd="SKD-1"]'); await page.waitForTimeout(150);
+  let ja = calls.filter((c) => c.fn === 'jobAddTicket');
+  ok('one tap adds it to the pass (no sheet count)', ja.length === 1 && ja[0].args[1] === 'SKD-1' && ja[0].args[2] === '' && ja[0].args[5] === 'Bob', ja.map((c) => c.args));
+  ok('…it moves to the pass list', (await page.$$('#pjEarlier [data-pjadd]')).length === 1 && /Tickets in pass 2 \(1\)/.test(await page.textContent('#view')));
+  await page.fill('#jobTicketSearch', '101'); await page.press('#jobTicketSearch', 'Enter'); await page.waitForTimeout(150);
+  ja = calls.filter((c) => c.fn === 'jobAddTicket');
+  ok('scanning a job ticket + Enter adds it', ja.length === 2 && ja[1].args[1] === 'SKD-2', ja.map((c) => c.args));
+  // change lots: the loaded lot is offered; a new lot asks for its material
+  await page.click('#pjLots'); await page.waitForSelector('[data-plon="M-7"]');
+  await page.click('[data-plon="M-7"]');
+  await page.fill('#plLot', 'NEW-5'); await page.press('#plLot', 'Enter');
+  await page.waitForSelector('#plMat');
+  await page.fill('#plMat', 'Thinner T'); await page.fill('#plType', 'Litho Ink'); await page.click('#plMatOk');
+  await page.click('[data-plrm="0"]');   // take off V1
+  await page.click('#pjLotsSave'); await page.waitForTimeout(200);
+  const sl = calls.filter((c) => c.fn === 'setJobPassLots')[0];
+  ok('change lots sends the new set (a new lot with its material and type)', sl && sl.args[1].length === 2 && sl.args[1][0].lot === 'V2' && sl.args[1][1].lot === 'NEW-5' && sl.args[1][1].product === 'Thinner T' && sl.args[1][1].type === 'Litho Ink', sl && sl.args);
+  ok('…and the pass shows them', /NEW-5 \(Thinner T\)/.test(await page.textContent('#view')) && /Lots changed 1 time/.test(await page.textContent('#view')));
+  // finish the pass, set up pass 3
+  await page.click('#pjNext'); await page.waitForSelector('#pjStart');
+  ok('the next pass keeps the line and the group', (await page.$eval('[data-plline="Litho Line 3"]', (b) => !b.classList.contains('secondary'))) && (await page.$eval('#psGroup', (x) => x.value)) === '603X408');
+  await page.selectOption('#psItem', 'SIZE');
+  await page.click('#pjStart'); await page.waitForTimeout(200);
+  const sp = calls.filter((c) => c.fn === 'startJobPass')[0];
+  ok('Start pass 3 sends the coating, line and the lots carried over', sp && sp.args[1].item === 'SIZE' && sp.args[1].line === 'Litho Line 3' && sp.args[1].lots.length === 2, sp && sp.args);
+  ok('…and goes to pass 3', /Pass 3: SIZE/.test(await page.textContent('#view')) && !!(await page.$('#pjDrop')));
+  // Review Jobs shows the passes and a Continue button
+  await page.evaluate(() => { state.jobId = 'JOB-000020'; openJob('JOB-000020'); }); await page.waitForSelector('#jrContinue');
+  ok('Review shows each pass with its lots, no Add Coating', /Pass 1:.*SIZE/.test(await page.textContent('#view')) && /NEW-5/.test(await page.textContent('#view')) && !(await page.$('#jrAddCoatingBtn')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

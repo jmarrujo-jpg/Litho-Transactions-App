@@ -184,7 +184,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'addlots-91', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'jobpass-92', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -370,6 +370,12 @@ async function handle(fn, args, env) {
       return moveToWip(sheets, args[0], args[1], args[2], args[3], args[4], args[5]);
     case 'addCoatingToJob': // (jobId, coating, operator, opId)
       return addCoatingToJob(sheets, args[0], args[1], args[2], args[3]);
+    case 'startJobPass': // (jobId, {group, sub, item, line, lots[{lot, product?, type?}]}, operator, opId) a pass-by-pass job: the next pass
+      return startJobPass(sheets, args[0], args[1], args[2], args[3]);
+    case 'setJobPassLots': // (jobId, lots[{lot, product?, type?}], operator, opId) change the lots on the job's current pass
+      return setJobPassLots(sheets, args[0], args[1], args[2], args[3]);
+    case 'dropJobPass': // (jobId, passNo, operator, opId) take off the last pass while no ticket is in it
+      return dropJobPass(sheets, args[0], args[1], args[2], args[3]);
     case 'removeTicketFromJob': // (jobId, skidId, operator, opId)
       return removeTicketFromJob(sheets, args[0], args[1], args[2], args[3]);
     case 'approveJob': // (jobId, operator, opId)
@@ -826,7 +832,16 @@ function activeCoatings(history) {
   });
   return (history || []).filter((h) => String(h.group || '').trim() !== '' && num(h.passTotal) > 0 && !voided[String(h.passNumber)] && num(h.passNumber) > removedAt)
     .map((h) => ({ passNumber: h.passNumber, group: h.group, sub: h.sub, item: h.item, chemCode: h.chemCode, cost: num(h.passTotal),
-      date: toYMD(h.timestamp), by: h.operator || '', jobName: h.jobName || '', jobId: h.jobId || '' }));
+      date: toYMD(h.timestamp), by: h.operator || '', jobName: h.jobName || '', jobId: h.jobId || '', jobPass: h.jobPass || 0, lots: h.lots || '' }));
+}
+function txOut(r) {
+  return {
+    timestamp: r['Timestamp'], ticket: r['Ticket'], passNumber: num(r['Pass Number']), operator: r['Operator'],
+    group: r['Group'], sub: r['Sub-Variant'], item: r['Item'], chemCode: r['Chem Code'],
+    appCost: r['Application Cost'], lineCost: r['Line Cost'], passTotal: r['Pass Total Cost'],
+    runningTotal: r['Running Total After Pass'], notes: r['Notes'], jobName: r['Job Name'], jobId: r['Job ID'] || '', skidId: r['Skid ID'],
+    jobPass: num(r['Job Pass']) || 0, lots: String(r['Material Lots'] || '').trim(),
+  };
 }
 async function getTransactionHistory(sheets, skidId, ticket) {
   const { rows } = await readObjects(sheets, TRANSACTIONS);
@@ -834,12 +849,7 @@ async function getTransactionHistory(sheets, skidId, ticket) {
     const sid = String(r['Skid ID'] || '').trim();
     if (sid) return skidId && sid === String(skidId).trim();
     return ticket && String(r['Ticket']).trim() === String(ticket).trim();
-  }).map((r) => ({
-    timestamp: r['Timestamp'], ticket: r['Ticket'], passNumber: num(r['Pass Number']), operator: r['Operator'],
-    group: r['Group'], sub: r['Sub-Variant'], item: r['Item'], chemCode: r['Chem Code'],
-    appCost: r['Application Cost'], lineCost: r['Line Cost'], passTotal: r['Pass Total Cost'],
-    runningTotal: r['Running Total After Pass'], notes: r['Notes'], jobName: r['Job Name'], jobId: r['Job ID'] || '', skidId: r['Skid ID'],
-  })).sort((a, b) => a.passNumber - b.passNumber);
+  }).map(txOut).sort((a, b) => a.passNumber - b.passNumber);
 }
 async function getTicketCard(sheets, skidId) {
   const { rows } = await readObjects(sheets, MASTER);
@@ -944,9 +954,28 @@ async function getJobDetail(sheets, jobId) {
   const tickets = master.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim()).map((o) => ({
     skidId: o['Skid ID'], ticket: o['Ticket'], status: o['Status'], litho: num(o['Litho']), bw: o['BW'], testedBw: o['Tested BW'] != null ? o['Tested BW'] : '', type: o['TC'], temper: o['TM'], endUse: o['End Use'],
   }));
-  return { jobId: job['Job ID'], description: job['Description'], createdBy: job['Created By'], createdAt: toYMD(job['Created At']),
+  const out = { jobId: job['Job ID'], description: job['Description'], createdBy: job['Created By'], createdAt: toYMD(job['Created At']),
     status: job['Status'], approvedAt: job['Approved At'] ? toYMD(job['Approved At']) : '', approvedBy: job['Approved By'],
     coatings: recipe, coatingsSummary: job['Coatings'], notes: job['Notes'], tickets };
+  if (isPassJob(recipe)) {
+    // Which tickets went through each pass, from their (live) coating rows.
+    const passes = recipe.map((p) => Object.assign({}, p, { tickets: [] }));
+    const hist = {};
+    tickets.forEach((t) => { hist[String(t.skidId).trim()] = []; });
+    (await readObjects(sheets, TRANSACTIONS)).rows.forEach((r) => {
+      const h = hist[String(r['Skid ID'] || '').trim()];
+      if (h) h.push(txOut(r));
+    });
+    tickets.forEach((t) => {
+      activeCoatings(hist[String(t.skidId).trim()].sort((a, b) => a.passNumber - b.passNumber)).forEach((c) => {
+        if (String(c.jobId).trim() !== String(jobId).trim() || !c.jobPass || !passes[c.jobPass - 1]) return;
+        passes[c.jobPass - 1].tickets.push({ skidId: t.skidId, ticket: t.ticket, passNumber: c.passNumber, lots: c.lots, at: c.date });
+      });
+    });
+    out.passMode = true;
+    out.passes = passes;
+  }
+  return out;
 }
 
 // ================= WRITES (Stage 2) =================================================
@@ -1121,6 +1150,9 @@ async function appendTx(sheets, obj, opId) {
   let headers = await tabHeaders(sheets, TRANSACTIONS);
   if (headers.indexOf('Op ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Op ID'); headers = e.headers; }
   if (headers.indexOf('Job ID') === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, 'Job ID'); headers = e.headers; }
+  for (const col of TX_PASS_COLS) {
+    if (obj[col] != null && obj[col] !== '' && headers.indexOf(col) === -1) { const e = await ensureColumn(sheets, TRANSACTIONS, headers, col); headers = e.headers; }
+  }
   // Every row gets an Op ID (a generated one for rows that aren't an action's own record), so an
   // unclear append failure can always be checked before retrying.
   obj['Op ID'] = opId || autoOpId();
@@ -1135,13 +1167,15 @@ async function withLastOpCol(sheets, master) {
   return readTab(sheets, MASTER);
 }
 function stampedBy(obj, opId) { return !!opId && String((obj && obj['Last Op ID']) || '').trim() === String(opId).trim(); }
+// A pass-by-pass job's coating rows also say which pass of the job it was and the lots on it.
+const TX_PASS_COLS = ['Job Pass', 'Material Lots'];
 async function logCoatingTx(sheets, o, opId) {
-  await appendTx(sheets, {
+  await appendTx(sheets, Object.assign({
     'Timestamp': nowStamp(), 'Ticket': o.ticket, 'Pass Number': o.passNumber, 'Operator': o.operator || '',
     'Group': o.group || '', 'Sub-Variant': o.sub || '', 'Item': o.item, 'Chem Code': o.match.chemCode || '',
     'Application Cost': o.match.appCost, 'Line Cost': o.match.lineCost, 'Pass Total Cost': o.match.totalCost,
     'Running Total After Pass': o.runningTotal, 'Notes': o.notes || '', 'Job Name': o.jobName || '', 'Job ID': o.jobId || '', 'Skid ID': o.skidId || '',
-  }, opId);
+  }, o.extra || {}), opId);
 }
 async function eventTx(sheets, o, opId) {
   await appendTx(sheets, {
@@ -1170,7 +1204,7 @@ async function normalizeMasterRows(sheets) {
 // 'Last Op ID', and the coating's Transactions row (carrying the opId) is written last. If the
 // action dies in between, the retry sees the stamp, skips the skid change, and just writes the
 // missing log row — instead of stacking the cost a second time.
-async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId, coatedTicket) {
+async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, notes, sheetsRun, isPartialSkid, lithoNote, jobName, opId, firstStatus, jobId, coatedTicket, txExtra) {
   if (await opAlreadyDone(sheets, opId)) return { duplicate: true, skidId };
   if (!group || !itemName) throw new Error('Pick a size/group and coating item.');
   const match = await findRate(sheets, group, sub, itemName);
@@ -1206,7 +1240,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
         note: num(rem['QTY/LOAD']) + ' sheets (~' + num(rem['Weight']) + ' lbs, estimated) of ' + baseTicketOf(ticket) + ' left in Current; coated batch is ' + ticket, runningTotal: 0 }, subOp(opId, 'split'));
     }
     await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match,
-      runningTotal: num(obj['Litho']), notes, jobName, jobId: jobId || obj['Job ID'] || '' }, opId);
+      runningTotal: num(obj['Litho']), notes, jobName, jobId: jobId || obj['Job ID'] || '', extra: txExtra }, opId);
     Object.assign(result, { ticket, litho: num(obj['Litho']), sheetsRun: num(obj['QTY/LOAD']), isPartial: !!rem,
       remainderTicket: rem ? rem['Ticket'] : null, remainderSheets: rem ? num(rem['QTY/LOAD']) : 0, remainderWeight: rem ? num(rem['Weight']) : 0 });
     if (rem) result.coatedTicket = ticket;
@@ -1224,7 +1258,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
     if (lithoNoteClean) stamp['Litho Notes'] = mergedNotes(lithoNoteClean);
     if (jobId) { stamp['Status'] = firstStatus || STATUS.PENDING; stamp['Job ID'] = jobId; stamp['Row'] = ''; }   // attached to a job -> leaving its storage row
     await stampCells(sheets, MASTER, row, map, stamp);
-    await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName, jobId: jobId || obj['Job ID'] || '' }, opId);
+    await logCoatingTx(sheets, { skidId, ticket, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: newTotal, notes, jobName, jobId: jobId || obj['Job ID'] || '', extra: txExtra }, opId);
     result.litho = newTotal;
     result.detail = await getTicketCard(sheets, skidId);
     return result;
@@ -1316,7 +1350,7 @@ async function applyCoating(sheets, skidId, group, sub, itemName, operatorName, 
   if (noteText) stamp['Litho Notes'] = mergedNotes(noteText);
   await stampCells(sheets, MASTER, row, map, stamp);
 
-  await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName, jobId: jobId || '' }, opId);
+  await logCoatingTx(sheets, { skidId, ticket: coatedTicketFinal, passNumber: nextPass, operator: operatorName, group, sub, item: itemName, match, runningTotal: match.totalCost, notes: [notes, scrapNote].filter(Boolean).join(' | '), jobName, jobId: jobId || '', extra: txExtra }, opId);
 
   result.ticket = coatedTicketFinal;   // the coated piece now carries the -LR# ticket (obj kept its SKD)
   result.sheetsRun = sheets_;
@@ -1484,7 +1518,8 @@ async function editTicketCoating(sheets, skidId, passNumber, group, sub, item, o
   const ticket = ctx.obj['Ticket'], jobId = ctx.obj['Job ID'] || '';
   if (!resumed) await stampCells(sheets, MASTER, ctx.row, ctx.map, { 'Litho': afterNew, 'Last Updated At': nowStamp(), 'Last Updated By': operator || '', 'Last Op ID': opId || '' });
   if (!(await opAlreadyDone(sheets, subOp(opId, 'new')))) {
-    await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId, jobId }, subOp(opId, 'new'));
+    await logCoatingTx(sheets, { skidId, ticket, passNumber: ctx.nextPass + 1, operator, group, sub, item, match, runningTotal: afterNew, notes: 'Correction of pass ' + passNumber, jobName: jobId, jobId,
+      extra: ctx.target.jobPass ? { 'Job Pass': ctx.target.jobPass, 'Material Lots': ctx.target.lots || '' } : null }, subOp(opId, 'new'));
   }
   await appendTx(sheets, { 'Timestamp': nowStamp(), 'Ticket': ticket, 'Pass Number': ctx.nextPass, 'Operator': operator || '',
     'Group': '', 'Sub-Variant': '', 'Item': 'COATING CHANGED (VOID)', 'Chem Code': '', 'Application Cost': 0, 'Line Cost': 0,
@@ -1516,15 +1551,21 @@ async function createJob(sheets, description, operator, coatings, notes, opId) {
     let recipe = []; try { recipe = JSON.parse(prior['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
     return { duplicate: true, jobId: prior['Job ID'], description: prior['Description'] || '', coatings: recipe, status: prior['Status'] || 'Pending' };
   }
-  await validateCoatings(sheets, coatings);
   const jobId = fmtId('JOB-', maxIdNumber(jobs0.rows, 'Job ID', 'JOB-') + 1);
+  if (isPassJob(coatings)) {   // pass by pass: the job starts with pass 1 only (its line and lots)
+    const first = coatings[0] || {};
+    await validateCoatings(sheets, [first]);
+    const line = String(first.line || '').trim() || LITHO_LINES[0];
+    const lots = await passLots(sheets, line, first.lots, operator, subOp(opId, 'lots'), jobId + ' pass 1');
+    coatings = [passEntry(first, 1, line, lots, operator, '')];
+  } else await validateCoatings(sheets, coatings);
   const ens = await ensureColumn(sheets, JOBS, jobs0.headers, 'Op ID');
   await appendRowObj(sheets, JOBS, ens.headers, {
     'Job ID': jobId, 'Created At': nowStamp(), 'Created By': operator || '', 'Description': description || '',
     'Coatings': coatingSummary(coatings), 'Coatings JSON': JSON.stringify(coatings), 'Ticket Count': 0, 'Status': 'Pending',
     'Notes': notes || '', 'Op ID': opId || '',
   });
-  return { jobId, description: description || '', coatings, status: 'Pending' };
+  return { jobId, description: description || '', coatings, status: 'Pending', passMode: isPassJob(coatings) };
 }
 
 // Applies the job's whole recipe to one skid. Each coat is its own retry-safe step (coat 0 uses
@@ -1545,6 +1586,7 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
   if (String(job['Status']) === 'Approved') throw new Error('Job ' + jobId + ' is approved and locked.');
   let recipe = []; try { recipe = JSON.parse(job['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
   if (!recipe.length) throw new Error('Job ' + jobId + ' has no coatings.');
+  const passMode = isPassJob(recipe);
   const desc = job['Description'];
   const master0 = await readTab(sheets, MASTER);
   const existing = master0.rows.filter((o) => String(o['Skid ID']).trim() === String(skidId).trim())[0];
@@ -1552,7 +1594,7 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
   if (existing && !resuming) {
     const onJob = String(existing['Job ID'] || '').trim();
     const st = existing['Status'] || STATUS.CURRENT;
-    if (onJob === String(jobId).trim() && st !== STATUS.CURRENT) {
+    if (onJob === String(jobId).trim() && st !== STATUS.CURRENT && !passMode) {
       throw new Error('Ticket ' + (existing['Ticket'] || skidId) + ' is already on job ' + jobId + '.');
     }
     if (onJob && onJob !== String(jobId).trim() && st === STATUS.PENDING) {
@@ -1560,11 +1602,19 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
     }
   }
   let result = null;
-  for (let i = 0; i < recipe.length; i++) {
-    const c = recipe[i];
+  const cur = passMode ? recipe[recipe.length - 1] : null;
+  if (cur && existing && !resuming && String(existing['Job ID'] || '').trim() === String(jobId).trim()) {
+    const done = activeCoatings(await getTransactionHistory(sheets, existing['Skid ID'], existing['Ticket']))
+      .some((h) => String(h.jobId).trim() === String(jobId).trim() && h.jobPass === cur.pass);
+    if (done) throw new Error('Ticket ' + (existing['Ticket'] || skidId) + ' is already in pass ' + cur.pass + '.');
+  }
+  const steps = cur ? [cur] : recipe;
+  for (let i = 0; i < steps.length; i++) {
+    const c = steps[i];
     const r = await applyCoating(sheets, skidId, c.group, c.sub, c.item, operator, '',
       i === 0 ? sheetsRun : '', i === 0 ? isPartialSkid : false, i === 0 ? lithoNote : '',
-      desc, i === 0 ? opId : subOp(opId, 'c' + i), STATUS.PENDING, jobId, i === 0 ? coatedTicket : '');
+      desc, i === 0 ? opId : subOp(opId, 'c' + i), STATUS.PENDING, jobId, i === 0 ? coatedTicket : '',
+      cur ? { 'Job Pass': cur.pass, 'Material Lots': lotsText(cur.lots) } : null);
     if (r && !r.duplicate) {
       if (!result) result = r;
       else if (r.litho !== undefined) { result.litho = r.litho; result.detail = r.detail; }
@@ -1586,6 +1636,7 @@ async function jobAddTicket(sheets, jobId, skidId, sheetsRun, isPartialSkid, lit
     result = { skidId, ticket: card.ticket, litho: card.litho, detail: card, isPartial: false, remainderTicket: null, remainderSheets: 0, scrapSheets: 0 };
   }
   result.jobId = jobId;
+  if (cur) { result.jobPass = cur.pass; result.lots = lotsText(cur.lots); }
   if (tested !== null) result.testedBw = tested;   // the page checks this came back (an older Worker ignored the value)
   return result;
 }
@@ -1599,6 +1650,7 @@ async function addCoatingToJob(sheets, jobId, coating, operator, opId) {
   if (!job) throw new Error('Job not found: ' + jobId);
   if (String(job['Status']) === 'Approved') throw new Error('Job is approved and locked.');
   let recipe = []; try { recipe = JSON.parse(job['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
+  if (isPassJob(recipe)) throw new Error('This job runs pass by pass — finish the pass and start the next one instead.');
   if (!(opId && recipe.some((c) => c && c.op === opId))) {
     const entry = { group: coating.group, sub: coating.sub || '', item: coating.item };
     if (opId) entry.op = opId;
@@ -1610,6 +1662,131 @@ async function addCoatingToJob(sheets, jobId, coating, operator, opId) {
   for (let i = 0; i < pend.length; i++) {
     await applyCoating(sheets, pend[i]['Skid ID'], coating.group, coating.sub, coating.item, operator, '', '', false, '', desc, subOp(opId, pend[i]['Skid ID']), STATUS.PENDING, jobId);
   }
+  return getJobDetail(sheets, jobId);
+}
+
+// ---- Pass-by-pass litho jobs ----
+// The job is built one pass at a time: pick the line, the coating and the material lots on it, scan
+// the tickets that went through, then set up the next pass. Each ticket's coating row records the
+// pass and the lots (so a ticket shows which lots coated it, and a lot finds its tickets). The lots
+// can be changed part-way through a pass; tickets scanned after that get the new lots.
+// The passes live in the job's Coatings JSON: {group, sub, item, pass, line, lots[], changes[], op}.
+const LITHO_LINES = ['Litho Line 3', 'Litho Line 1'];
+const PASS_LOTS_MAX = 20, PASS_NEW_MATERIALS_MAX = 4;
+function isPassJob(recipe) { return (recipe || []).some((c) => c && (c.pass || c.line)); }
+function lotsText(lots) { return (lots || []).map((l) => l.lot + (l.product ? ' (' + l.product + ')' : '')).join(', '); }
+function passEntry(c, n, line, lots, by, op) {
+  return { group: c.group, sub: c.sub || '', item: c.item, pass: n, line, lots,
+    changes: [{ at: nowStamp(), by: String(by || '').trim(), lots: lots.map((l) => l.lot) }], op: op || '' };
+}
+// The lots for a pass, checked against Materials. A lot that's Loaded (or was loaded on this line
+// before) is just recorded; one In Stock is loaded onto the line (one container, on Material Loads);
+// one not in the app yet is added as Loaded on the line under the material typed (type defaults to
+// Litho Coating). Retry-safe: the loads carry "<opId>#load", new lots "<opId>#new<n>", and a retry
+// finds what the first try did.
+async function passLots(sheets, line, lots, operator, opId, note) {
+  const want = [], seen = {};
+  (Array.isArray(lots) ? lots : []).forEach((l) => {
+    l = l || {};
+    const lot = String(l.lot == null ? '' : l.lot).trim();
+    if (!lot) return;
+    const product = String(l.product || '').trim();
+    const k = lot.toLowerCase() + '|' + product.toLowerCase();
+    if (seen[k]) return;
+    seen[k] = 1;
+    want.push({ lot, product, type: String(l.type || '').trim() });
+  });
+  if (!want.length) return [];
+  if (want.length > PASS_LOTS_MAX) throw new Error('That is more than ' + PASS_LOTS_MAX + ' lots on one pass.');
+  const t = await lotsTab(sheets);
+  let loads = [];
+  try { loads = (await readObjects(sheets, MATERIAL_LOADS)).rows; } catch (e) { loads = []; }
+  const low = (v) => String(v == null ? '' : v).trim().toLowerCase();
+  const lineL = low(line), loadOp = subOp(opId, 'load');
+  const statusOf = (r) => String(r['Status'] || '').trim() || MATERIAL_STATUS.IN_STOCK;
+  const outOf = (lot, r) => ({ lot, product: String(r['Product'] || '').trim(), type: String(r['Type'] || '').trim(), id: String(r['Material ID'] || '').trim() });
+  const out = [], toLoad = [], toAdd = {}, addOrder = [];
+  want.forEach((w) => {
+    const rows = t.rows.filter((r) => low(r['Lot #']) === low(w.lot) && (!w.product || low(r['Product']) === low(w.product)));
+    const prods = rows.map((r) => String(r['Product'] || '').trim()).filter((p, i, a) => a.findIndex((x) => low(x) === low(p)) === i);
+    if (!w.product && prods.length > 1) throw new Error('Lot ' + w.lot + ' is on more than one material (' + prods.join(', ') + ') — pick which one.');
+    const loaded = rows.filter((r) => statusOf(r) === MATERIAL_STATUS.LOADED)[0];
+    if (loaded) { out.push(outOf(w.lot, loaded)); return; }
+    const before = loads.filter((l) => low(l['Lot #']) === low(w.lot) && (!w.product || low(l['Product']) === low(w.product))
+      && (low(l['Machine']) === lineL || (loadOp && String(l['Op ID'] || '').indexOf(loadOp + '#') === 0)))[0];
+    if (before) { out.push(outOf(w.lot, before)); return; }
+    const inStock = rows.filter((r) => statusOf(r) === MATERIAL_STATUS.IN_STOCK && num(r['Qty On Hand']) > 0)[0];
+    if (inStock) { toLoad.push({ lot: w.lot, product: String(inStock['Product'] || '').trim(), qty: 1 }); out.push(outOf(w.lot, inStock)); return; }
+    if (rows.length) { out.push(outOf(w.lot, rows[0])); return; }   // used up elsewhere: still recorded
+    if (!w.product) throw new Error('Lot ' + w.lot + ' is not in the app yet — pick or type its material.');
+    const type = materialType(w.type) || 'Litho Coating';
+    const key = itemKey(w.product, type);
+    if (!toAdd[key]) { toAdd[key] = { type, product: w.product, lots: [] }; addOrder.push(key); }
+    toAdd[key].lots.push({ lot: w.lot, qty: 1 });
+    out.push({ lot: w.lot, product: w.product, type, id: '' });
+  });
+  if (addOrder.length > PASS_NEW_MATERIALS_MAX) throw new Error('Add at most ' + PASS_NEW_MATERIALS_MAX + ' new materials at a time.');
+  if (toLoad.length) await loadMaterials(sheets, { machine: line, notes: note || '' }, toLoad, operator, loadOp);
+  for (let i = 0; i < addOrder.length; i++) {
+    const a = toAdd[addOrder[i]];
+    const r = await addMaterialLots(sheets, { type: a.type, product: a.product, location: line, onMachine: true }, a.lots, operator, subOp(opId, 'new' + (i + 1)));
+    r.saved.forEach((m) => {
+      const o = out.filter((x) => !x.id && low(x.lot) === low(m.lot) && itemKey(x.product, x.type) === itemKey(m.product, m.type))[0];
+      if (o) { o.id = m.id; o.product = m.product; }
+    });
+  }
+  return out;
+}
+async function passJob(sheets, jobId) {
+  const jobs = await readTab(sheets, JOBS);
+  const job = jobs.rows.filter((o) => String(o['Job ID']).trim() === String(jobId).trim())[0];
+  if (!job) throw new Error('Job not found: ' + jobId);
+  if (String(job['Status']) === 'Approved') throw new Error('Job ' + jobId + ' is approved and locked.');
+  let recipe = []; try { recipe = JSON.parse(job['Coatings JSON'] || '[]') || []; } catch (e) { recipe = []; }
+  if (!isPassJob(recipe)) throw new Error('Job ' + jobId + ' puts every coating on at once — use Add Coating instead.');
+  return { jobs, job, recipe };
+}
+async function savePasses(sheets, j) {
+  await stampCells(sheets, JOBS, j.job.__row, j.jobs.map, { 'Coatings JSON': JSON.stringify(j.recipe),
+    'Coatings': j.recipe.map((c) => 'P' + c.pass + ' ' + c.item + (c.sub ? ' (' + c.sub + ')' : '')).join(' | ') });
+}
+// Start the next pass: its line (defaults to the last pass's), coating and lots.
+async function startJobPass(sheets, jobId, pass, operator, opId) {
+  pass = pass || {};
+  const j = await passJob(sheets, jobId);
+  if (opId && j.recipe.some((c) => c && c.op === opId)) return getJobDetail(sheets, jobId);
+  await validateCoatings(sheets, [pass]);
+  const prev = j.recipe[j.recipe.length - 1] || {};
+  const line = String(pass.line || '').trim() || prev.line || LITHO_LINES[0];
+  const n = j.recipe.length + 1;
+  const lots = await passLots(sheets, line, pass.lots, operator, subOp(opId, 'lots'), jobId + ' pass ' + n);
+  j.recipe.push(passEntry(pass, n, line, lots, operator, opId));
+  await savePasses(sheets, j);
+  return getJobDetail(sheets, jobId);
+}
+// Change the lots on the current pass (a new can or drum part-way through). Tickets scanned from
+// now on get the new lots; the change is kept on the pass with the time and who did it.
+async function setJobPassLots(sheets, jobId, lots, operator, opId) {
+  const j = await passJob(sheets, jobId);
+  const cur = j.recipe[j.recipe.length - 1];
+  if (opId && (cur.changes || []).some((ch) => ch.op === opId)) return getJobDetail(sheets, jobId);
+  const res = await passLots(sheets, cur.line, lots, operator, subOp(opId, 'lots'), jobId + ' pass ' + cur.pass + ' (lot change)');
+  cur.lots = res;
+  cur.changes = (cur.changes || []).concat([{ at: nowStamp(), by: String(operator || '').trim(), lots: res.map((l) => l.lot), op: opId || '' }]);
+  await savePasses(sheets, j);
+  return getJobDetail(sheets, jobId);
+}
+// Take off the last pass (started by mistake) while no ticket has gone through it.
+// Only the pass named is taken off, so a retry doesn't take off the one before it too.
+async function dropJobPass(sheets, jobId, passNo, operator, opId) {
+  const j = await passJob(sheets, jobId);
+  if (num(passNo) !== j.recipe.length) return getJobDetail(sheets, jobId);
+  if (j.recipe.length < 2) throw new Error('Pass 1 can\'t be taken off — delete the job instead.');
+  const d = await getJobDetail(sheets, jobId);
+  const last = d.passes[d.passes.length - 1];
+  if (last.tickets.length) throw new Error('Pass ' + last.pass + ' has ' + last.tickets.length + ' ticket(s) — remove them first.');
+  j.recipe.pop();
+  await savePasses(sheets, j);
   return getJobDetail(sheets, jobId);
 }
 

@@ -1541,5 +1541,47 @@ await concurrency(envBase, 'in-worker lock');
   ok('no lot numbers is refused', !none.ok && /lot number/.test(none.error), none);
 }
 
+// 43. Pass-by-pass litho job: pass 1 with its line and lots, scan tickets, change lots mid-pass,
+// pass 2 re-scans tickets, each coating row carries the pass and lots; lots load onto the line.
+{ const f = fresh();
+  await call('addMaterialLots', [{ type: 'Litho Coating', product: 'Clear Size', location: 'Coater Room' }, [{ lot: 'CS1' }, { lot: 'CS2' }], 'Jonathan', 'op-43-m']);
+  const p1 = { group: '603X408', sub: '10-OUT', item: 'SIZE', line: 'Litho Line 3', lots: [{ lot: 'CS1' }, { lot: 'NEW9', product: 'Thinner X' }] };
+  const j = await call('createJob', ['Pass job', 'Ann', [p1], '', 'op-43-j']);
+  const jid = j.result && j.result.jobId;
+  let m = f.rows(SID, 'Materials');
+  ok('pass 1: an In Stock lot is loaded onto the line, a new lot is added Loaded there', j.ok && j.result.passMode
+    && f.rows(SID, 'Material Loads').some((r) => r['Lot #'] === 'CS1' && r['Machine'] === 'Litho Line 3')
+    && m.some((r) => r['Lot #'] === 'NEW9' && r['Status'] === 'Loaded' && r['Location'] === 'Litho Line 3' && r['Type'] === 'Litho Coating'), { j, m });
+  const a = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-43-a', '']);
+  ok('a ticket in pass 1 gets the pass and lots on its row', a.ok && a.result.jobPass === 1 && txFor(f, 'SKD-000001').some((r) => String(r['Job Pass']) === '1' && /CS1 \(Clear Size\)/.test(r['Material Lots']) && /NEW9/.test(r['Material Lots'])), txFor(f, 'SKD-000001'));
+  const a2 = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-43-a2', '']);
+  ok('the same ticket twice in a pass is refused', !a2.ok && /already in pass 1/.test(a2.error), a2);
+  const ch = await call('setJobPassLots', [jid, [{ lot: 'CS2' }], 'Bob', 'op-43-c']);
+  const ch2 = await call('setJobPassLots', [jid, [{ lot: 'CS2' }], 'Bob', 'op-43-c']);
+  ok('change lots mid-pass (retry adds no second change)', ch.ok && ch2.ok && ch2.result.passes[0].changes.length === 2 && ch2.result.passes[0].lots[0].lot === 'CS2', ch2);
+  await call('jobAddTicket', [jid, 'SKD-000002', '', false, '', 'Bob', 'op-43-b', '']);
+  ok('tickets after the change get the new lot', txFor(f, 'SKD-000002').some((r) => /^CS2/.test(r['Material Lots'])), txFor(f, 'SKD-000002'));
+  const p2 = { group: '603X408', sub: '10-OUT', item: 'VARNISH', lots: [{ lot: 'CS1' }] };
+  const s2 = await call('startJobPass', [jid, p2, 'Ann', 'op-43-p2']);
+  const s2b = await call('startJobPass', [jid, p2, 'Ann', 'op-43-p2']);
+  ok('pass 2 starts once; the line carries over; a lot already on the line is not loaded again', s2.ok && s2b.ok && s2b.result.passes.length === 2 && s2b.result.passes[1].line === 'Litho Line 3'
+    && f.rows(SID, 'Material Loads').filter((r) => r['Lot #'] === 'CS1').length === 1, { s2b, loads: f.rows(SID, 'Material Loads') });
+  const b = await call('jobAddTicket', [jid, 'SKD-000001', '', false, '', 'Bob', 'op-43-d', '']);
+  const d = await call('getJobDetail', [jid]);
+  ok('re-scanning a ticket in pass 2 adds pass 2 only', b.ok && b.result.jobPass === 2 && Number(skidRow(f, 'SKD-000001')['Litho']) === 6.5
+    && d.result.passes[0].tickets.length === 2 && d.result.passes[1].tickets.length === 1 && d.result.passes[1].tickets[0].skidId === 'SKD-000001', d.result && d.result.passes);
+  const old = await call('addCoatingToJob', [jid, { group: '603X408', sub: '10-OUT', item: 'WHITE' }, 'Ann', 'op-43-x']);
+  ok('Add Coating is refused on a pass job', !old.ok && /pass by pass/.test(old.error), old);
+  const s3 = await call('startJobPass', [jid, { group: '603X408', sub: '10-OUT', item: 'WHITE', line: 'Litho Line 1' }, 'Ann', 'op-43-p3']);
+  const dr = await call('dropJobPass', [jid, 3, 'Ann', 'op-43-dr']);
+  const dr2 = await call('dropJobPass', [jid, 3, 'Ann', 'op-43-dr']);
+  const dr1 = await call('dropJobPass', [jid, 2, 'Ann', 'op-43-dr1']);
+  ok('an empty last pass can be taken off (once); one with tickets cannot', s3.ok && s3.result.passes[2].line === 'Litho Line 1' && dr.ok && dr2.ok && dr2.result.passes.length === 2 && !dr1.ok && /remove them first/.test(dr1.error), { dr2, dr1 });
+  const unk = await call('startJobPass', [jid, { group: '603X408', sub: '10-OUT', item: 'WHITE', lots: [{ lot: 'ZZZ' }] }, 'Ann', 'op-43-u']);
+  ok('an unknown lot with no material is refused', !unk.ok && /pick or type its material/.test(unk.error), unk);
+  const ap = await call('approveJob', [jid, 'Fore', 'op-43-ap']);
+  ok('the job approves as usual', ap.ok && skidRow(f, 'SKD-000001')['Status'] === 'WIP', ap);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
