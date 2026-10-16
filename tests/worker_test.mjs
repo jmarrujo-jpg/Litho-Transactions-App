@@ -1777,11 +1777,12 @@ await concurrency(envBase, 'in-worker lock');
   const it = await call('saveMaterialItem', [{ name: 'PP 5520', type: 'Resin', department: 'Plastics', suppliers: ['lyb', 'Braskem', 'LYB'], expRequired: true, machines: ['Injection 1'] }, 'Jo', 'op-50-d']);
   const row = f.rows(SID, 'Material List')[0];
   ok('a material with two suppliers, expiration required, and where it goes', it.ok && row['Supplier'] === 'LYB, BRASKEM' && row['Expiration Required'] === 'Yes'
-    && it.result.item.suppliers.join() === 'LYB,BRASKEM' && it.result.item.expRequired === true
-    && f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Injection 1')[0]['Materials'] === 'PP 5520' && !f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Injection 2')[0]['Materials'], [row, f.rows(SID, 'Machines')]);
+    && it.result.item.suppliers.join() === 'LYB,BRASKEM' && it.result.item.expRequired === true && row['Goes To'] === 'Injection 1', [row, f.rows(SID, 'Machines')]);
+  const g0 = await call('getMaterials', []);
+  ok('the machine knows what runs on it from the material', g0.result.machineInfo.filter((m) => m.name === 'Injection 1')[0].materials.join() === 'PP 5520'
+    && !g0.result.machineInfo.filter((m) => m.name === 'Injection 2')[0].materials.length, g0.result.machineInfo);
   const mv = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'PP 5520 Natural', type: 'Resin', department: 'Plastics', suppliers: 'LYB', expRequired: true, machines: ['Injection 2'] }, 'Jo', 'op-50-e']);
-  const mm = f.rows(SID, 'Machines');
-  ok('changing where it goes (and its name) updates the machines', mv.ok && mm.filter((r) => r['Machine'] === 'Injection 1')[0]['Materials'] === '' && mm.filter((r) => r['Machine'] === 'Injection 2')[0]['Materials'] === 'PP 5520 Natural', mm);
+  ok('changing where it goes', mv.ok && f.rows(SID, 'Material List')[0]['Goes To'] === 'Injection 2', f.rows(SID, 'Material List')[0]);
   const other = await call('saveMaterialItem', [{ name: 'PP 5520 Natural', type: 'Resin', department: 'Metals' }, 'Jo', 'op-50-f']);
   ok('another department can have a material with the same name', other.ok && f.rows(SID, 'Material List').length === 2, other);
   // Receiving
@@ -1811,6 +1812,30 @@ await concurrency(envBase, 'in-worker lock');
   const g = await call('getMaterials', []);
   ok('getMaterials: lots carry their own department, materials their suppliers', g.result.materials.every((m) => m.dept === 'Plastics' && m.department === 'Plastics')
     && g.result.items.filter((i) => i.department === 'Plastics')[0].suppliers.join() === 'LYB' && g.result.suppliers.indexOf('LYB') !== -1, g.result.items);
+}
+
+// 51. Where a material goes is on the material: machine renamed / removed follows; the old lists move over
+{ const f = fresh();
+  await call('saveMachine', [{ name: 'Line 4', department: 'Metals', materials: 'WB-2100, 9307G' }, 'Jo', 'op-51-a']);   // an old-style list on the machine
+  await call('saveMachine', [{ name: 'Line 5', department: 'Metals' }, 'Jo', 'op-51-b']);
+  await call('saveMaterialItem', [{ name: 'WB-2100', type: 'Compound', department: 'Metals' }, 'Jo', 'op-51-c']);
+  await call('saveMaterialItem', [{ name: '9307G', type: 'Compound', department: 'Metals' }, 'Jo', 'op-51-d']);
+  const g = await call('getMaterials', []);
+  ok('before moving over: the old machine list still counts, and says it needs moving', g.result.machineInfo.filter((m) => m.name === 'Line 4')[0].materials.join() === '9307G,WB-2100'
+    && g.result.items.every((i) => i.goesLegacy === true), g.result.items);
+  const fd = await call('fillDepartments', ['Jo', 'op-51-e']);
+  ok('fillDepartments moves it onto each material', fd.result.goesTo === 2 && f.rows(SID, 'Material List').every((r) => r['Goes To'] === 'Line 4'), f.rows(SID, 'Material List'));
+  const it = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'WB-2100', type: 'Compound', department: 'Metals', machines: ['line 4', 'Line 5'] }, 'Jo', 'op-51-f']);
+  ok('a material on two lines (spelled as on the list); it comes off the machine\'s old list', it.ok && f.rows(SID, 'Material List')[0]['Goes To'] === 'Line 4, Line 5'
+    && f.rows(SID, 'Machines')[0]['Materials'] === '9307G', [f.rows(SID, 'Material List')[0], f.rows(SID, 'Machines')[0]]);
+  const g2 = await call('getMaterials', []);
+  ok('…so a line runs several materials', g2.result.machineInfo.filter((m) => m.name === 'Line 4')[0].materials.join() === '9307G,WB-2100'
+    && g2.result.machineInfo.filter((m) => m.name === 'Line 5')[0].materials.join() === 'WB-2100', g2.result.machineInfo);
+  await call('saveMachine', [{ oldName: 'Line 4', name: 'Line 4A', department: 'Metals' }, 'Jo', 'op-51-g']);
+  ok('renaming a machine renames it on the materials (and keeps its old list untouched)', f.rows(SID, 'Material List').map((r) => r['Goes To']).join('|') === 'Line 4A, Line 5|Line 4A'
+    && f.rows(SID, 'Machines')[0]['Materials'] === '9307G', f.rows(SID, 'Material List'));
+  await call('deleteMachine', ['Line 5', 'Jo', 'op-51-h']);
+  ok('removing a machine takes it off the materials', f.rows(SID, 'Material List')[0]['Goes To'] === 'Line 4A', f.rows(SID, 'Material List')[0]);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

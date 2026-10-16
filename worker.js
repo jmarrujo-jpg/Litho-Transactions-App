@@ -66,7 +66,7 @@ const MATERIAL_LIST = 'Material List';
 // Unit / Per Container / Reorder Point: "a barrel of 9307G is 549 lbs; reorder at 1,098 lbs" — the
 // screens show stock as containers and amount, and LOW at or under the reorder point.
 const MATERIAL_LIST_HEADERS = ['Item ID', 'Name', 'Type', 'Supplier', 'Container', 'Part #', 'Notes', 'Active',
-  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location', 'Department', 'Expiration Required'];
+  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location', 'Department', 'Expiration Required', 'Goes To'];
 // Which department a material (or machine) belongs to. Set on the Material List / Machines; a lot
 // takes its material's. Not set: litho types and machines are Litho, everything else Metals.
 const DEPARTMENTS = ['Metals', 'Plastics', 'Litho'];
@@ -200,7 +200,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receive-101', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'goesto-102', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -3069,7 +3069,10 @@ async function getMaterials(sheets) {
   const types = typeInfo.filter((t) => t.active).map((t) => t.name);
   let loads = [];
   try { loads = (await readObjects(sheets, MATERIAL_LOADS)).rows.map(loadOut).filter((l) => l.id); } catch (e) { loads = []; }
-  const machineInfo = await readMachines(sheets);
+  const machineInfo = machineMaterials(await readMachines(sheets), items);
+  const legacyRuns = {};   // material name -> machines whose old "Materials" list has it
+  (await readMachines(sheets)).forEach((m) => m.materials.forEach((x) => { (legacyRuns[x.toLowerCase()] = legacyRuns[x.toLowerCase()] || []).push(m.name); }));
+  items.forEach((i) => { i.goesLegacy = !i.machines.length && !!legacyRuns[i.name.toLowerCase()] && !!i.id; });
   const deptByItem = {};
   items.forEach((i) => { deptByItem[itemKey(i.name, i.type)] = i.department; });
   materials.forEach((m) => { m.department = m.dept || deptByItem[itemKey(m.product, m.type)] || typeDept[m.type.toLowerCase()] || deptOf(m.type); });
@@ -3223,7 +3226,18 @@ function itemOut(o) {
     createdBy: String(o['Created By'] || ''), updatedAt: String(o['Last Updated At'] || ''),
     unit: String(o['Unit'] || '').trim(), perContainer: optNum(o['Per Container']), reorder: optNum(o['Reorder Point']),
     location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']), deptSet: !!deptIn(o['Department']),
-    suppliers: supplierList(o['Supplier']), expRequired: String(o['Expiration Required'] || '').trim().toLowerCase() === 'yes' };
+    suppliers: supplierList(o['Supplier']), expRequired: String(o['Expiration Required'] || '').trim().toLowerCase() === 'yes',
+    machines: splitList(o['Goes To']) };
+}
+// What runs on each machine: the materials whose "Goes To" has it. A material with nothing in Goes To
+// yet falls back to the machines' old "Materials" lists (until fillDepartments moves those over).
+function machineMaterials(machines, items) {
+  machines.forEach((m) => {
+    const n = m.name.toLowerCase(), legacy = m.materials.map((x) => x.toLowerCase());
+    m.materials = items.filter((i) => i.active !== false && (i.machines.length ? i.machines.some((x) => x.toLowerCase() === n) : legacy.indexOf(i.name.toLowerCase()) !== -1))
+      .map((i) => i.name).filter((x, k, a) => a.indexOf(x) === k);
+  });
+  return machines;
 }
 // A material's suppliers: one or more in its Supplier cell, comma between.
 function supplierList(v) {
@@ -3310,6 +3324,12 @@ async function saveMaterialItem(sheets, item, operator, opId) {
     'Reorder Point': amountIn(item.reorder, 'The reorder point'), 'Location': String(item.location || '').trim(),
     'Department': deptIn(item.department) || (ty && ty.department) || deptOf(type) };
   if (item.expRequired != null) fields['Expiration Required'] = item.expRequired ? 'Yes' : 'No';
+  if (Array.isArray(item.machines)) {   // the lines it goes to, spelled as on the Machines list
+    const known = await readMachines(sheets);
+    fields['Goes To'] = item.machines.map((x) => String(x || '').trim()).filter(Boolean)
+      .map((x) => (known.filter((m) => m.name.toLowerCase() === x.toLowerCase())[0] || { name: x }).name)
+      .filter((x, k, a) => a.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === k).join(', ');
+  }
   let id = String(item.id || '').trim().toUpperCase();
   if (!id && opId) {
     const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
@@ -3345,29 +3365,23 @@ async function saveMaterialItem(sheets, item, operator, opId) {
   const machines = await syncItemMachines(sheets, name, '', fields['Department'], item.machines);
   return { ok: true, item: itemOut(obj), created: true, machines };
 }
-// Where a material goes = the machines whose "Materials" list has it (the Machines tab is the one
-// place it's kept). `machines` (names, from the material's screen): this department's machines are
-// set to exactly that. A rename renames it on every machine. Left out (undefined): only a rename.
+// Where a material goes is kept on the material (Goes To). Once it's set there (or the material is
+// renamed), the material comes off the machines' old "Materials" lists so the two can't disagree.
 async function syncItemMachines(sheets, name, oldName, dept, machines) {
   const renamed = oldName && oldName !== name;
   if (!Array.isArray(machines) && !renamed) return null;
-  const mt = await machinesTab(sheets);
-  const want = Array.isArray(machines) ? machines.map((x) => String(x).trim().toLowerCase()) : null;
+  let mt;
+  try { mt = await readTab(sheets, MACHINES); } catch (e) { return null; }
+  if (!mt.map['Materials']) return null;
   const names = [name.toLowerCase(), String(oldName || '').toLowerCase()].filter(Boolean);
-  const data = [], on = [];
+  const data = [];
   mt.rows.forEach((r) => {
-    const m = String(r['Machine'] || '').trim();
-    if (!m) return;
     const list = splitList(r['Materials']);
-    const had = list.some((x) => names.indexOf(x.toLowerCase()) !== -1);
-    const mine = machineOut(r).department === dept;
-    const keep = want ? (want.indexOf(m.toLowerCase()) !== -1 || (!mine && had)) : had;
-    let next = list.filter((x) => names.indexOf(x.toLowerCase()) === -1);
-    if (keep) { next.push(name); on.push(m); }
-    if (next.join(', ') !== list.join(', ')) data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Materials']) + r.__row, values: [[next.join(', ')]] });
+    const next = list.filter((x) => names.indexOf(x.toLowerCase()) === -1);
+    if (next.length !== list.length) data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Materials']) + r.__row, values: [[next.join(', ')]] });
   });
   if (data.length) await sheets.batchUpdate(data);
-  return on;
+  return machines || null;
 }
 
 // Delete an item added by mistake — only while no lot was received under it (otherwise mark it inactive).
@@ -3520,6 +3534,16 @@ async function fillDepartments(sheets, operator, opId) {
     data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Department']) + r.__row, values: [[/litho/i.test(name) ? 'Litho' : 'Metals']] });
     machines++;
   });
+  // Where each material goes moves onto the material (Goes To) from the machines' old lists.
+  let goesTo = 0;
+  lst.rows.forEach((r) => {
+    const nm = String(r['Name'] || '').trim();
+    if (!nm || splitList(r['Goes To']).length) return;
+    const on = mt.rows.filter((m) => splitList(m['Materials']).some((x) => x.toLowerCase() === nm.toLowerCase())).map((m) => String(m['Machine']).trim());
+    if (!on.length) return;
+    data.push({ range: "'" + MATERIAL_LIST + "'!" + colLetter(lst.map['Goes To']) + r.__row, values: [[on.join(', ')]] });
+    goesTo++;
+  });
   // Every lot gets its material's department (each department has its own lots).
   const itemsNow = lst.rows.map((r) => Object.assign(itemOut(r), { department: deptIn(r['Department']) || typeDept[String(r['Type'] || '').trim().toLowerCase()] || deptOf(r['Type']) })).filter((i) => i.name);
   const lotDeptById = {};
@@ -3552,7 +3576,7 @@ async function fillDepartments(sheets, operator, opId) {
     await sheets.appendMany(MATERIAL_TYPE_TAB, objs.map((o) => tt.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
       () => columnHas(sheets, MATERIAL_TYPE_TAB, tt.headers, 'Type', objs[0]['Type']));
   }
-  return { ok: true, items, machines, types: add.length, lots, loads };
+  return { ok: true, items, machines, types: add.length, lots, loads, goesTo };
 }
 // Add (no oldName) or edit a machine on the Machines tab. Renaming one moves the lots on it (their
 // Location) to the new name; the load history keeps the name it had then.
@@ -3571,8 +3595,9 @@ async function saveMachine(sheets, m, operator, opId) {
   if (clash && clash !== o) throw new Error(name + ' is already on the Machines list.');
   const list = (v) => (Array.isArray(v) ? v : splitList(v)).map((x) => String(x).trim()).filter(Boolean).join(', ');
   const ts = nowStamp();
-  const f = { 'Machine': name, 'Positions': list(m.positions), 'Materials': list(m.materials), 'Active': m.active === false ? 'No' : 'Yes',
+  const f = { 'Machine': name, 'Positions': list(m.positions), 'Active': m.active === false ? 'No' : 'Yes',
     'Department': deptIn(m.department) || (/litho/i.test(name) ? 'Litho' : 'Metals'), 'Last Updated At': ts };
+  if (m.materials !== undefined) f['Materials'] = list(m.materials);   // older pages; materials now pick their lines (Goes To)
   let moved = 0;
   if (o) {
     if (old.toLowerCase() !== name.toLowerCase() || old !== name) {
@@ -3584,6 +3609,7 @@ async function saveMachine(sheets, m, operator, opId) {
         data.push({ range: "'" + MATERIALS + "'!" + colLetter(lt.map['Location']) + r.__row, values: [[name]] });
       });
       if (data.length) await sheets.batchUpdate(data);
+      await renameGoesTo(sheets, old, name);
     }
     await stampCells(sheets, MACHINES, o.__row, t.map, f);
     return { ok: true, machine: machineOut(Object.assign({}, o, f)), movedLots: moved };
@@ -3609,7 +3635,22 @@ async function deleteMachine(sheets, name, operator, opId) {
   const cell = await sheets.read("'" + MACHINES + "'!" + colLetter(t.map['Machine']) + o.__row);
   if (String((cell[0] && cell[0][0]) || '').trim().toLowerCase() !== name.toLowerCase()) throw new Error('The Machines list changed while removing ' + name + ' — nothing was removed. Refresh and try again.');
   await sheets.deleteRows(grid.sheetId, o.__row - 1, o.__row);
+  await renameGoesTo(sheets, name, null);
   return { ok: true, name };
+}
+// A machine renamed (or removed: to null) — every material's Goes To follows.
+async function renameGoesTo(sheets, oldName, newName) {
+  let lst;
+  try { lst = await readTab(sheets, MATERIAL_LIST); } catch (e) { return; }
+  if (!lst.map['Goes To']) return;
+  const data = [];
+  lst.rows.forEach((r) => {
+    const list = splitList(r['Goes To']);
+    if (!list.some((x) => x.toLowerCase() === oldName.toLowerCase())) return;
+    const next = list.map((x) => (x.toLowerCase() === oldName.toLowerCase() ? newName : x)).filter(Boolean);
+    data.push({ range: "'" + MATERIAL_LIST + "'!" + colLetter(lst.map['Goes To']) + r.__row, values: [[next.join(', ')]] });
+  });
+  if (data.length) await sheets.batchUpdate(data);
 }
 async function readMachines(sheets) {
   try { return (await readObjects(sheets, MACHINES)).rows.map(machineOut).filter((m) => m.name); } catch (e) { return []; }

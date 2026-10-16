@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.101.1</span>
+      <span class="version" id="appVersion">v1.102.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -2068,7 +2068,8 @@
     var blank = (mtData.items || []).some(function (i) { return i.id && i.deptSet === false; }) ||
       (mtData.machineInfo || []).some(function (m) { return m.deptSet === false; }) ||
       (mtData.typeInfo || []).some(function (t) { return t.saved === false; }) ||
-      (mtData.materials || []).some(function (m) { return m.dept === ''; });
+      (mtData.materials || []).some(function (m) { return m.dept === ''; }) ||
+      (mtData.items || []).some(function (i) { return i.goesLegacy; });
     if (!blank) return;
     mtDeptsSaved = true;
     runMutation('fillDepartments', [lastOperator, newOpId()], function (r) {
@@ -2077,6 +2078,7 @@
       (mtData.machineInfo || []).forEach(function (m) { m.deptSet = true; });
       (mtData.typeInfo || []).forEach(function (t) { t.saved = true; });
       (mtData.materials || []).forEach(function (m) { if (m.dept === '') m.dept = m.department; });
+      (mtData.items || []).forEach(function (i) { i.goesLegacy = false; });
     }, function () { mtDeptsSaved = false; });
   }
   // Anything without a department (an older server) gets the default: litho types/machines Litho, else Metals.
@@ -3231,13 +3233,12 @@
     var listed = m && !m.notListed;
     var v = m || { name: '', positions: [], materials: [], active: true, department: mtDept };
     var on = m ? mtLoadedOn(m.name) : [];
-    var mats = mtItems().filter(function (i) { return i.active && i.department === mtDept; }).map(function (i) { return i.name; });
     view.innerHTML = '<div class="card">' +
       '<h3 style="margin-top:0">' + esc(listed ? L('Change ' + v.name, 'Cambiar ' + v.name) : L('Add a machine', 'Agregar una máquina')) + '</h3>' +
       '<div class="field"><label>' + esc(L('Machine name', 'Nombre de la máquina')) + '</label><input id="mmName" autocomplete="off" placeholder="' + esc(L('e.g. Press 22', 'p. ej. Prensa 22')) + '" value="' + esc(v.name) + '" style="font-size:18px"></div>' +
       '<div class="field"><label>' + esc(L('Spots on it (optional, comma between)', 'Lugares (opcional, separados por coma)')) + '</label><input id="mmPos" autocomplete="off" placeholder="' + esc(L('e.g. Barrel 1, Barrel 2', 'p. ej. Barril 1, Barril 2')) + '" value="' + esc(v.positions.join(', ')) + '"></div>' +
-      '<div class="field"><label>' + esc(L('Materials it runs (optional, comma between)', 'Materiales que usa (opcional)')) + '</label><input id="mmRuns" list="mmRunsL" autocomplete="off" value="' + esc(v.materials.join(', ')) + '"><datalist id="mmRunsL">' + mtOptions(mats) + '</datalist>' +
-        '<div class="sub">' + esc(L('Loading anything else gives a warning (not a block).', 'Cargar otra cosa da un aviso (no lo impide).')) + '</div></div>' +
+      (listed ? '<div class="field"><label>' + esc(L('Runs', 'Usa')) + '</label><div style="font-size:16px">' + esc(v.materials.length ? v.materials.join(', ') : L('nothing yet', 'nada todavía')) + '</div>' +
+        '<div class="sub">' + esc(L('Set on each material (Materials → Goes to).', 'Se pone en cada material (Materiales → Va a).')) + '</div></div>' : '') +
       '<div class="field"><label>' + esc(L('Department', 'Departamento')) + '</label><select id="mmDept">' + MT_DEPTS.map(function (d) { return '<option value="' + d + '"' + (d === v.department ? ' selected' : '') + '>' + esc(mtDeptName(d)) + '</option>'; }).join('') + '</select>' +
         '<div class="sub" id="mmDeptWarn" style="color:var(--warn);font-weight:600"></div></div>' +
       '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600"><input type="checkbox" id="mmActive"' + (v.active ? ' checked' : '') + ' style="width:20px;height:20px"> ' +
@@ -3257,7 +3258,7 @@
       var name = document.getElementById('mmName').value.trim();
       if (!name) { toast(L('Enter the machine name', 'Escriba el nombre de la máquina')); return; }
       var mo = { name: name, oldName: listed ? v.name : '', department: document.getElementById('mmDept').value, positions: document.getElementById('mmPos').value,
-        materials: document.getElementById('mmRuns').value, active: document.getElementById('mmActive').checked };
+        active: document.getElementById('mmActive').checked };
       // Moving it to another department takes it out of this one — say so first.
       if (mo.department !== mtDept && !mtMachMoveOk) {
         showConfirm(L('Move ' + name + ' to ' + mtDeptName(mo.department) + '?', '¿Pasar ' + name + ' a ' + mtDeptName(mo.department) + '?'),
@@ -3577,11 +3578,10 @@
     var dept = v.department || (mtDept !== 'all' ? mtDept : mtDeptOfType(v.type));
     if (isNew && v.type && !v.container) v.container = mtContainerFor(v.type);
     var sups = mtUniq(it ? (it.suppliers && it.suppliers.length ? it.suppliers : [it.supplier]) : [(pre && pre.supplier) || '']);
-    // Where it goes: this department's machines; ticked = it's on that machine's "Materials it runs".
-    var goes = mtDeptMachines(dept).map(function (mn) {
-      var mi = mtMachine(mn), on = !!(it && mi && mi.materials.some(function (x) { return x.toLowerCase() === it.name.toLowerCase(); }));
-      return '<label style="display:flex;align-items:center;gap:8px;margin:4px 12px 4px 0;font-size:16px"><input type="checkbox" data-mtitm="' + esc(mn) + '"' + (on ? ' checked' : '') + ' style="width:20px;height:20px"> ' + esc(mn) + '</label>';
-    }).join('');
+    // The lines it goes to (the material picks them): tap Add a line, type, tap the machine.
+    var lines = it ? (it.machines && it.machines.length ? it.machines.slice() : ((mtData && mtData.machineInfo) || []).filter(function (m) {
+      return m.materials.some(function (x) { return x.toLowerCase() === it.name.toLowerCase(); }); }).map(function (m) { return m.name; })) : [];
+    var lineAdding = false;
     var n = it ? mtLotCount(it) : 0;
     var typeList = mtUniq((mtDept === 'all' ? mtTypes() : mtDeptTypes(mtDept)).concat(v.type ? [v.type] : []));   // in a department: its types
     var typeOpts = '<option value="">— pick one —</option>' + typeList.map(function (t) { return '<option value="' + esc(t) + '"' + (t === v.type ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
@@ -3600,6 +3600,9 @@
             '<div style="display:flex;gap:6px"><input id="mtItSupplier" list="mtItSupList" autocomplete="off" placeholder="' + esc(L('type one, then Add', 'escriba uno y toque Agregar')) + '" style="flex:1"><datalist id="mtItSupList">' + mtOptions((mtData && mtData.suppliers) || []) + '</datalist>' +
             '<button class="btn secondary" id="mtItSupAdd" style="margin:0">' + esc(L('Add', 'Agregar')) + '</button></div>' +
             '<div class="sub">' + esc(L('One or more. Receiving fills in the only one, or asks which.', 'Uno o más. Al recibir se llena solo si hay uno, o se elige.')) + '</div></div>' +
+          '<div class="field" style="grid-column:1/-1"><label>' + esc(L('Goes to (the lines it runs on)', 'Va a (las líneas donde se usa)')) + '</label><div id="mtItGoes"></div></div>' +
+          '<label style="grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-bottom:14px;font-weight:600;font-size:16px"><input type="checkbox" id="mtItExp"' + (it && it.expRequired ? ' checked' : '') + ' style="width:20px;height:20px"> ' +
+            esc(L('Has an expiration date (required when receiving)', 'Tiene fecha de vencimiento (obligatoria al recibir)')) + '</label>' +
           '<div class="field"><label>Container</label><input id="mtItContainer" list="mtItContList" autocomplete="off" value="' + esc(v.container) + '"><datalist id="mtItContList">' + mtOptions(mtContainerList()) + '</datalist></div>' +
           '<div class="field"><label>Unit</label><input id="mtItUnit" list="mtItUnitList" autocomplete="off" placeholder="lbs, ea, btl" value="' + esc(v.unit || '') + '"><datalist id="mtItUnitList">' + mtOptions(['lbs', 'ea', 'btl']) + '</datalist></div>' +
           '<div class="field"><label>Amount in one container (optional)</label><input id="mtItPer" inputmode="decimal" autocomplete="off" placeholder="e.g. 549 (lbs in a barrel)" value="' + esc(v.perContainer == null ? '' : v.perContainer) + '"></div>' +
@@ -3609,9 +3612,6 @@
           '<div class="field"><label>Notes (optional)</label><input id="mtItNotes" autocomplete="off" value="' + esc(v.notes) + '"></div>' +
         '</div>' +
         '<div class="sub" style="margin:0 0 10px">The reorder point is in the unit when there&rsquo;s an amount per container (e.g. 1098 lbs), otherwise in containers. At or under it, the material shows LOW.</div>' +
-        (goes ? '<div class="field"><label>' + esc(L('Goes to (the machines it\'s used on)', 'Va a (las máquinas donde se usa)')) + '</label><div id="mtItGoes" style="display:flex;flex-wrap:wrap">' + goes + '</div></div>' : '') +
-        '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600;font-size:16px"><input type="checkbox" id="mtItExp"' + (it && it.expRequired ? ' checked' : '') + ' style="width:20px;height:20px"> ' +
-          esc(L('Has an expiration date (required when receiving)', 'Tiene fecha de vencimiento (obligatoria al recibir)')) + '</label>' +
         (it ? '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600"><input type="checkbox" id="mtItActive"' + (v.active ? ' checked' : '') + '> ' +
           esc(L('Active (offered when receiving)', 'Activo (se ofrece al recibir)')) + '</label>' : '') +
         '<div class="row" style="gap:8px">' +
@@ -3628,6 +3628,38 @@
       }).join('') : '<span class="sub">' + esc(L('No supplier yet', 'Sin proveedor')) + '</span>';
       Array.prototype.forEach.call(document.querySelectorAll('[data-mtitsx]'), function (a) { a.onclick = function (e) { e.preventDefault(); sups.splice(Number(a.getAttribute('data-mtitsx')), 1); renderSups(); }; });
     };
+    // Goes to: chips, then "➕ Add a line" → type → tap the machine (this department's, not already added).
+    var renderGoes = function () {
+      var box = document.getElementById('mtItGoes');
+      var chips = lines.length ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">' + lines.map(function (x, i) {
+        return '<span class="badge" style="font-size:15px;padding:6px 10px">' + esc(x) + ' <a href="#" data-mtitgx="' + i + '" style="margin-left:6px;text-decoration:none">✕</a></span>';
+      }).join('') + '</div>' : '<div class="sub" style="margin-bottom:8px">' + esc(L('No lines yet', 'Sin líneas')) + '</div>';
+      if (!lineAdding) {
+        box.innerHTML = chips + '<button class="btn secondary" id="mtItGoAdd" style="margin:0">➕ ' + esc(L('Add a line', 'Agregar una línea')) + '</button>';
+        document.getElementById('mtItGoAdd').onclick = function () { lineAdding = true; renderGoes(); document.getElementById('mtItGoIn').focus(); };
+      } else {
+        box.innerHTML = chips + '<div style="display:flex;gap:6px"><input id="mtItGoIn" autocomplete="off" placeholder="' + esc(L('start typing the machine', 'escriba la máquina')) + '" style="flex:1">' +
+          '<button class="btn secondary" id="mtItGoX" style="margin:0">✕</button></div><div id="mtItGoSug" style="margin-top:8px"></div>';
+        var inp = document.getElementById('mtItGoIn');
+        var sug = function () {
+          var q = inp.value.trim().toLowerCase(), dsel = document.getElementById('mtItDept');
+          var all = mtDeptMachines(dsel ? dsel.value : dept).filter(function (mn) { return !lines.some(function (x) { return x.toLowerCase() === mn.toLowerCase(); }); });
+          var hits = all.filter(function (mn) { return !q || mn.toLowerCase().indexOf(q) !== -1; }).slice(0, 12);
+          var sb = document.getElementById('mtItGoSug');
+          sb.innerHTML = hits.length ? mtBigBtns('data-mtitgo', hits, '') : '<div class="sub">' + esc(all.length ? L('No machine matches. Add it in Machines first.', 'Ninguna máquina coincide. Agréguela primero en Máquinas.')
+            : L('All this department\'s machines are added (or there are none yet — add them in Machines).', 'Ya están todas las máquinas (o no hay — agréguelas en Máquinas).')) + '</div>';
+          Array.prototype.forEach.call(sb.querySelectorAll('[data-mtitgo]'), function (b) {
+            b.onclick = function () { lines.push(b.getAttribute('data-mtitgo')); lineAdding = false; renderGoes(); };
+          });
+        };
+        inp.oninput = sug;
+        inp.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); var f = document.querySelector('[data-mtitgo]'); if (f) f.click(); } };
+        document.getElementById('mtItGoX').onclick = function () { lineAdding = false; renderGoes(); };
+        sug();
+      }
+      Array.prototype.forEach.call(box.querySelectorAll('[data-mtitgx]'), function (a) { a.onclick = function (e) { e.preventDefault(); lines.splice(Number(a.getAttribute('data-mtitgx')), 1); renderGoes(); }; });
+    };
+    renderGoes();
     var addSup = function () { var x = supIn.value.trim(); if (x) { sups = mtUniq(sups.concat([x])); supIn.value = ''; renderSups(); } supIn.focus(); };
     document.getElementById('mtItSupAdd').onclick = addSup;
     supIn.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); addSup(); } };
@@ -3655,7 +3687,7 @@
         department: document.getElementById('mtItDept').value };
       out.suppliers = mtUniq(sups.concat([supIn.value.trim()]));   // one typed but not added counts
       out.supplier = out.suppliers.join(', ');
-      if (document.getElementById('mtItGoes')) out.machines = Array.prototype.filter.call(document.querySelectorAll('[data-mtitm]'), function (c) { return c.checked; }).map(function (c) { return c.getAttribute('data-mtitm'); });
+      out.machines = lines.slice();
       if (!out.name) { toast(L('Enter the material name', 'Escriba el nombre del material')); document.getElementById('mtItName').focus(); return; }
       if (!out.type) { toast(L('Pick the type', 'Elija el tipo')); (typeSel.value === '__new' ? newType : typeSel).focus(); return; }
       var rename = saved && n && (out.name !== it.name || out.type !== it.type);
@@ -3992,7 +4024,7 @@
       var w = mc || { name: '', positions: [], materials: [], active: true, department: mfDept !== 'all' ? mfDept : 'Metals' };
       html = '<h3 style="margin-top:0">' + (mc ? esc(mc.name) : 'Add machine') + '</h3>' + grid +
         mfInput('mfName', 'Machine name', w.name) + mfInput('mfDept', 'Department', w.department, { options: MT_DEPTS }) +
-        mfInput('mfPos', 'Positions (comma between)', w.positions.join(', ')) + mfInput('mfRuns', 'Materials it runs (comma between)', w.materials.join(', ')) +
+        mfInput('mfPos', 'Positions (comma between)', w.positions.join(', ')) +
         mfInput('mfActive', 'Active', w.active ? 'Yes' : 'No', { options: ['Yes', 'No'] }) + '</div>' +
         (mc ? '<div class="sub" style="margin-bottom:8px">Renaming a machine moves the lots on it to the new name.</div>' : '');
     }
@@ -4042,7 +4074,7 @@
       } else {
         var name = mfVal('mfName');
         if (!name) { toast('Enter the machine name'); return; }
-        var mo = { name: name, oldName: e.key || '', department: mfVal('mfDept'), positions: mfVal('mfPos'), materials: mfVal('mfRuns'), active: mfVal('mfActive') !== 'No' };
+        var mo = { name: name, oldName: e.key || '', department: mfVal('mfDept'), positions: mfVal('mfPos'), active: mfVal('mfActive') !== 'No' };
         save.disabled = true; save.textContent = 'Saving…';
         runMutation('saveMachine', [mo, lastOperator, newOpId()], done(name + ' saved'), fail(save));
       }
