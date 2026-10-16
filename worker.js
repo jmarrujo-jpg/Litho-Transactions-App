@@ -200,7 +200,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'costs-98', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'costs-99', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -310,6 +310,8 @@ async function handle(fn, args, env) {
     case 'getRateTree': return getRateTree(sheets);
     case 'getRateTable': // () every row of the Litho Rate Table, in sheet order (the Litho Costs screen)
       return getRateTable(sheets);
+    case 'getRateHistory': // () every logged price change, oldest first (Past prices)
+      return getRateHistory(sheets);
     case 'saveRates': // (changes[{row, group, sub, item, chemCode, appCost, lineCost, totalCost?, allSizes?}], operator, opId) change prices; already-coated tickets keep theirs
       return saveRates(sheets, args[0], args[1], args[2]);
     case 'addRate': // ({group, sub, item, chemCode, appCost, lineCost, totalCost?, passes?, allSizes?}, operator, opId) a new coating
@@ -795,7 +797,8 @@ async function getRateTree(sheets) {
 // price only applies to coatings applied from then on. Every change is logged on Litho Rate Changes.
 const RATE_LOG = 'Litho Rate Changes';
 const RATE_LOG_HEADERS = ['Timestamp', 'Operator', 'Group', 'Sub-Variant', 'Item', 'What', 'Old', 'New', 'Op ID'];
-const RATE_CHANGES_MAX = 200;
+const RATE_CHANGES_MAX = 400;
+const RATE_HISTORY_MAX = 20000;
 function money(v) { return Math.round(Number(v) * 100) / 100; }
 function rateOut(r) {
   return { row: r.__row, group: String(r['Group'] || '').trim(), sub: String(r['Sub-Variant'] || '').trim(), bbph: r['BB Per Hour'] === '' || r['BB Per Hour'] == null ? '' : num(r['BB Per Hour']),
@@ -823,6 +826,14 @@ async function logRateChanges(sheets, lines, operator, opId) {
     'Old': l.old, 'New': l.now, 'Op ID': opId ? opId + '#' + (i + 1) : '' }));
   await sheets.appendMany(RATE_LOG, objs.map((o) => lt.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
     () => (opId ? columnHas(sheets, RATE_LOG, lt.headers, 'Op ID', objs[0]['Op ID']) : Promise.resolve(false)));
+}
+async function getRateHistory(sheets) {
+  let rows = [];
+  try { rows = (await readTab(sheets, RATE_LOG)).rows; } catch (e) { rows = []; }
+  const log = rows.filter((r) => String(r['Item'] || '').trim()).slice(-RATE_HISTORY_MAX).map((r) => ({ at: String(r['Timestamp'] || ''), by: String(r['Operator'] || ''),
+    group: String(r['Group'] || '').trim(), sub: String(r['Sub-Variant'] || '').trim(), item: String(r['Item'] || '').trim(), what: String(r['What'] || '').trim(),
+    old: r['Old'] === '' || r['Old'] == null ? '' : r['Old'], now: r['New'] === '' || r['New'] == null ? '' : r['New'] }));
+  return { log, since: log.length ? log[0].at.slice(0, 10) : '' };
 }
 async function rateOpDone(sheets, opId) {
   if (!opId) return false;

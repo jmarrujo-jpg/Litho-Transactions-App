@@ -1751,6 +1751,9 @@ await concurrency(envBase, 'in-worker lock');
   ok('the same coating twice on a size is refused', !dup.ok && /already on/.test(dup.error), dup);
   const tree = await call('getRateTree', []);
   ok('the new coating can be picked for a job', tree.result.tree['603X408'].items['10-OUT'].some((x) => x.item === 'GOLD EPOXY' && x.totalCost === 8.77));
+  const h = await call('getRateHistory', []);
+  ok('price history: every change, oldest first, with who and when', h.ok && h.result.log.length === f.rows(SID, 'Litho Rate Changes').length && h.result.log[0].item === 'SIZE'
+    && h.result.log[0].by === 'Jo' && /^\d{4}-\d\d-\d\d/.test(h.result.since) && h.result.log.some((x) => x.what === 'Added' && x.item === 'GOLD EPOXY'), h.result);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

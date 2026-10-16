@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.98.0</span>
+      <span class="version" id="appVersion">v1.99.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -352,6 +352,7 @@
     "Plastics Department": "Departamento de Plásticos",
     "💲 Litho Costs": "💲 Costos de Litho",
     "Litho Costs": "Costos de Litho",
+    "🕘 Past prices": "🕘 Precios anteriores",
     "Plastics Lines (coming soon)": "Líneas de Plásticos (pronto)",
     "Plastics": "Plásticos",
     "Metals Materials": "Materiales de Metales",
@@ -5239,12 +5240,14 @@
   // computers a row can be tapped to change it, and coatings added. A ticket's cost is stamped when
   // it's coated, so a new price is only for coatings applied from now on.
   var lcData = null, lcSize = 'all', lcSearch = '', lcEdit = 0, lcAdd = '', lcAddPasses = 1;
+  var lcPct = null;   // the percentage tool: { pct, flat, app, line } while open
+  var lcHist = null;  // Past prices: { log, since, date, open } — date set = the table shows the prices on that day
   function lcMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
   function openLithoCosts() {
     state.view = 'lithoCosts';
     nextViewToken();
     showTabbar(false); showBack(true); setDept('Litho Costs');
-    lcEdit = 0; lcAdd = '';
+    lcEdit = 0; lcAdd = ''; lcPct = null; lcHist = null;
     document.getElementById('view').innerHTML = '<div class="loading">Loading the costs&hellip;</div>';
     lcLoad();
   }
@@ -5259,7 +5262,7 @@
   // Blocks in sheet order: the flat specialty prices, then one per size + -OUT.
   function lcBlocks() {
     var out = [], by = {};
-    lcData.rows.forEach(function (r) {
+    lcRows().forEach(function (r) {
       var flat = r.group === lcData.flatGroup, key = flat ? 'flat' : r.group + '|' + r.sub;
       if (!by[key]) { by[key] = { key: key, group: r.group, sub: r.sub, bbph: r.bbph, flat: flat, rows: [] }; out.push(by[key]); }
       by[key].rows.push(r);
@@ -5278,6 +5281,11 @@
         esc(L('These prices are for coatings applied from now on. Tickets already coated keep what they were charged.',
           'Estos precios son para recubrimientos de ahora en adelante. Los tickets ya recubiertos se quedan con lo que se les cobró.')) +
         (FULL_APP ? ' ' + esc(L('Tap a row to change it.', 'Toque una fila para cambiarla.')) : ' ' + esc(L('To change a price, use an office computer.', 'Para cambiar un precio, use una computadora de la oficina.'))) + '</div></div>' +
+      lcHowHtml() +
+      (lcHist && lcHist.open ? lcHistHtml() : '<button class="btn secondary" id="lcHistOpen" style="width:100%;margin-bottom:10px">🕘&nbsp; ' + esc(L('Past prices', 'Precios anteriores')) + '</button>') +
+      (lcPast() ? '<div class="card" style="background:#fff7ed;border-left:4px solid var(--warn);color:var(--warn);font-weight:700;font-size:16px">' +
+        esc(L('Showing the prices on ' + lcHist.date + ' — not today\'s.', 'Mostrando los precios del ' + lcHist.date + ' — no los de hoy.')) + '</div>' : '') +
+      (FULL_APP && !lcPast() ? (lcPct ? '<div id="lcPctBox"></div>' : '<button class="btn secondary" id="lcPctOpen" style="width:100%;margin-bottom:10px">📈&nbsp; ' + esc(L('Change prices by a percentage', 'Cambiar precios por porcentaje')) + '</button>') : '') +
       '<div class="field"><label>' + esc(L('Find a coating', 'Buscar un recubrimiento')) + '</label><input id="lcSearch" autocomplete="off" placeholder="name or chem code" value="' + esc(lcSearch) + '"></div>' +
       '<div class="tabbar" id="lcSizes" style="flex-wrap:wrap">' + [['all', L('All sizes', 'Todos')]].concat(blocks.map(function (b) { return [b.key, b.flat ? L('Specialty', 'Especiales') : b.group + ' ' + b.sub]; })).map(function (c) {
         return '<button data-lcsize="' + esc(c[0]) + '"' + (lcSize === c[0] ? ' class="active"' : '') + ' style="white-space:normal;flex:0 1 auto;max-width:100%">' + esc(c[1]) + '</button>';
@@ -5285,6 +5293,12 @@
       '<div id="lcBody"></div>';
     var s = document.getElementById('lcSearch');
     s.oninput = function () { lcSearch = s.value; renderLcBody(); };
+    var ho = document.getElementById('lcHistOpen');
+    if (ho) ho.onclick = function () { lcPct = null; if (lcHist) { lcHist.open = true; renderLithoCosts(); } else lcHistLoad(renderLithoCosts); };
+    bindLcHist();
+    var po = document.getElementById('lcPctOpen');
+    if (po) po.onclick = function () { lcPct = { pct: '', flat: true, app: false, line: true }; lcEdit = 0; lcAdd = ''; renderLithoCosts(); };
+    if (lcPct) renderLcPct();
     Array.prototype.forEach.call(view.querySelectorAll('[data-lcsize]'), function (b) {
       b.onclick = function () { lcSize = b.getAttribute('data-lcsize'); lcEdit = 0; lcAdd = ''; renderLithoCosts(); };
     });
@@ -5302,7 +5316,7 @@
         : '<tr><th>Coating / Chem Code</th><th style="text-align:right">Application</th><th style="text-align:right">Line</th><th style="text-align:right">Total</th></tr>';
       var body = rows.map(function (r) {
         var on = lcEdit === r.row;
-        var tr = '<tr data-lcrow="' + r.row + '" style="' + (FULL_APP ? 'cursor:pointer;' : '') + (on ? 'background:#eef2ff' : '') + '">' +
+        var tr = '<tr data-lcrow="' + r.row + '" style="' + (FULL_APP && !lcPast() ? 'cursor:pointer;' : '') + (on ? 'background:#eef2ff' : '') + '">' +
           (b.flat ? '<td>' + esc(r.item) + '</td><td style="text-align:right;font-weight:700">' + lcMoney(r.totalCost) + '</td>'
             : '<td><b>' + esc(r.item) + '</b>' + (r.chemCode ? '<div class="sub">' + esc(r.chemCode) + '</div>' : '') + '</td><td style="text-align:right">' + lcMoney(r.appCost) + '</td><td style="text-align:right">' + lcMoney(r.lineCost) +
               '</td><td style="text-align:right;font-weight:700">' + lcMoney(r.totalCost) + '</td>') + '</tr>';
@@ -5312,11 +5326,11 @@
         '<h3 style="margin:0 0 2px">' + esc(lcTitle(b)) + '</h3>' +
         (b.flat ? '' : '<div class="sub" style="margin-bottom:8px">' + esc((b.bbph ? b.bbph + ' BB per hour' : '')) + '</div>') +
         '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;font-size:14px">' + head + body + '</table></div>' +
-        (FULL_APP ? (lcAdd === b.key ? lcAddHtml(b) : '<button class="btn secondary" data-lcadd="' + esc(b.key) + '" style="margin-top:10px">➕ ' + esc(L('Add coating', 'Agregar recubrimiento')) + '</button>') : '') +
+        (FULL_APP && !lcPast() ? (lcAdd === b.key ? lcAddHtml(b) : '<button class="btn secondary" data-lcadd="' + esc(b.key) + '" style="margin-top:10px">➕ ' + esc(L('Add coating', 'Agregar recubrimiento')) + '</button>') : '') +
         '</div>';
     }).join('');
     box.innerHTML = html || '<div class="card empty">' + esc(L('No coating matches.', 'Ningún recubrimiento coincide.')) + '</div>';
-    if (!FULL_APP) return;
+    if (!FULL_APP || lcPast()) return;
     Array.prototype.forEach.call(box.querySelectorAll('[data-lcrow]'), function (tr) {
       tr.onclick = function () { var n = Number(tr.getAttribute('data-lcrow')); lcEdit = lcEdit === n ? 0 : n; lcAdd = ''; renderLcBody(); };
     });
@@ -5325,6 +5339,174 @@
     });
     if (lcEdit) bindLcEditor();
     if (lcAdd) bindLcAdd();
+  }
+
+  // The rows shown: today's, or (Past prices with a date picked) the prices as they were at the end
+  // of that day — today's with every logged change made after it undone, newest first.
+  function lcPast() { return !!(lcHist && lcHist.date); }
+  function lcRows() {
+    if (!lcPast()) return lcData.rows;
+    var key = function (g, s, i) { return [g, s, i].join('|').toLowerCase(); };
+    var rows = lcData.rows.map(function (r) { return Object.assign({}, r); }), by = {};
+    rows.forEach(function (r) { by[key(r.group, r.sub, r.item)] = r; });
+    var end = lcHist.date + ' 23:59:59', F = { 'Chem code': 'chemCode', 'Application': 'appCost', 'Line': 'lineCost', 'Total': 'totalCost' };
+    lcHist.log.slice().reverse().forEach(function (c) {
+      if (c.at <= end) return;
+      var r = by[key(c.group, c.sub, c.item)];
+      if (!r) return;
+      if (c.what === 'Added') { r.gone = true; return; }
+      if (F[c.what]) r[F[c.what]] = c.what === 'Chem code' ? String(c.old) : Number(c.old) || 0;
+    });
+    return rows.filter(function (r) { return !r.gone; });
+  }
+  function lcHistLoad(then) {
+    google.script.run.withSuccessHandler(function (res) {
+      lcHist = Object.assign({ date: '', open: true }, lcHist || {}, res || { log: [], since: '' });
+      if (then) then();
+    }).withFailureHandler(function (err) { toast(L('Could not load past prices: ', 'No se pudieron cargar: ') + err.message); }).getRateHistory();
+  }
+  function lcHistHtml() {
+    var h = lcHist;
+    if (!h.open) return '';
+    var days = {}, order = [];
+    h.log.slice().reverse().forEach(function (c) {
+      var d = c.at.slice(0, 10);
+      if (!days[d]) { days[d] = []; order.push(d); }
+      days[d].push(c);
+    });
+    var money = function (v) { return v === '' ? '' : isFinite(Number(v)) && String(v).trim() !== '' ? lcMoney(v) : String(v); };
+    var line = function (c) {
+      var where = c.group === lcData.flatGroup ? '' : ' · ' + c.group + ' ' + c.sub;
+      return '<div style="padding:6px 0;border-top:1px solid var(--line)"><b>' + esc(c.item) + '</b><span class="sub">' + esc(where) + '</span><br>' +
+        (c.what === 'Added' ? esc(L('Added at ', 'Agregado a ')) + '<b>' + money(c.now) + '</b>'
+          : esc(c.what) + ': ' + (c.what === 'Chem code' ? esc(c.old || '—') + ' → <b>' + esc(c.now || '—') + '</b>' : money(c.old) + ' → <b>' + money(c.now) + '</b>')) +
+        ' <span class="sub">' + esc(c.at.slice(11, 16) + (c.by ? ' · ' + c.by : '')) + '</span></div>';
+    };
+    return '<div class="card" id="lcHistBox" style="border:2px solid var(--accent)">' +
+      '<h3 style="margin-top:0">🕘 ' + esc(L('Past prices', 'Precios anteriores')) + '</h3>' +
+      '<div class="field" style="max-width:260px"><label>' + esc(L('Show the prices as they were on', 'Mostrar los precios del día')) + '</label><input type="date" id="lcHistDate" value="' + esc(h.date) + '"' + (h.since ? ' min="' + esc(h.since) + '"' : '') + '></div>' +
+      (h.date ? '<button class="btn secondary" id="lcHistToday" style="margin:0 0 8px">' + esc(L('Back to today\'s prices', 'Volver a los precios de hoy')) + '</button>' : '') +
+      '<div class="sub" style="margin-bottom:6px">' + esc(h.since ? L('Price changes are kept from ' + h.since + ' on. What a ticket was actually charged is always on its history.', 'Los cambios se guardan desde ' + h.since + '. Lo que se cobró a cada ticket siempre está en su historial.')
+        : L('No price changes yet. From the first change on, every one is kept here.', 'Todavía no hay cambios de precio.')) + '</div>' +
+      (order.length ? '<div style="max-height:320px;overflow-y:auto">' + order.map(function (d) {
+        return '<div style="font-weight:700;margin-top:8px">' + esc(d) + ' <span class="sub">(' + days[d].length + ')</span></div>' + days[d].slice(0, 400).map(line).join('');
+      }).join('') + '</div>' : '') +
+      '<button class="btn secondary" id="lcHistClose" style="margin-top:10px">' + esc(L('Close', 'Cerrar')) + '</button></div>';
+  }
+  function bindLcHist() {
+    var d = document.getElementById('lcHistDate');
+    if (!d) return;
+    d.onchange = function () { lcHist.date = d.value; lcEdit = 0; lcAdd = ''; renderLithoCosts(); };
+    var t = document.getElementById('lcHistToday');
+    if (t) t.onclick = function () { lcHist.date = ''; renderLithoCosts(); };
+    document.getElementById('lcHistClose').onclick = function () { lcHist.open = false; lcHist.date = ''; renderLithoCosts(); };
+  }
+  // The set-up charge for coating (per hour), from the specialty list: a size's Line cost for one
+  // pass is this ÷ its BB per hour.
+  function lcSetupRow() { return lcData.rows.filter(function (r) { return r.group === lcData.flatGroup && /SET ?UP CHARGE FOR COATING/i.test(r.item); })[0] || null; }
+  function lcHowHtml() {
+    var su = lcSetupRow(), rate = su ? lcMoney(su.totalCost) : L('the set-up charge for coating', 'el cargo de preparación');
+    var ex = lcData.rows.filter(function (r) { return r.group !== lcData.flatGroup && Number(r.bbph) > 0; })[0];
+    var p = function (t) { return '<p style="margin:8px 0">' + t + '</p>'; };
+    return '<details class="card" id="lcHow" style="margin-bottom:10px"><summary style="cursor:pointer;font-weight:700;font-size:16px">ⓘ ' + esc(L('How these prices are worked out', 'Cómo se calculan estos precios')) + '</summary>' +
+      '<div class="sub" style="font-size:15px;color:var(--ink)">' +
+      p('<b>' + esc(L('Once a year every price goes up by the same percentage.', 'Una vez al año todos los precios suben el mismo porcentaje.')) + '</b> ' +
+        esc(L('The percentage comes from the annual statement:', 'El porcentaje sale del estado anual:'))) +
+      '<ol style="margin:4px 0 8px 20px;padding:0"><li>' + esc(L('Total cost of goods manufactured', 'Costo total de bienes manufacturados')) + '</li><li>' +
+        esc(L('minus direct labor', 'menos mano de obra directa')) + '</li><li>' + esc(L('÷ the hours Metal Dec operated = the cost of one hour.', '÷ las horas que operó Metal Dec = el costo de una hora.')) + '</li></ol>' +
+      p(esc(L('Compare it with the year before. Example: $1,783,072 ÷ 2,000 hours = $891.54 an hour; 2020 was $817.87, and $891.54 ÷ $817.87 = 1.09, so a 9% increase. For 2025 the report wasn\'t in yet, so 12% was estimated.',
+        'Compárelo con el año anterior. Ejemplo: $1,783,072 ÷ 2,000 horas = $891.54 la hora; 2020 fue $817.87, y $891.54 ÷ $817.87 = 1.09, o sea 9% más. Para 2025 se estimó 12%.'))) +
+      p('<b>' + esc(L('Specialty, print and set-up prices', 'Precios especiales, de impresión y de preparación')) + '</b> — ' +
+        esc(L('last year\'s price × (1 + the percentage). Example: $377.02 × 1.12 = $422.26 for the set-up charge for coating.', 'el precio del año pasado × (1 + el porcentaje). Ejemplo: $377.02 × 1.12 = $422.26.'))) +
+      p('<b>' + esc(L('Line cost', 'Costo de línea')) + '</b> — ' + esc(L('the set-up charge for coating (' + rate + ' an hour) ÷ the size\'s BB per hour, for each pass. A size that runs more sheets an hour costs less on the line. Two-pass coatings (Full Enamel, Double) cost twice.',
+        'el cargo de preparación (' + rate + ' la hora) ÷ los BB por hora del tamaño, por pasada. Los de dos pasadas cuestan el doble.')) +
+        (su && ex ? ' ' + esc(L('Example: ' + lcMoney(su.totalCost) + ' ÷ ' + ex.bbph + ' = ' + lcMoney(su.totalCost / ex.bbph) + ' (' + ex.group + ' ' + ex.sub + ').',
+          'Ejemplo: ' + lcMoney(su.totalCost) + ' ÷ ' + ex.bbph + ' = ' + lcMoney(su.totalCost / ex.bbph) + '.')) : '')) +
+      p('<b>' + esc(L('Application cost', 'Costo de aplicación')) + '</b> — ' + esc(L('the coating material for each pass. It\'s the same in every size.', 'el material del recubrimiento por pasada. Es igual en todos los tamaños.'))) +
+      p('<b>Total</b> = ' + esc(L('Application + Line.', 'Aplicación + Línea.'))) +
+      p(esc(L('A new price is only for coatings applied from then on — tickets already coated keep what they were charged.', 'Un precio nuevo es solo para recubrimientos de ahí en adelante.'))) +
+      '</div></details>';
+  }
+  function lcRound(n) { return Math.round(n * 100) / 100; }
+  // Every price the percentage changes: [{r, old, now, kind}] (kind: 'flat' | 'nonflat').
+  // Line costs are worked out again from the (new) set-up charge ÷ BB per hour × passes, so they
+  // match the tab; a size without a BB per hour just goes up by the percentage.
+  function lcPctPlan() {
+    var o = lcPct, f = 1 + (Number(o.pct) || 0) / 100, su = lcSetupRow();
+    var setup = su ? (o.flat ? lcRound(su.totalCost * f) : su.totalCost) : 0;
+    var oneLine = {};
+    lcBlocks().forEach(function (b) { if (!b.flat) oneLine[b.key] = lcOneLine(b); });
+    var out = [];
+    lcData.rows.forEach(function (r) {
+      if (r.group === lcData.flatGroup) {
+        if (!o.flat) return;
+        var nt = lcRound(r.totalCost * f);
+        if (nt !== r.totalCost) out.push({ r: r, flat: true, totalCost: nt });
+        return;
+      }
+      var app = o.app ? lcRound(r.appCost * f) : r.appCost, line = r.lineCost;
+      if (o.line && r.lineCost > 0) {
+        var one = oneLine[r.group + '|' + r.sub] || r.lineCost, passes = Math.max(1, Math.round(r.lineCost / one));
+        line = setup && Number(r.bbph) > 0 ? lcRound(passes * setup / Number(r.bbph)) : lcRound(r.lineCost * f);
+      }
+      if (app !== r.appCost || line !== r.lineCost) out.push({ r: r, flat: false, appCost: app, lineCost: line, totalCost: lcRound(app + line) });
+    });
+    return out;
+  }
+  function renderLcPct() {
+    var box = document.getElementById('lcPctBox');
+    if (!box) return;
+    var o = lcPct, plan = Number(o.pct) ? lcPctPlan() : [];
+    var chk = function (k, t, sub) {
+      return '<label style="display:flex;gap:10px;align-items:flex-start;margin:8px 0;font-size:16px"><input type="checkbox" data-lcpk="' + k + '"' + (o[k] ? ' checked' : '') + ' style="margin-top:4px;width:20px;height:20px"> <span><b>' + esc(t) + '</b>' +
+        (sub ? '<br><span class="sub">' + esc(sub) + '</span>' : '') + '</span></label>';
+    };
+    var rows = plan.slice(0, 300).map(function (c) {
+      var r = c.r;
+      var parts = c.flat ? [] : [c.appCost !== r.appCost ? L('Application ', 'Aplicación ') + lcMoney(r.appCost) + ' → ' + lcMoney(c.appCost) : '',
+        c.lineCost !== r.lineCost ? L('Line ', 'Línea ') + lcMoney(r.lineCost) + ' → ' + lcMoney(c.lineCost) : ''].filter(Boolean);
+      return '<div style="padding:8px 10px;border-top:1px solid var(--line)"><b>' + esc(r.item) + '</b> <span class="sub">' + esc(c.flat ? L('Specialty', 'Especiales') : r.group + ' ' + r.sub) + '</span>' +
+        '<div style="font-size:16px">' + lcMoney(r.totalCost) + ' → <b>' + lcMoney(c.totalCost) + '</b></div>' +
+        (parts.length ? '<div class="sub">' + esc(parts.join(' · ')) + '</div>' : '') + '</div>';
+    }).join('');
+    box.innerHTML = '<div class="card" style="border:2px solid var(--accent)">' +
+      '<h3 style="margin-top:0">📈 ' + esc(L('Change prices by a percentage', 'Cambiar precios por porcentaje')) + '</h3>' +
+      '<div class="field" style="max-width:220px"><label>' + esc(L('Percentage (use − to lower)', 'Porcentaje (use − para bajar)')) + '</label>' +
+        '<div style="display:flex;align-items:center;gap:6px"><input id="lcPctIn" inputmode="decimal" autocomplete="off" value="' + esc(o.pct) + '" placeholder="12" style="font-size:20px;text-align:right"><b style="font-size:20px">%</b></div></div>' +
+      chk('flat', L('Specialty, print and set-up prices', 'Precios especiales, de impresión y de preparación'), L('The list at the top (notes 1, 2 and 3 on the tab).', 'La lista de arriba.')) +
+      chk('line', L('Line costs', 'Costos de línea'), L('Worked out again: set-up charge for coating ÷ BB per hour, for each pass.', 'Se calculan de nuevo: cargo de preparación ÷ BB por hora, por pasada.')) +
+      chk('app', L('Application costs', 'Costos de aplicación'), L('The coating material. Only if what you pay for the coatings went up.', 'El material. Solo si subió lo que paga por los recubrimientos.')) +
+      '<div style="font-size:17px;margin:10px 0"><b>' + esc(L(plan.length + ' price' + (plan.length === 1 ? '' : 's') + ' will change', plan.length + ' precio(s) cambiarán')) + '</b></div>' +
+      (plan.length ? '<div style="max-height:360px;overflow-y:auto;border:1px solid var(--line);border-radius:8px">' + rows + '</div>' : '') +
+      '<div class="row" style="gap:8px;margin-top:12px"><button class="btn secondary" id="lcPctCancel">' + esc(L('Cancel', 'Cancelar')) + '</button>' +
+      '<button class="btn success" id="lcPctApply" style="flex:1"' + (plan.length ? '' : ' disabled') + '>' + esc(L('Apply to ' + plan.length + ' price' + (plan.length === 1 ? '' : 's'), 'Aplicar a ' + plan.length + ' precio(s)')) + '</button></div></div>';
+    var inp = document.getElementById('lcPctIn');
+    inp.oninput = function () {
+      o.pct = inp.value; var pos = inp.selectionStart; renderLcPct();
+      var i2 = document.getElementById('lcPctIn'); i2.focus(); try { i2.setSelectionRange(pos, pos); } catch (e) {}
+    };
+    Array.prototype.forEach.call(box.querySelectorAll('[data-lcpk]'), function (c) { c.onchange = function () { o[c.getAttribute('data-lcpk')] = c.checked; renderLcPct(); }; });
+    document.getElementById('lcPctCancel').onclick = function () { lcPct = null; renderLithoCosts(); };
+    var apply = document.getElementById('lcPctApply');
+    apply.onclick = function () {
+      var pct = String(o.pct).trim();
+      if (pct !== '' && !isFinite(Number(pct))) { toast(L('Enter the percentage as a number', 'Escriba el porcentaje como número')); return; }
+      if (Number(pct) <= -100) { toast(L('That would make prices zero or less', 'Eso dejaría precios en cero o menos')); return; }
+      var changes = plan.map(function (c) {
+        var x = { row: c.r.row, group: c.r.group, sub: c.r.sub, item: c.r.item };
+        if (c.flat) x.totalCost = c.totalCost; else { x.appCost = c.appCost; x.lineCost = c.lineCost; }
+        return x;
+      });
+      showConfirm(L('Change ' + changes.length + ' prices?', '¿Cambiar ' + changes.length + ' precios?'),
+        L((pct ? pct + '% — ' : '') + 'every change is logged on the Litho Rate Changes tab.\nTickets already coated keep the cost they were charged.',
+          (pct ? pct + '% — ' : '') + 'cada cambio queda en la pestaña Litho Rate Changes.\nLos tickets ya recubiertos se quedan con lo que se les cobró.'), function () {
+          apply.disabled = true; apply.textContent = L('Saving…', 'Guardando…');
+          runMutation('saveRates', [changes, lastOperator, newOpId()], function (res) {
+            toast(L((res && res.rows) + ' prices changed', (res && res.rows) + ' precios cambiados'));
+            lcPct = null; lcHist = null; loadRateData(); lcLoad();
+          }, function (err) { apply.disabled = false; renderLcPct(); showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' }); });
+        }, L('Change prices', 'Cambiar precios'));
+    };
   }
   function lcIn(id, label, val, money) {
     return '<div class="field" style="margin:0"><label>' + esc(label) + '</label><input id="' + id + '" autocomplete="off"' + (money ? ' inputmode="decimal"' : '') +
@@ -5379,7 +5561,7 @@
         save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
         runMutation('saveRates', [[ch], lastOperator, newOpId()], function (res) {
           toast(L('Saved', 'Guardado') + (res && res.rows > 1 ? ' (' + res.rows + ' ' + L('sizes', 'tamaños') + ')' : ''));
-          lcEdit = 0; loadRateData(); lcLoad();
+          lcEdit = 0; lcHist = null; loadRateData(); lcLoad();
         }, function (err) { save.disabled = false; save.textContent = L('Save', 'Guardar'); showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' }); });
       }, L('Save', 'Guardar'));
     };
@@ -5435,7 +5617,7 @@
       save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
       runMutation('addRate', [c, lastOperator, newOpId()], function (res) {
         toast(L('Added', 'Agregado') + (res && res.added > 1 ? ' (' + res.added + ' ' + L('sizes', 'tamaños') + ')' : ''));
-        lcAdd = ''; loadRateData(); lcLoad();
+        lcAdd = ''; lcHist = null; loadRateData(); lcLoad();
       }, function (err) { save.disabled = false; save.textContent = L('Add', 'Agregar'); showModal({ title: L('Not added', 'No se agregó'), message: err.message, confirmText: 'OK' }); });
     };
   }

@@ -2298,10 +2298,16 @@ const base = {
     { row: 2, group: '603X408', sub: '5-OUT', bbph: 65.592, item: 'OUTSIDE WHITE COAT', chemCode: 'PPG8129050', appCost: 5.36, lineCost: 6.44, totalCost: 11.8 },
     { row: 3, group: '603X408', sub: '5-OUT', bbph: 65.592, item: 'FULL ENAMEL BPANI', chemCode: '31S46AM', appCost: 11.8, lineCost: 12.88, totalCost: 24.68 },
     { row: 4, group: '401X400', sub: '21-OUT', bbph: 120.674, item: 'OUTSIDE WHITE COAT', chemCode: 'PPG8129050', appCost: 5.36, lineCost: 3.5, totalCost: 8.86 },
-    { row: 5, group: 'Specialty / Low Volume / Setup', sub: '', bbph: '', item: 'WAX ONLY', chemCode: '', appCost: 0, lineCost: 0, totalCost: 7.68 }];
+    { row: 5, group: 'Specialty / Low Volume / Setup', sub: '', bbph: '', item: 'WAX ONLY', chemCode: '', appCost: 0, lineCost: 0, totalCost: 7.68 },
+    { row: 6, group: 'Specialty / Low Volume / Setup', sub: '', bbph: '', item: 'SET UP CHARGE FOR COATING (per hour)', chemCode: '', appCost: 0, lineCost: 0, totalCost: 422.26 }];
   const { page, calls } = await boot(Object.assign({}, base, {
     getRateTable: () => R({ rows, flatGroup: 'Specialty / Low Volume / Setup' }),
     saveRates: (a) => R({ ok: true, changed: 4, rows: 2 }), addRate: (a) => R({ ok: true, added: 2 }),
+    getRateHistory: () => R({ since: '2026-09-01', log: [
+      { at: '2026-09-01 08:00:00', by: 'Jo', group: 'Specialty / Low Volume / Setup', sub: '', item: 'WAX ONLY', what: 'Added', old: '', now: 7.68 },
+      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Application', old: 5, now: 5.36 },
+      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Total', old: 11.44, now: 11.8 },
+      { at: '2026-10-02 10:00:00', by: 'Jo', group: 'Specialty / Low Volume / Setup', sub: '', item: 'WAX ONLY', what: 'Added', old: '', now: 7.68 }] }),
   }));
   await page.click('#tileLitho'); await page.click('#tileLithoCosts'); await page.waitForSelector('[data-lcrow]');
   const blocks = await page.$$eval('[data-lcblock] h3', (els) => els.map((e) => e.textContent));
@@ -2334,6 +2340,32 @@ const base = {
   // a flat price
   await page.click('[data-lcsize="flat"]'); await page.click('[data-lcrow="5"]'); await page.waitForSelector('#lcTotal');
   ok('a specialty item has just a price', !(await page.$('#lcApp')) && (await page.inputValue('#lcTotal')) === '7.68');
+  await page.click('#lcCancel');
+  // How prices are worked out
+  ok('the explanation is there (folded)', /How these prices are worked out/.test(await page.textContent('#lcHow')) && /BB per hour/.test(await page.textContent('#lcHow')));
+  // Change by a percentage
+  await page.click('#lcPctOpen'); await page.waitForSelector('#lcPctIn');
+  ok('nothing changes until a percentage is typed', (await page.$eval('#lcPctApply', (e) => e.disabled)));
+  await page.fill('#lcPctIn', '10'); await page.waitForTimeout(80);
+  const pv = await page.textContent('#lcPctBox');
+  // set-up 422.26 +10% = 464.49; ÷ 65.592 BB/hr = 7.08 a pass, 14.16 for two (not 12.88 × 1.1); ÷ 120.674 = 3.85
+  ok('preview: specialty +10%, line costs from the new set-up charge ÷ BB per hour, application left alone', pv.includes('$7.68 → $8.45') && pv.includes('$422.26 → $464.49')
+    && pv.includes('$6.44 → $7.08') && pv.includes('$12.88 → $14.16') && pv.includes('$3.50 → $3.85') && pv.includes('5 prices will change') && !pv.includes('$5.36 →'), pv);
+  await page.check('[data-lcpk="app"]'); await page.waitForTimeout(80);
+  ok('ticking Application adds those', (await page.textContent('#lcPctBox')).includes('$5.36 → $5.90') && (await page.textContent('#lcPctBox')).includes('5 prices will change'));
+  await page.click('#lcPctApply'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(150);
+  const pr = calls.filter((c) => c.fn === 'saveRates')[1];
+  ok('applies them all in one save', pr && pr.args[0].length === 5 && pr.args[0].some((x) => x.item === 'WAX ONLY' && x.totalCost === 8.45) && pr.args[0].some((x) => x.row === 2 && x.appCost === 5.9 && x.lineCost === 7.08), pr && pr.args);
+  // Past prices
+  await page.waitForSelector('#lcHistOpen'); await page.click('#lcHistOpen'); await page.waitForSelector('#lcHistDate');
+  ok('the list of changes, newest day first', /2026-10-01[\s\S]*OUTSIDE WHITE COAT[\s\S]*\$5\.00 → \$5\.36/.test(await page.textContent('#lcHistBox')));
+  await page.click('[data-lcsize="all"]'); await page.waitForSelector('#lcHistDate');
+  await page.fill('#lcHistDate', '2026-09-15'); await page.dispatchEvent('#lcHistDate', 'change'); await page.waitForTimeout(80);
+  ok('pick a day: the table shows the prices then (and no editing)', /Showing the prices on 2026-09-15/.test(await page.textContent('#view')) && /\$5\.00[\s\S]*\$6\.44[\s\S]*\$11\.44/.test(await page.textContent('[data-lcrow="2"]'))
+    && !(await page.$('[data-lcadd]')) && !(await page.$('#lcPctOpen')));
+  ok('a coating added after that day is not shown', !(await page.$('[data-lcrow="5"]')));
+  await page.click('#lcHistToday'); await page.waitForTimeout(80);
+  ok('back to today', /\$5\.36/.test(await page.textContent('[data-lcrow="2"]')) && !!(await page.$('[data-lcrow="5"]')));
   await page.click('#backBtn'); await page.waitForSelector('#tileLithoCosts');
   ok('back goes to the Litho Department', true);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
