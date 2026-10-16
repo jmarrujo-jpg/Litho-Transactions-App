@@ -1710,5 +1710,48 @@ await concurrency(envBase, 'in-worker lock');
   ok('an unknown material receiver is refused', !bad.ok && /MR-00077 not found/.test(bad.error), bad);
 }
 
+// 48. Litho Costs: change prices (old coatings keep theirs), every size at once, add a coating, logged
+{ const f = fresh();
+  const rt = f.book(SID).tabs['Litho Rate Table'].rows;
+  rt.push(['401X400', '21-OUT', 120.674, 'SIZE', 'CH1', 1, 3.5, 4.5], ['401X400', '21-OUT', 120.674, 'WHITE', 'CH3', 3, 7, 10],
+    ['Specialty / Low Volume / Setup', '', '', 'WAX ONLY', '', 0, 0, 7.68]);
+  await call('applyCoating', ['SKD-000001', '603X408', '10-OUT', 'SIZE', 'Ann', '', '', false, '', '', 'op-48-a']);
+  const g = await call('getRateTable', []);
+  ok('the rate table in sheet order with rows', g.ok && g.result.rows.length === 6 && g.result.rows[0].row === 2 && g.result.rows[3].bbph === 120.674 && g.result.rows[5].totalCost === 7.68, g.result);
+  const sz = g.result.rows[0];
+  const a = await call('saveRates', [[{ row: sz.row, group: sz.group, sub: sz.sub, item: sz.item, chemCode: 'CH1B', appCost: '1.25', lineCost: 1.5, allSizes: true }], 'Jo', 'op-48-b']);
+  const r = f.rows(SID, 'Litho Rate Table');
+  ok('Application changed here and on every size; Total = App + Line', a.ok && r[0]['Application Cost'] === 1.25 && r[0]['Total Cost'] === 2.75 && r[0]['Chem Code'] === 'CH1B'
+    && r[3]['Application Cost'] === 1.25 && r[3]['Total Cost'] === 4.75 && r[3]['Line Cost'] === 3.5 && r[3]['Chem Code'] === 'CH1', r);
+  const log = f.rows(SID, 'Litho Rate Changes');
+  ok('each change logged with old and new', log.length === 5 && log.some((x) => x['Item'] === 'SIZE' && x['What'] === 'Total' && String(x['Old']) === '2.5' && String(x['New']) === '2.75' && x['Operator'] === 'Jo'), log);
+  const a2 = await call('saveRates', [[{ row: sz.row, group: sz.group, sub: sz.sub, item: sz.item, chemCode: 'CH1B', appCost: '1.25', lineCost: 1.5, allSizes: true }], 'Jo', 'op-48-b']);
+  ok('a retry changes and logs nothing more', a2.ok && a2.result.duplicate && f.rows(SID, 'Litho Rate Changes').length === 5, a2);
+  ok('the ticket coated before keeps its old cost', Number(skidRow(f, 'SKD-000001')['Litho']) === 2.5 && Number(txFor(f, 'SKD-000001')[0]['Pass Total Cost']) === 2.5, skidRow(f, 'SKD-000001'));
+  await call('applyCoating', ['SKD-000002', '603X408', '10-OUT', 'SIZE', 'Ann', '', '', false, '', '', 'op-48-c']);
+  ok('a ticket coated after gets the new cost', Number(skidRow(f, 'SKD-000002')['Litho']) === 2.75, skidRow(f, 'SKD-000002'));
+  const rm = await call('removeTicketCoating', ['SKD-000001', 1, 'Ann', 'op-48-d']);
+  ok('taking off an old coating takes off what was charged', rm.ok && Number(skidRow(f, 'SKD-000001')['Litho']) === 0, [rm, skidRow(f, 'SKD-000001')]);
+  const wx = g.result.rows[5];
+  await call('saveRates', [[{ row: wx.row, group: wx.group, sub: '', item: wx.item, totalCost: '$8.00' }], 'Jo', 'op-48-e']);
+  ok('a flat-rate item: just its price', f.rows(SID, 'Litho Rate Table')[5]['Total Cost'] === 8 && f.rows(SID, 'Litho Rate Table')[5]['Application Cost'] === 0);
+  const moved = await call('saveRates', [[{ row: 2, group: '603X408', sub: '10-OUT', item: 'WHITE', appCost: 9, lineCost: 9 }], 'Jo', 'op-48-f']);
+  ok('a row that moved is refused', !moved.ok && /moved/.test(moved.error), moved);
+  const bad = await call('saveRates', [[{ row: sz.row, group: sz.group, sub: sz.sub, item: sz.item, appCost: 'abc', lineCost: 1 }], 'Jo', 'op-48-g']);
+  ok('a non-number is refused', !bad.ok && /dollar amount/.test(bad.error), bad);
+  // Add a coating
+  const n1 = await call('addRate', [{ group: '603X408', sub: '10-OUT', item: 'gold epoxy', chemCode: '6356069', appCost: 7.27, passes: 1, allSizes: true }, 'Jo', 'op-48-h']);
+  const r2 = f.rows(SID, 'Litho Rate Table');
+  const gold = r2.filter((x) => x['Item'] === 'GOLD EPOXY');
+  ok('added to every size, Line from that size\'s one-pass line cost', n1.ok && gold.length === 2 && gold[0]['Line Cost'] === 1.5 && gold[0]['Total Cost'] === 8.77
+    && gold[1]['Group'] === '401X400' && gold[1]['Line Cost'] === 3.5 && gold[1]['BB Per Hour'] === 120.674, gold);
+  const n2 = await call('addRate', [{ group: '401X400', sub: '21-OUT', item: 'DBL WHITE', appCost: 6, passes: 2 }, 'Jo', 'op-48-i']);
+  ok('two passes: twice the line cost, this size only', n2.ok && f.rows(SID, 'Litho Rate Table').filter((x) => x['Item'] === 'DBL WHITE').map((x) => x['Group'] + ':' + x['Line Cost']).join() === '401X400:7', n2);
+  const dup = await call('addRate', [{ group: '401X400', sub: '21-OUT', item: 'dbl white', appCost: 6 }, 'Jo', 'op-48-j']);
+  ok('the same coating twice on a size is refused', !dup.ok && /already on/.test(dup.error), dup);
+  const tree = await call('getRateTree', []);
+  ok('the new coating can be picked for a job', tree.result.tree['603X408'].items['10-OUT'].some((x) => x.item === 'GOLD EPOXY' && x.totalCost === 8.77));
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -2192,7 +2192,7 @@ const base = {
   ok('back from Plastics materials goes to the Plastics Department', true);
   await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
   await page.click('#tileLitho'); await page.waitForSelector('#tileLithoMat');
-  ok('Litho Department: Litho Line, Litho Steel Count, Materials, then Move To WIP', (await page.$$eval('#view button', (els) => els.map((e) => e.id))).join() === 'tileLithoLine,tileCount,tileLithoMat,tileMoveWip');
+  ok('Litho Department: Litho Line, Litho Steel Count, Materials, then Move To WIP', (await page.$$eval('#view button', (els) => els.map((e) => e.id))).join() === 'tileLithoLine,tileCount,tileLithoMat,tileLithoCosts,tileMoveWip');
   await page.click('#tileLithoMat'); await page.waitForSelector('#mtLoadBtn');
   ok('…opens Litho materials', (await page.textContent('#deptLabel')) === 'Litho Materials');
   await page.click('#backBtn'); await page.waitForSelector('#tileLithoMat');
@@ -2289,6 +2289,53 @@ const base = {
   ok('edit a material receiver', sr && sr.args[0].id === 'MR-00001' && sr.args[0].pos === 'P-1, P-2' && sr.args[0].department === 'Plastics', sr && sr.args);
   await page.waitForSelector('[data-mrrow="MR-00002"]'); await page.click('[data-mrrow="MR-00002"]'); await page.waitForSelector('#mrDelete');
   ok('an empty one can be deleted', !!(await page.$('#mrDelete')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
+// ---- 51. Litho Costs: laid out like the Litho Costs tab; change a price (every size), add a coating
+{ const rows = [
+    { row: 2, group: '603X408', sub: '5-OUT', bbph: 65.592, item: 'OUTSIDE WHITE COAT', chemCode: 'PPG8129050', appCost: 5.36, lineCost: 6.44, totalCost: 11.8 },
+    { row: 3, group: '603X408', sub: '5-OUT', bbph: 65.592, item: 'FULL ENAMEL BPANI', chemCode: '31S46AM', appCost: 11.8, lineCost: 12.88, totalCost: 24.68 },
+    { row: 4, group: '401X400', sub: '21-OUT', bbph: 120.674, item: 'OUTSIDE WHITE COAT', chemCode: 'PPG8129050', appCost: 5.36, lineCost: 3.5, totalCost: 8.86 },
+    { row: 5, group: 'Specialty / Low Volume / Setup', sub: '', bbph: '', item: 'WAX ONLY', chemCode: '', appCost: 0, lineCost: 0, totalCost: 7.68 }];
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getRateTable: () => R({ rows, flatGroup: 'Specialty / Low Volume / Setup' }),
+    saveRates: (a) => R({ ok: true, changed: 4, rows: 2 }), addRate: (a) => R({ ok: true, added: 2 }),
+  }));
+  await page.click('#tileLitho'); await page.click('#tileLithoCosts'); await page.waitForSelector('[data-lcrow]');
+  const blocks = await page.$$eval('[data-lcblock] h3', (els) => els.map((e) => e.textContent));
+  ok('specialty first, then each size with its -OUT', blocks.join('|') === 'Specialty and Low Volume Cans|603X408 — 5-OUT|401X400 — 21-OUT', blocks);
+  ok('BB per hour and the three costs shown', /65.592 BB per hour/.test(await page.textContent('#lcBody')) && /\$5\.36[\s\S]*\$6\.44[\s\S]*\$11\.80/.test(await page.textContent('[data-lcrow="2"]')));
+  await page.fill('#lcSearch', 'enamel'); await page.waitForTimeout(50);
+  ok('search narrows to the matching coating', (await page.$$('[data-lcrow]')).length === 1);
+  await page.fill('#lcSearch', ''); await page.click('[data-lcsize="603X408|5-OUT"]'); await page.waitForTimeout(50);
+  ok('a size button shows just that size', (await page.$$('[data-lcblock]')).length === 1);
+  await page.click('[data-lcrow="2"]'); await page.waitForSelector('#lcSave');
+  await page.fill('#lcApp', '5.60');
+  ok('the Total updates as you type', (await page.textContent('#lcNewTotal')) === '$12.04');
+  ok('…offered for the other size, checked', await page.isChecked('#lcAll'));
+  await page.click('#lcSave'); await page.waitForSelector('#modalOk');
+  const msg = await page.textContent('#modalRoot');
+  ok('the confirm shows old → new and that coated tickets keep theirs', msg.includes('$11.80 → $12.04') && msg.includes('$5.36 → $5.60 in the 1 other size') && msg.includes('already coated keep'), msg);
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  const sr = calls.filter((c) => c.fn === 'saveRates')[0];
+  ok('saves the row with its coating and every size', sr && sr.args[0][0].row === 2 && sr.args[0][0].item === 'OUTSIDE WHITE COAT' && sr.args[0][0].appCost === 5.6 && sr.args[0][0].lineCost === 6.44 && sr.args[0][0].allSizes === true, sr && sr.args);
+  ok('the prices for New Job are refreshed', calls.filter((c) => c.fn === 'getRateTree').length >= 2);
+  // add a coating
+  await page.waitForSelector('[data-lcadd="603X408|5-OUT"]'); await page.click('[data-lcadd="603X408|5-OUT"]'); await page.waitForSelector('#lcNSave');
+  ok('one pass: the size\'s one-pass Line cost', (await page.inputValue('#lcNLine')) === '6.44');
+  await page.fill('#lcNName', 'Gold Epoxy'); await page.fill('#lcNChem', '6356069'); await page.fill('#lcNApp', '7.27');
+  await page.click('[data-lcpass="2"]');
+  ok('two passes: twice that, and what was typed is kept', (await page.inputValue('#lcNLine')) === '12.88' && (await page.inputValue('#lcNName')) === 'Gold Epoxy' && (await page.textContent('#lcNTot')) === '$20.15');
+  await page.check('#lcNAll'); await page.click('#lcNSave'); await page.waitForTimeout(150);
+  const ar = calls.filter((c) => c.fn === 'addRate')[0];
+  ok('adds it (every size, 2 passes)', ar && ar.args[0].item === 'Gold Epoxy' && ar.args[0].group === '603X408' && ar.args[0].passes === 2 && ar.args[0].allSizes === true && ar.args[0].lineCost === 12.88, ar && ar.args);
+  // a flat price
+  await page.click('[data-lcsize="flat"]'); await page.click('[data-lcrow="5"]'); await page.waitForSelector('#lcTotal');
+  ok('a specialty item has just a price', !(await page.$('#lcApp')) && (await page.inputValue('#lcTotal')) === '7.68');
+  await page.click('#backBtn'); await page.waitForSelector('#tileLithoCosts');
+  ok('back goes to the Litho Department', true);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }

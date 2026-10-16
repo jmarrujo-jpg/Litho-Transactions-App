@@ -200,7 +200,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'depts-96', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'costs-98', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -308,6 +308,12 @@ async function handle(fn, args, env) {
   args = args || [];
   switch (fn) {
     case 'getRateTree': return getRateTree(sheets);
+    case 'getRateTable': // () every row of the Litho Rate Table, in sheet order (the Litho Costs screen)
+      return getRateTable(sheets);
+    case 'saveRates': // (changes[{row, group, sub, item, chemCode, appCost, lineCost, totalCost?, allSizes?}], operator, opId) change prices; already-coated tickets keep theirs
+      return saveRates(sheets, args[0], args[1], args[2]);
+    case 'addRate': // ({group, sub, item, chemCode, appCost, lineCost, totalCost?, passes?, allSizes?}, operator, opId) a new coating
+      return addRate(sheets, args[0], args[1], args[2]);
     case 'getAllTickets': return getAllTickets(sheets);
     case 'getUsedTickets': return getUsedTickets(sheets);
     case 'getOperatorNames': return [];
@@ -784,6 +790,146 @@ async function getRateTree(sheets) {
   const addons = ((tree[ADDON_SOURCE_GROUP] && tree[ADDON_SOURCE_GROUP].items['']) || []).filter((it) => ADDON_ITEM_NAMES.indexOf(it.item) !== -1);
   return { groups, tree, addonGroup: ADDON_SOURCE_GROUP, addons };
 }
+// ---- Litho Costs: view and change the Litho Rate Table ----
+// A ticket's cost is stamped when its pass is applied (Transactions + its Litho total), so a new
+// price only applies to coatings applied from then on. Every change is logged on Litho Rate Changes.
+const RATE_LOG = 'Litho Rate Changes';
+const RATE_LOG_HEADERS = ['Timestamp', 'Operator', 'Group', 'Sub-Variant', 'Item', 'What', 'Old', 'New', 'Op ID'];
+const RATE_CHANGES_MAX = 200;
+function money(v) { return Math.round(Number(v) * 100) / 100; }
+function rateOut(r) {
+  return { row: r.__row, group: String(r['Group'] || '').trim(), sub: String(r['Sub-Variant'] || '').trim(), bbph: r['BB Per Hour'] === '' || r['BB Per Hour'] == null ? '' : num(r['BB Per Hour']),
+    item: String(r['Item'] || '').trim(), chemCode: String(r['Chem Code'] || '').trim(), appCost: num(r['Application Cost']), lineCost: num(r['Line Cost']), totalCost: num(r['Total Cost']) };
+}
+async function getRateTable(sheets) {
+  const t = await readTab(sheets, RATE);
+  return { rows: t.rows.map(rateOut).filter((r) => r.group && r.item), flatGroup: ADDON_SOURCE_GROUP };
+}
+function costIn(v, label) {
+  const s = String(v == null ? '' : v).replace(/[$,\s]/g, '');
+  const n = Number(s);
+  if (s === '' || !isFinite(n) || n < 0) throw new Error(label + ' must be a dollar amount (0 or more).');
+  return money(n);
+}
+async function rateLogTab(sheets) {
+  await ensureTab(sheets, RATE_LOG, RATE_LOG_HEADERS);
+  return readTab(sheets, RATE_LOG);
+}
+async function logRateChanges(sheets, lines, operator, opId) {
+  if (!lines.length) return;
+  const lt = await rateLogTab(sheets);
+  const ts = nowStamp();
+  const objs = lines.map((l, i) => ({ 'Timestamp': ts, 'Operator': operator, 'Group': l.group, 'Sub-Variant': l.sub, 'Item': l.item, 'What': l.what,
+    'Old': l.old, 'New': l.now, 'Op ID': opId ? opId + '#' + (i + 1) : '' }));
+  await sheets.appendMany(RATE_LOG, objs.map((o) => lt.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
+    () => (opId ? columnHas(sheets, RATE_LOG, lt.headers, 'Op ID', objs[0]['Op ID']) : Promise.resolve(false)));
+}
+async function rateOpDone(sheets, opId) {
+  if (!opId) return false;
+  try { return (await readTab(sheets, RATE_LOG)).rows.some((r) => String(r['Op ID'] || '').indexOf(opId + '#') === 0); } catch (e) { return false; }
+}
+// Change prices. Each change names its row AND its group / size / coating, so a row that moved
+// (someone sorted the sheet) is refused instead of changing the wrong coating. Total = Application
+// + Line (flat-rate specialty items have only a Total). allSizes: the Application cost is changed on
+// the same coating in every size too (their Line costs stay).
+async function saveRates(sheets, changes, operator, opId) {
+  operator = String(operator || '').trim();
+  changes = Array.isArray(changes) ? changes : [];
+  if (!changes.length) throw new Error('Nothing to save.');
+  if (changes.length > RATE_CHANGES_MAX) throw new Error('Save at most ' + RATE_CHANGES_MAX + ' prices at once.');
+  if (await rateOpDone(sheets, opId)) return { ok: true, duplicate: true };
+  const t = await readTab(sheets, RATE);
+  const rows = t.rows.map(rateOut);
+  const byRow = {}; rows.forEach((r) => { byRow[r.row] = r; });
+  const want = {};   // row -> new values
+  const lines = [];
+  const setRow = (r, f) => { want[r.row] = Object.assign(want[r.row] || { chemCode: r.chemCode, appCost: r.appCost, lineCost: r.lineCost, totalCost: r.totalCost }, f); };
+  changes.forEach((c) => {
+    const r = byRow[Number(c.row)];
+    if (!r || r.group !== String(c.group || '').trim() || r.sub !== String(c.sub || '').trim() || r.item !== String(c.item || '').trim()) {
+      throw new Error((c.item || 'A coating') + ' moved in the Litho Rate Table since this screen loaded. Refresh and try again — nothing was saved.');
+    }
+    const flat = r.group === ADDON_SOURCE_GROUP;
+    const f = { chemCode: String(c.chemCode == null ? r.chemCode : c.chemCode).trim() };
+    if (flat) { f.appCost = 0; f.lineCost = 0; f.totalCost = costIn(c.totalCost, r.item + ': the price'); }
+    else {
+      f.appCost = costIn(c.appCost, r.item + ': the Application cost');
+      f.lineCost = costIn(c.lineCost, r.item + ': the Line cost');
+      f.totalCost = money(f.appCost + f.lineCost);
+    }
+    setRow(r, f);
+    if (c.allSizes && !flat && f.appCost !== r.appCost) {
+      rows.filter((x) => x.item === r.item && x.row !== r.row && x.group !== ADDON_SOURCE_GROUP).forEach((x) => {
+        const cur = want[x.row] || x;
+        setRow(x, { appCost: f.appCost, totalCost: money(f.appCost + cur.lineCost) });
+      });
+    }
+  });
+  const data = [];
+  Object.keys(want).forEach((k) => {
+    const r = byRow[k], w = want[k];
+    [['Chem Code', 'chemCode', 'Chem code'], ['Application Cost', 'appCost', 'Application'], ['Line Cost', 'lineCost', 'Line'], ['Total Cost', 'totalCost', 'Total']].forEach((m) => {
+      if (String(w[m[1]]) === String(r[m[1]]) || !t.map[m[0]]) return;
+      data.push({ range: "'" + RATE + "'!" + colLetter(t.map[m[0]]) + r.row, values: [[w[m[1]]]] });
+      lines.push({ group: r.group, sub: r.sub, item: r.item, what: m[2], old: r[m[1]], now: w[m[1]] });
+    });
+  });
+  if (!data.length) return { ok: true, changed: 0, rows: 0 };
+  // Re-check the rows still hold these coatings right before writing (someone may have sorted the sheet).
+  const itemCol = colLetter(t.map['Item']);
+  const fresh = await sheets.read("'" + RATE + "'!" + itemCol + '1:' + itemCol);
+  Object.keys(want).forEach((k) => {
+    const v = String(((fresh[Number(k) - 1] || [])[0]) || '').trim();
+    if (v !== byRow[k].item) throw new Error('The Litho Rate Table changed while saving. Refresh and try again — nothing was saved.');
+  });
+  await sheets.batchUpdate(data);
+  await logRateChanges(sheets, lines, operator, opId);
+  return { ok: true, changed: lines.length, rows: Object.keys(want).length };
+}
+// Add a coating to a size (or to every size). Line cost: typed, or from `passes` (1 or 2) × that
+// size's one-pass line cost (the smallest line cost on it). Flat-rate specialty items take a Total.
+async function addRate(sheets, c, operator, opId) {
+  c = c || {};
+  operator = String(operator || '').trim();
+  const item = String(c.item || '').trim().toUpperCase();
+  if (!item) throw new Error('Enter the coating name.');
+  const group = String(c.group || '').trim(), sub = String(c.sub || '').trim();
+  if (await rateOpDone(sheets, opId)) return { ok: true, duplicate: true };
+  const t = await readTab(sheets, RATE);
+  const rows = t.rows.map(rateOut).filter((r) => r.group && r.item);
+  const sizes = [];
+  rows.forEach((r) => { if (r.group !== ADDON_SOURCE_GROUP && !sizes.some((x) => x.group === r.group && x.sub === r.sub)) sizes.push({ group: r.group, sub: r.sub, bbph: r.bbph }); });
+  const flat = group === ADDON_SOURCE_GROUP;
+  if (!flat && !sizes.some((x) => x.group === group && x.sub === sub)) throw new Error('Pick the size to add it to.');
+  const targets = flat ? [{ group, sub: '', bbph: '' }] : c.allSizes ? sizes : sizes.filter((x) => x.group === group && x.sub === sub);
+  const chem = String(c.chemCode || '').trim();
+  const passes = Number(c.passes) === 2 ? 2 : 1;
+  const add = [];
+  targets.forEach((x) => {
+    if (rows.some((r) => r.group === x.group && r.sub === x.sub && r.item.toUpperCase() === item)) {
+      if (!c.allSizes) throw new Error(item + ' is already on ' + x.group + (x.sub ? ' ' + x.sub : '') + '.');
+      return;
+    }
+    let app = 0, line = 0, total;
+    if (flat) total = costIn(c.totalCost, 'The price');
+    else {
+      app = costIn(c.appCost, 'The Application cost');
+      const own = rows.filter((r) => r.group === x.group && r.sub === x.sub && r.lineCost > 0).map((r) => r.lineCost);
+      line = (x.group === group && x.sub === sub && String(c.lineCost == null ? '' : c.lineCost).trim() !== '') ? costIn(c.lineCost, 'The Line cost')
+        : money((own.length ? Math.min.apply(null, own) : 0) * passes);
+      total = money(app + line);
+    }
+    add.push({ 'Group': x.group, 'Sub-Variant': x.sub, 'BB Per Hour': x.bbph, 'Item': item, 'Chem Code': chem, 'Application Cost': app, 'Line Cost': line, 'Total Cost': total });
+  });
+  if (!add.length) throw new Error(item + ' is already on every size.');
+  // After an unclear failure: landed if the first new coating is now on its size.
+  const landed = async () => (await readTab(sheets, RATE)).rows.some((r) => String(r['Group'] || '').trim() === add[0]['Group']
+    && String(r['Sub-Variant'] || '').trim() === add[0]['Sub-Variant'] && String(r['Item'] || '').trim().toUpperCase() === item);
+  await sheets.appendMany(RATE, add.map((o) => t.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))), landed);
+  await logRateChanges(sheets, add.map((o) => ({ group: o['Group'], sub: o['Sub-Variant'], item, what: 'Added', old: '', now: o['Total Cost'] })), operator, opId);
+  return { ok: true, added: add.length, rows: add.map((o) => ({ group: o['Group'], sub: o['Sub-Variant'], item, appCost: o['Application Cost'], lineCost: o['Line Cost'], totalCost: o['Total Cost'] })) };
+}
+
 async function rateGroups(sheets) {
   const { rows } = await readObjects(sheets, RATE);
   const seen = {}; const out = [];

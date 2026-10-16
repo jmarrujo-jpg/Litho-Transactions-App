@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <style>
   :root {
@@ -237,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.97.1</span>
+      <span class="version" id="appVersion">v1.98.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -349,6 +350,8 @@
     "📦 Receive Materials": "📦 Recibir materiales",
     "Materials": "Materiales",
     "Plastics Department": "Departamento de Plásticos",
+    "💲 Litho Costs": "💲 Costos de Litho",
+    "Litho Costs": "Costos de Litho",
     "Plastics Lines (coming soon)": "Líneas de Plásticos (pronto)",
     "Plastics": "Plásticos",
     "Metals Materials": "Materiales de Metales",
@@ -1736,7 +1739,7 @@
     var altHtml = opts.altText ? '<button class="btn secondary" id="modalAlt">' + esc(opts.altText) + '</button>' : '';
     overlay.innerHTML = '<div class="modal">' + iconHtml +
       '<h3>' + esc(opts.title || '') + '</h3>' +
-      '<p>' + esc(opts.message || '') + '</p>' +
+      '<p style="white-space:pre-line">' + esc(opts.message || '') + '</p>' +
       '<div class="modal-actions">' + altHtml + cancelHtml +
         '<button class="btn ' + (opts.variant || '') + '" id="modalOk">' + esc(opts.confirmText || 'OK') + '</button>' +
       '</div></div>';
@@ -1998,6 +2001,7 @@
       case 'materialsHome': renderLanding(); return;
       case 'materials': mtBackFromDept(); return;   // -> the department it was opened from, else the Materials tiles
       case 'plasticsDept': renderLanding(); return;
+      case 'lithoCosts': openLithoDept(); return;
       case 'materialsReceive': case 'materialsEdit': case 'materialsList': case 'materialsLoad': case 'materialsLoads': openMaterials(); return;   // the scanned lots are kept
       case 'materialsItem': if (mtItemFrom === 'receive') openMtReceive(); else if (mtItemFrom === 'add') openMtAdd(); else openMtList(); return;
       case 'materialsSetup': openMtList(); return;
@@ -5220,11 +5224,220 @@
       '<button class="btn" id="tileLithoLine" style="' + BIG_BTN + '">Litho Line</button>' +
       '<button class="btn secondary" id="tileCount" style="' + BIG_BTN + '">🧮&nbsp; Litho Steel Count</button>' +
       '<button class="btn secondary" id="tileLithoMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>' +
+      '<button class="btn secondary" id="tileLithoCosts" style="' + BIG_BTN + '">💲&nbsp; Litho Costs</button>' +
       (FULL_APP ? '<button class="btn success" id="tileMoveWip" style="' + BIG_BTN + '">Move To WIP</button>' : '');
     document.getElementById('tileLithoLine').onclick = openLithoLogin;
     document.getElementById('tileCount').onclick = openSteelCount;
     document.getElementById('tileLithoMat').onclick = function () { openMtDept('Litho', 'lithoDept'); };
+    document.getElementById('tileLithoCosts').onclick = openLithoCosts;
     if (FULL_APP) document.getElementById('tileMoveWip').onclick = openMoveWip;
+  }
+
+  // ---------------- Litho Costs ----------------
+  // The Litho Rate Table, laid out like the Litho Costs tab: the flat specialty prices, then each
+  // size (its -OUT and BB per hour) with every coating's Application, Line and Total. On the office
+  // computers a row can be tapped to change it, and coatings added. A ticket's cost is stamped when
+  // it's coated, so a new price is only for coatings applied from now on.
+  var lcData = null, lcSize = 'all', lcSearch = '', lcEdit = 0, lcAdd = '', lcAddPasses = 1;
+  function lcMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
+  function openLithoCosts() {
+    state.view = 'lithoCosts';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Litho Costs');
+    lcEdit = 0; lcAdd = '';
+    document.getElementById('view').innerHTML = '<div class="loading">Loading the costs&hellip;</div>';
+    lcLoad();
+  }
+  function lcLoad() {
+    google.script.run.withSuccessHandler(function (res) {
+      lcData = res || { rows: [], flatGroup: '' };
+      if (state.view === 'lithoCosts') renderLithoCosts();
+    }).withFailureHandler(function (err) {
+      if (state.view === 'lithoCosts') document.getElementById('view').innerHTML = '<div class="card empty">Could not load the costs: ' + esc(err.message) + '</div>';
+    }).getRateTable();
+  }
+  // Blocks in sheet order: the flat specialty prices, then one per size + -OUT.
+  function lcBlocks() {
+    var out = [], by = {};
+    lcData.rows.forEach(function (r) {
+      var flat = r.group === lcData.flatGroup, key = flat ? 'flat' : r.group + '|' + r.sub;
+      if (!by[key]) { by[key] = { key: key, group: r.group, sub: r.sub, bbph: r.bbph, flat: flat, rows: [] }; out.push(by[key]); }
+      by[key].rows.push(r);
+    });
+    out.sort(function (a, b) { return (b.flat ? 1 : 0) - (a.flat ? 1 : 0); });   // specialty first, like the tab
+    return out;
+  }
+  function lcTitle(b) { return b.flat ? 'Specialty and Low Volume Cans' : b.group + (b.sub ? ' — ' + b.sub : ''); }
+  function lcOtherSizes(r) { return lcData.rows.filter(function (x) { return x.item === r.item && x.row !== r.row && x.group !== lcData.flatGroup; }); }
+  function lcOneLine(b) { var l = b.rows.map(function (r) { return r.lineCost; }).filter(function (n) { return n > 0; }); return l.length ? Math.min.apply(null, l) : 0; }
+  function renderLithoCosts() {
+    var view = document.getElementById('view'), blocks = lcBlocks();
+    if (lcSize !== 'all' && !blocks.some(function (b) { return b.key === lcSize; })) lcSize = 'all';
+    view.innerHTML =
+      '<div class="card" style="border-left:4px solid var(--accent)"><div class="sub" style="font-size:15px">' +
+        esc(L('These prices are for coatings applied from now on. Tickets already coated keep what they were charged.',
+          'Estos precios son para recubrimientos de ahora en adelante. Los tickets ya recubiertos se quedan con lo que se les cobró.')) +
+        (FULL_APP ? ' ' + esc(L('Tap a row to change it.', 'Toque una fila para cambiarla.')) : ' ' + esc(L('To change a price, use an office computer.', 'Para cambiar un precio, use una computadora de la oficina.'))) + '</div></div>' +
+      '<div class="field"><label>' + esc(L('Find a coating', 'Buscar un recubrimiento')) + '</label><input id="lcSearch" autocomplete="off" placeholder="name or chem code" value="' + esc(lcSearch) + '"></div>' +
+      '<div class="tabbar" id="lcSizes" style="flex-wrap:wrap">' + [['all', L('All sizes', 'Todos')]].concat(blocks.map(function (b) { return [b.key, b.flat ? L('Specialty', 'Especiales') : b.group + ' ' + b.sub]; })).map(function (c) {
+        return '<button data-lcsize="' + esc(c[0]) + '"' + (lcSize === c[0] ? ' class="active"' : '') + ' style="white-space:normal;flex:0 1 auto;max-width:100%">' + esc(c[1]) + '</button>';
+      }).join('') + '</div>' +
+      '<div id="lcBody"></div>';
+    var s = document.getElementById('lcSearch');
+    s.oninput = function () { lcSearch = s.value; renderLcBody(); };
+    Array.prototype.forEach.call(view.querySelectorAll('[data-lcsize]'), function (b) {
+      b.onclick = function () { lcSize = b.getAttribute('data-lcsize'); lcEdit = 0; lcAdd = ''; renderLithoCosts(); };
+    });
+    renderLcBody();
+  }
+  function renderLcBody() {
+    var box = document.getElementById('lcBody');
+    if (!box) return;
+    var term = String(lcSearch || '').trim().toLowerCase();
+    var html = lcBlocks().filter(function (b) { return lcSize === 'all' || b.key === lcSize; }).map(function (b) {
+      var rows = b.rows.filter(function (r) { return !term || (r.item + ' ' + r.chemCode).toLowerCase().indexOf(term) !== -1; });
+      if (term && !rows.length) return '';
+      var cols = b.flat ? 2 : 4;   // the chem code sits under the coating name so it fits a phone
+      var head = b.flat ? '<tr><th>Item</th><th style="text-align:right">Price</th></tr>'
+        : '<tr><th>Coating / Chem Code</th><th style="text-align:right">Application</th><th style="text-align:right">Line</th><th style="text-align:right">Total</th></tr>';
+      var body = rows.map(function (r) {
+        var on = lcEdit === r.row;
+        var tr = '<tr data-lcrow="' + r.row + '" style="' + (FULL_APP ? 'cursor:pointer;' : '') + (on ? 'background:#eef2ff' : '') + '">' +
+          (b.flat ? '<td>' + esc(r.item) + '</td><td style="text-align:right;font-weight:700">' + lcMoney(r.totalCost) + '</td>'
+            : '<td><b>' + esc(r.item) + '</b>' + (r.chemCode ? '<div class="sub">' + esc(r.chemCode) + '</div>' : '') + '</td><td style="text-align:right">' + lcMoney(r.appCost) + '</td><td style="text-align:right">' + lcMoney(r.lineCost) +
+              '</td><td style="text-align:right;font-weight:700">' + lcMoney(r.totalCost) + '</td>') + '</tr>';
+        return tr + (on ? '<tr><td colspan="' + cols + '" style="padding:0">' + lcEditorHtml(r, b) + '</td></tr>' : '');
+      }).join('');
+      return '<div class="card" data-lcblock="' + esc(b.key) + '">' +
+        '<h3 style="margin:0 0 2px">' + esc(lcTitle(b)) + '</h3>' +
+        (b.flat ? '' : '<div class="sub" style="margin-bottom:8px">' + esc((b.bbph ? b.bbph + ' BB per hour' : '')) + '</div>') +
+        '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;font-size:14px">' + head + body + '</table></div>' +
+        (FULL_APP ? (lcAdd === b.key ? lcAddHtml(b) : '<button class="btn secondary" data-lcadd="' + esc(b.key) + '" style="margin-top:10px">➕ ' + esc(L('Add coating', 'Agregar recubrimiento')) + '</button>') : '') +
+        '</div>';
+    }).join('');
+    box.innerHTML = html || '<div class="card empty">' + esc(L('No coating matches.', 'Ningún recubrimiento coincide.')) + '</div>';
+    if (!FULL_APP) return;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-lcrow]'), function (tr) {
+      tr.onclick = function () { var n = Number(tr.getAttribute('data-lcrow')); lcEdit = lcEdit === n ? 0 : n; lcAdd = ''; renderLcBody(); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-lcadd]'), function (b) {
+      b.onclick = function () { lcAdd = b.getAttribute('data-lcadd'); lcAddPasses = 1; lcEdit = 0; renderLcBody(); };
+    });
+    if (lcEdit) bindLcEditor();
+    if (lcAdd) bindLcAdd();
+  }
+  function lcIn(id, label, val, money) {
+    return '<div class="field" style="margin:0"><label>' + esc(label) + '</label><input id="' + id + '" autocomplete="off"' + (money ? ' inputmode="decimal"' : '') +
+      ' value="' + esc(val) + '" style="font-size:18px' + (money ? ';text-align:right' : '') + '"></div>';
+  }
+  function lcEditorHtml(r, b) {
+    var others = lcOtherSizes(r);
+    return '<div style="padding:12px;border:2px solid var(--accent);border-radius:10px;margin:6px 0">' +
+      '<div style="font-weight:700;margin-bottom:8px">' + esc(L('Change ' + r.item, 'Cambiar ' + r.item)) + '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px">' +
+        (b.flat ? lcIn('lcTotal', L('Price', 'Precio'), r.totalCost.toFixed(2), true)
+          : lcIn('lcChem', L('Chem Code', 'Código químico'), r.chemCode) + lcIn('lcApp', L('Application $', 'Aplicación $'), r.appCost.toFixed(2), true) +
+            lcIn('lcLine', L('Line $', 'Línea $'), r.lineCost.toFixed(2), true)) +
+      '</div>' +
+      (b.flat ? '' : '<div style="margin-top:8px;font-size:17px">' + esc(L('Total', 'Total')) + ': <b id="lcNewTotal">' + lcMoney(r.totalCost) + '</b> <span class="sub">(' + esc(L('was', 'antes')) + ' ' + lcMoney(r.totalCost) + ')</span></div>') +
+      (others.length ? '<label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="lcAll" checked> ' +
+        esc(L('Also change the Application cost in the ' + others.length + ' other size' + (others.length === 1 ? '' : 's'), 'Cambiar también el costo de aplicación en los otros ' + others.length + ' tamaño(s)')) + '</label>' : '') +
+      '<div class="row" style="gap:8px;margin-top:10px"><button class="btn secondary" id="lcCancel">' + esc(L('Cancel', 'Cancelar')) + '</button>' +
+      '<button class="btn success" id="lcSave" style="flex:1">' + esc(L('Save', 'Guardar')) + '</button></div></div>';
+  }
+  function lcNum(id) { var el = document.getElementById(id); var v = el ? String(el.value).replace(/[$,\s]/g, '') : ''; return v === '' ? NaN : Number(v); }
+  function bindLcEditor() {
+    var r = lcData.rows.filter(function (x) { return x.row === lcEdit; })[0];
+    if (!r) return;
+    var flat = r.group === lcData.flatGroup;
+    var tot = function () { var a = lcNum('lcApp'), l = lcNum('lcLine'); return Math.round(((a || 0) + (l || 0)) * 100) / 100; };
+    if (!flat) ['lcApp', 'lcLine'].forEach(function (id) { document.getElementById(id).oninput = function () { document.getElementById('lcNewTotal').textContent = lcMoney(tot()); }; });
+    document.getElementById('lcCancel').onclick = function () { lcEdit = 0; renderLcBody(); };
+    var save = document.getElementById('lcSave');
+    save.onclick = function () {
+      var ch = { row: r.row, group: r.group, sub: r.sub, item: r.item }, msg = [];
+      if (flat) {
+        var p = lcNum('lcTotal');
+        if (!(p >= 0)) { toast(L('Enter the price', 'Escriba el precio')); return; }
+        ch.totalCost = p;
+        if (p === r.totalCost) { lcEdit = 0; renderLcBody(); return; }
+        msg.push(r.item + ': ' + lcMoney(r.totalCost) + ' → ' + lcMoney(p));
+      } else {
+        var a = lcNum('lcApp'), l = lcNum('lcLine');
+        if (!(a >= 0) || !(l >= 0)) { toast(L('Enter the Application and Line costs', 'Escriba los costos de aplicación y línea')); return; }
+        ch.appCost = a; ch.lineCost = l; ch.chemCode = document.getElementById('lcChem').value.trim();
+        var all = document.getElementById('lcAll');
+        ch.allSizes = !!(all && all.checked);
+        if (a === r.appCost && l === r.lineCost && ch.chemCode === r.chemCode) { lcEdit = 0; renderLcBody(); return; }
+        msg.push(lcTitle({ group: r.group, sub: r.sub }) + ': ' + L('Total', 'Total') + ' ' + lcMoney(r.totalCost) + ' → ' + lcMoney(tot()));
+        if (ch.chemCode !== r.chemCode) msg.push(L('Chem code', 'Código') + ': ' + (r.chemCode || '—') + ' → ' + (ch.chemCode || '—'));
+        if (ch.allSizes && a !== r.appCost) msg.push(L('Application ' + lcMoney(r.appCost) + ' → ' + lcMoney(a) + ' in the ' + lcOtherSizes(r).length + ' other size(s) too.',
+          'Aplicación ' + lcMoney(r.appCost) + ' → ' + lcMoney(a) + ' también en los otros ' + lcOtherSizes(r).length + ' tamaño(s).'));
+      }
+      msg.push(L('Tickets already coated keep the cost they were charged.', 'Los tickets ya recubiertos se quedan con lo que se les cobró.'));
+      showConfirm(L('Change ' + r.item + '?', '¿Cambiar ' + r.item + '?'), msg.join('\n'), function () {
+        save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
+        runMutation('saveRates', [[ch], lastOperator, newOpId()], function (res) {
+          toast(L('Saved', 'Guardado') + (res && res.rows > 1 ? ' (' + res.rows + ' ' + L('sizes', 'tamaños') + ')' : ''));
+          lcEdit = 0; loadRateData(); lcLoad();
+        }, function (err) { save.disabled = false; save.textContent = L('Save', 'Guardar'); showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' }); });
+      }, L('Save', 'Guardar'));
+    };
+  }
+  function lcAddHtml(b) {
+    var sizes = lcBlocks().filter(function (x) { return !x.flat; }).length;
+    return '<div style="padding:12px;border:2px solid var(--accent);border-radius:10px;margin-top:10px">' +
+      '<div style="font-weight:700;margin-bottom:8px">' + esc(L('Add a coating to ' + lcTitle(b), 'Agregar recubrimiento a ' + lcTitle(b))) + '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px">' +
+        lcIn('lcNName', L('Coating name', 'Nombre'), '') +
+        (b.flat ? lcIn('lcNTotal', L('Price', 'Precio'), '', true)
+          : lcIn('lcNChem', L('Chem Code', 'Código químico'), '') + lcIn('lcNApp', L('Application $', 'Aplicación $'), '', true)) +
+      '</div>' +
+      (b.flat ? '' :
+        '<div class="sub" style="margin:10px 0 4px">' + esc(L('Passes on the line', 'Pasadas en la línea')) + '</div>' +
+        '<div style="display:flex;gap:8px">' + [1, 2].map(function (n) {
+          return '<button class="btn ' + (lcAddPasses === n ? '' : 'secondary') + '" data-lcpass="' + n + '" style="margin:0;padding:10px 18px">' + n + '</button>';
+        }).join('') + '</div>' +
+        '<div style="margin-top:8px">' + lcIn('lcNLine', L('Line $', 'Línea $'), (lcOneLine(b) * lcAddPasses).toFixed(2), true) + '</div>' +
+        '<div style="margin-top:8px;font-size:17px">' + esc(L('Total', 'Total')) + ': <b id="lcNTot">' + lcMoney(lcOneLine(b) * lcAddPasses) + '</b></div>' +
+        (sizes > 1 ? '<label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="lcNAll"> ' +
+          esc(L('Add it to all ' + sizes + ' sizes (each with its own Line cost for ' + lcAddPasses + ' pass' + (lcAddPasses === 1 ? '' : 'es') + ')', 'Agregarlo a los ' + sizes + ' tamaños (cada uno con su costo de línea)')) + '</label>' : '')) +
+      '<div class="row" style="gap:8px;margin-top:10px"><button class="btn secondary" id="lcNCancel">' + esc(L('Cancel', 'Cancelar')) + '</button>' +
+      '<button class="btn success" id="lcNSave" style="flex:1">' + esc(L('Add', 'Agregar')) + '</button></div></div>';
+  }
+  function bindLcAdd() {
+    var b = lcBlocks().filter(function (x) { return x.key === lcAdd; })[0];
+    if (!b) return;
+    var tot = function () { return Math.round(((lcNum('lcNApp') || 0) + (lcNum('lcNLine') || 0)) * 100) / 100; };
+    if (!b.flat) {
+      ['lcNApp', 'lcNLine'].forEach(function (id) { document.getElementById(id).oninput = function () { document.getElementById('lcNTot').textContent = lcMoney(tot()); }; });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-lcpass]'), function (p) {
+        p.onclick = function () {
+          var keep = { n: document.getElementById('lcNName').value, c: document.getElementById('lcNChem').value, a: document.getElementById('lcNApp').value };
+          lcAddPasses = Number(p.getAttribute('data-lcpass')); renderLcBody();
+          document.getElementById('lcNName').value = keep.n; document.getElementById('lcNChem').value = keep.c; document.getElementById('lcNApp').value = keep.a;
+          document.getElementById('lcNTot').textContent = lcMoney(tot());
+        };
+      });
+    }
+    document.getElementById('lcNCancel').onclick = function () { lcAdd = ''; renderLcBody(); };
+    var save = document.getElementById('lcNSave');
+    save.onclick = function () {
+      var name = document.getElementById('lcNName').value.trim();
+      if (!name) { toast(L('Enter the coating name', 'Escriba el nombre')); return; }
+      var c = { group: b.group, sub: b.sub, item: name };
+      if (b.flat) { c.totalCost = lcNum('lcNTotal'); if (!(c.totalCost >= 0)) { toast(L('Enter the price', 'Escriba el precio')); return; } }
+      else {
+        c.chemCode = document.getElementById('lcNChem').value.trim(); c.appCost = lcNum('lcNApp'); c.lineCost = lcNum('lcNLine'); c.passes = lcAddPasses;
+        if (!(c.appCost >= 0) || !(c.lineCost >= 0)) { toast(L('Enter the Application and Line costs', 'Escriba los costos de aplicación y línea')); return; }
+        var all = document.getElementById('lcNAll'); c.allSizes = !!(all && all.checked);
+      }
+      save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
+      runMutation('addRate', [c, lastOperator, newOpId()], function (res) {
+        toast(L('Added', 'Agregado') + (res && res.added > 1 ? ' (' + res.added + ' ' + L('sizes', 'tamaños') + ')' : ''));
+        lcAdd = ''; loadRateData(); lcLoad();
+      }, function (err) { save.disabled = false; save.textContent = L('Add', 'Agregar'); showModal({ title: L('Not added', 'No se agregó'), message: err.message, confirmText: 'OK' }); });
+    };
   }
 
   // ---------------- Move To WIP (foreman batch) ----------------
