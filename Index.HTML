@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.99.1</span>
+      <span class="version" id="appVersion">v1.99.3</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -5284,7 +5284,7 @@
       lcHowHtml() +
       (lcHist && lcHist.open ? lcHistHtml() : '<button class="btn secondary" id="lcHistOpen" style="width:100%;margin-bottom:10px">🕘&nbsp; ' + esc(L('Price history', 'Historial de precios')) + '</button>') +
       (lcPast() ? '<div class="card" style="background:#fff7ed;border-left:4px solid var(--warn);color:var(--warn);font-weight:700;font-size:16px">' +
-        esc(L('Showing the prices on ' + lcHist.date + ' — not today\'s.', 'Mostrando los precios del ' + lcHist.date + ' — no los de hoy.')) +
+        esc(L('Showing the prices from ' + lcHist.date.slice(0, 16) + ' — not today\'s.', 'Mostrando los precios del ' + lcHist.date.slice(0, 16) + ' — no los de hoy.')) +
         '<div><button class="btn secondary" id="lcHistToday" style="margin:8px 0 0">' + esc(L('Back to today\'s prices', 'Volver a los precios de hoy')) + '</button></div></div>' : '') +
       (FULL_APP && !lcPast() ? (lcPct ? '<div id="lcPctBox"></div>' : '<button class="btn secondary" id="lcPctOpen" style="width:100%;margin-bottom:10px">📈&nbsp; ' + esc(L('Change prices by a percentage', 'Cambiar precios por porcentaje')) + '</button>') : '') +
       '<div class="field"><label>' + esc(L('Find a coating', 'Buscar un recubrimiento')) + '</label><input id="lcSearch" autocomplete="off" placeholder="name or chem code" value="' + esc(lcSearch) + '"></div>' +
@@ -5345,16 +5345,17 @@
   // The rows shown: today's, or (Past prices with a date picked) the prices as they were at the end
   // of that day — today's with every logged change made after it undone, newest first.
   function lcPast() { return !!(lcHist && lcHist.date); }
-  function lcRows() { return lcPast() ? lcRowsAt(lcHist.date + ' 23:59:59') : lcData.rows; }
+  function lcRows() { return lcPast() ? lcRowsAt(lcHist.date) : lcData.rows; }   // lcHist.date: a version's time
   function lcKey(g, sub, i) { return [g, sub, i].join('|').toLowerCase(); }
   // The price table as it was at `cutoff` ('YYYY-MM-DD HH:MM:SS'): today's with every logged change
-  // made after it undone, newest first.
-  function lcRowsAt(cutoff) {
+  // made after it undone, newest first. exclusive: the changes made AT cutoff are undone too
+  // (the prices just before that save).
+  function lcRowsAt(cutoff, exclusive) {
     var rows = lcData.rows.map(function (r) { return Object.assign({}, r); }), by = {};
     rows.forEach(function (r) { by[lcKey(r.group, r.sub, r.item)] = r; });
     var F = { 'Chem code': 'chemCode', 'Application': 'appCost', 'Line': 'lineCost', 'Total': 'totalCost' };
     lcHist.log.slice().reverse().forEach(function (c) {
-      if (c.at <= cutoff) return;
+      if (exclusive ? c.at < cutoff : c.at <= cutoff) return;
       var r = by[lcKey(c.group, c.sub, c.item)];
       if (!r) return;
       if (c.what === 'Added') { r.gone = true; return; }
@@ -5362,13 +5363,16 @@
     });
     return rows.filter(function (r) { return !r.gone; });
   }
-  // The dates prices changed (newest first), each with who changed them.
-  function lcVersions() {
+  // The versions, newest first. 'year' (the default): one per year with changes, from just before
+  // its first change (start) to after its last (end). 'change': one per save (one save's changes
+  // share one timestamp, so start = end).
+  function lcVersions(mode) {
     var by = {}, out = [];
     lcHist.log.forEach(function (c) {
-      var d = c.at.slice(0, 10);
-      if (!by[d]) { by[d] = { date: d, by: [] }; out.push(by[d]); }
-      if (c.by && by[d].by.indexOf(c.by) === -1) by[d].by.push(c.by);
+      var k = mode === 'change' ? c.at : c.at.slice(0, 4);
+      if (!by[k]) { by[k] = { key: k, start: c.at, end: c.at, label: mode === 'change' ? c.at.slice(0, 16) : k, by: [], saves: {} }; out.push(by[k]); }
+      by[k].end = c.at; by[k].saves[c.at] = 1;
+      if (c.by && by[k].by.indexOf(c.by) === -1) by[k].by.push(c.by);
     });
     return out.reverse();
   }
@@ -5411,31 +5415,37 @@
   // Price history: one card per date the prices changed, newest first. The card shows the cost
   // change from the version before it and to today's prices; tap it for every coating's difference.
   function lcHistHtml() {
-    var h = lcHist, vs = lcVersions();
+    var h = lcHist, mode = h.mode || 'year', yr = mode === 'year', vs = lcVersions(mode);
     var head = '<div class="card" id="lcHistBox" style="border:2px solid var(--accent)">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3 style="margin:0">🕘 ' + esc(L('Price history', 'Historial de precios')) + '</h3>' +
       '<button class="btn secondary" id="lcHistClose" style="margin:0">' + esc(L('Close', 'Cerrar')) + '</button></div>' +
-      '<div class="sub" style="margin:6px 0 4px">' + esc(h.since ? L('Each card is a date the prices changed. Tap one to see every coating.', 'Cada tarjeta es una fecha en que cambiaron los precios. Toque una para ver cada recubrimiento.')
+      '<div class="sub" style="margin:6px 0 4px">' + esc(h.since ? L(yr ? 'Each card is a year the prices changed. Tap one to see every coating.' : 'Each card is a time the prices were changed. Tap one to see every coating.',
+        yr ? 'Cada tarjeta es un año en que cambiaron los precios. Toque una para ver cada recubrimiento.' : 'Cada tarjeta es una vez que cambiaron los precios. Toque una para ver cada recubrimiento.')
         : L('No price changes yet. From the first change on, each one shows here.', 'Todavía no hay cambios de precio.')) + '</div>';
+    head += '<div class="tabbar" id="lcModes" style="margin:8px 0 0">' + [['year', L('By year', 'Por año')], ['change', L('Each change', 'Cada cambio')]].map(function (t) {
+      return '<button data-lcmode="' + t[0] + '"' + (mode === t[0] ? ' class="active"' : '') + '>' + esc(t[1]) + '</button>';
+    }).join('') + '</div>';
     if (!vs.length) return head + '</div>';
     var now = lcData.rows;
     var cards = vs.map(function (v, i) {
-      var after = lcRowsAt(v.date + ' 23:59:59'), before = lcRowsAt(v.date + ' ');
+      var after = lcRowsAt(v.end), before = lcRowsAt(v.start, true), nSaves = Object.keys(v.saves).length;
       var dPrev = lcDiff(before, after), dNow = lcDiff(after, now);
-      var open = h.openDate === v.date;
-      var card = '<div class="card" data-lcver="' + esc(v.date) + '" style="margin:10px 0 0;cursor:pointer;' + (open ? 'border:2px solid var(--accent)' : '') + '">' +
-        '<div style="display:flex;justify-content:space-between;gap:8px"><div style="font-size:18px;font-weight:700">📅 ' + esc(v.date) + (i === 0 ? ' <span class="badge">' + esc(L('latest', 'último')) + '</span>' : '') + '</div>' +
+      var open = h.openDate === v.key;
+      var card = '<div class="card" data-lcver="' + esc(v.key) + '" style="margin:10px 0 0;cursor:pointer;' + (open ? 'border:2px solid var(--accent)' : '') + '">' +
+        '<div style="display:flex;justify-content:space-between;gap:8px"><div style="font-size:18px;font-weight:700">📅 ' + esc(v.label) + (i === 0 ? ' <span class="badge">' + esc(L('latest', 'último')) + '</span>' : '') + '</div>' +
         '<span class="sub">' + (open ? '▲' : '▼') + '</span></div>' +
-        (v.by.length ? '<div class="sub">' + esc(L('by ', 'por ') + v.by.join(', ')) + '</div>' : '') +
-        '<div style="margin-top:6px;font-size:15px"><b>' + esc(L('Change from the version before:', 'Cambio desde la versión anterior:')) + '</b> ' + esc(lcDiffSummary(dPrev)) + '</div>' +
-        '<div style="font-size:15px"><b>' + esc(L('From this version to today:', 'De esta versión a hoy:')) + '</b> ' + esc(i === 0 && !dNow.length ? L('these are today\'s prices', 'son los precios de hoy') : lcDiffSummary(dNow)) + '</div>' +
+        '<div class="sub">' + esc([yr ? L(nSaves + ' change' + (nSaves === 1 ? '' : 's') + ' (' + v.start.slice(5, 10) + (nSaves > 1 ? ' to ' + v.end.slice(5, 10) : '') + ')', nSaves + ' cambio(s)') : '',
+          v.by.length ? L('by ', 'por ') + v.by.join(', ') : ''].filter(Boolean).join(' · ')) + '</div>' +
+        '<div style="margin-top:6px;font-size:15px"><b>' + esc(yr ? L('Change in ' + v.label + ':', 'Cambio en ' + v.label + ':') : L('Change from the version before:', 'Cambio desde la versión anterior:')) + '</b> ' + esc(lcDiffSummary(dPrev)) + '</div>' +
+        '<div style="font-size:15px"><b>' + esc(yr ? L('From the end of ' + v.label + ' to today:', 'Del final de ' + v.label + ' a hoy:') : L('From this version to today:', 'De esta versión a hoy:')) + '</b> ' +
+          esc(i === 0 && !dNow.length ? L('these are today\'s prices', 'son los precios de hoy') : lcDiffSummary(dNow)) + '</div>' +
         '</div>';
       if (!open) return card;
       var cmp = h.cmp === 'now' ? dNow : dPrev;
-      var tabs = '<div class="tabbar" style="margin-top:8px">' + [['prev', L('vs. the version before', 'vs. la versión anterior')], ['now', L('vs. today', 'vs. hoy')]].map(function (t) {
+      var tabs = '<div class="tabbar" style="margin-top:8px">' + [['prev', yr ? L('vs. the year before', 'vs. el año anterior') : L('vs. the version before', 'vs. la versión anterior')], ['now', L('vs. today', 'vs. hoy')]].map(function (t) {
         return '<button data-lccmp="' + t[0] + '"' + ((h.cmp || 'prev') === t[0] ? ' class="active"' : '') + '>' + esc(t[1]) + '</button>';
       }).join('') + '</div>';
-      var colA = h.cmp === 'now' ? v.date : L('Before', 'Antes'), colB = h.cmp === 'now' ? L('Today', 'Hoy') : v.date;
+      var colA = h.cmp === 'now' ? v.label : L('Before', 'Antes'), colB = h.cmp === 'now' ? L('Today', 'Hoy') : v.label;
       var list = cmp.length ? '<div style="max-height:420px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;margin-top:8px">' + cmp.map(function (x) {
         var r = x.r, where = r.group === lcData.flatGroup ? L('Specialty', 'Especiales') : r.group + ' ' + r.sub;
         var change = x.added ? L('new', 'nuevo') : x.dropped ? L('not there yet', 'no existía') :
@@ -5444,9 +5454,36 @@
           '<div style="font-size:16px">' + esc(colA) + ' ' + (x.was == null ? '—' : lcMoney(x.was)) + ' → ' + esc(colB) + ' <b>' + (x.now == null ? '—' : lcMoney(x.now)) + '</b> &nbsp;' + change + '</div></div>';
       }).join('') + '</div>' : '<div class="sub" style="margin-top:8px">' + esc(L('No difference.', 'Sin diferencia.')) + '</div>';
       return card + '<div style="padding:0 4px 8px">' + tabs + list +
-        '<button class="btn secondary" data-lcshow="' + esc(v.date) + '" style="margin-top:8px">' + esc(L('Show the full price table from ' + v.date, 'Ver toda la tabla del ' + v.date)) + '</button></div>';
+        '<button class="btn secondary" data-lcshow="' + esc(v.end) + '" style="margin-top:8px">' + esc(yr ? L('Show the full price table from the end of ' + v.label, 'Ver toda la tabla del final de ' + v.label)
+          : L('Show the full price table from ' + v.label, 'Ver toda la tabla del ' + v.label)) + '</button>' +
+        (FULL_APP && !yr ? '<button class="btn warn" data-lcrestore="' + esc(v.start) + '" style="margin-top:8px;display:block;width:100%">↩&nbsp; ' +
+          esc(L('Put all prices back to how they were before this change', 'Volver todos los precios a como estaban antes de este cambio')) + '</button>' : '') + '</div>';
     }).join('');
     return head + cards + '</div>';
+  }
+  // Put every price back exactly as it was just before the save at `at` (the old values from the
+  // log — no percentages, so nothing drifts). Coatings added since stay; the restore is itself a
+  // new change on the history.
+  function lcRestore(at, btn) {
+    var before = lcRowsAt(at, true), now = {}, changes = [];
+    lcData.rows.forEach(function (r) { now[lcKey(r.group, r.sub, r.item)] = r; });
+    before.forEach(function (o) {
+      var r = now[lcKey(o.group, o.sub, o.item)];
+      if (!r || (r.appCost === o.appCost && r.lineCost === o.lineCost && r.totalCost === o.totalCost && r.chemCode === o.chemCode)) return;
+      var x = { row: r.row, group: r.group, sub: r.sub, item: r.item, chemCode: o.chemCode };
+      if (r.group === lcData.flatGroup) x.totalCost = o.totalCost; else { x.appCost = o.appCost; x.lineCost = o.lineCost; }
+      changes.push(x);
+    });
+    if (!changes.length) { toast(L('The prices are already the same as before that change', 'Los precios ya son iguales a antes de ese cambio')); return; }
+    showConfirm(L('Put ' + changes.length + ' prices back?', '¿Regresar ' + changes.length + ' precios?'),
+      L('Every price goes back exactly to what it was before the change on ' + at.slice(0, 16) + '.\nThis is saved as a new change on the history. Tickets already coated keep the cost they were charged.',
+        'Cada precio vuelve exactamente a lo que era antes del cambio del ' + at.slice(0, 16) + '.\nSe guarda como un cambio nuevo en el historial.'), function () {
+        btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
+        runMutation('saveRates', [changes, lastOperator, newOpId()], function (res) {
+          toast(L((res && res.rows) + ' prices put back', (res && res.rows) + ' precios regresados'));
+          lcHist = null; loadRateData(); lcLoad();
+        }, function (err) { btn.disabled = false; showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' }); });
+      }, L('Put them back', 'Regresarlos'), 'warn');
   }
   function bindLcHist() {
     var box = document.getElementById('lcHistBox');
@@ -5454,8 +5491,14 @@
     Array.prototype.forEach.call(box.querySelectorAll('[data-lcver]'), function (c) {
       c.onclick = function () { var d = c.getAttribute('data-lcver'); lcHist.openDate = lcHist.openDate === d ? '' : d; lcHist.cmp = 'prev'; renderLithoCosts(); };
     });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-lcmode]'), function (b) {
+      b.onclick = function () { lcHist.mode = b.getAttribute('data-lcmode'); lcHist.openDate = ''; renderLithoCosts(); };
+    });
     Array.prototype.forEach.call(box.querySelectorAll('[data-lccmp]'), function (b) {
       b.onclick = function () { lcHist.cmp = b.getAttribute('data-lccmp'); renderLithoCosts(); };
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-lcrestore]'), function (b) {
+      b.onclick = function () { lcRestore(b.getAttribute('data-lcrestore'), b); };
     });
     Array.prototype.forEach.call(box.querySelectorAll('[data-lcshow]'), function (b) {
       b.onclick = function () { lcHist.date = b.getAttribute('data-lcshow'); lcEdit = 0; lcAdd = ''; renderLithoCosts(); };
@@ -5536,6 +5579,9 @@
       '<h3 style="margin-top:0">📈 ' + esc(L('Change prices by a percentage', 'Cambiar precios por porcentaje')) + '</h3>' +
       '<div class="field" style="max-width:220px"><label>' + esc(L('Percentage (use − to lower)', 'Porcentaje (use − para bajar)')) + '</label>' +
         '<div style="display:flex;align-items:center;gap:6px"><input id="lcPctIn" inputmode="decimal" autocomplete="off" value="' + esc(o.pct) + '" placeholder="12" style="font-size:20px;text-align:right"><b style="font-size:20px">%</b></div></div>' +
+      (Number(o.pct) < 0 ? '<div class="card" style="background:#fff7ed;border-left:4px solid var(--warn);margin:8px 0"><div class="sub" style="color:var(--ink);font-size:15px">' +
+        esc(L('To undo a raise, don\'t use a minus percentage: −12% after +12% ends up about 1.4% too low. Use 🕘 Price history → open that change → ↩ Put all prices back.',
+          'Para deshacer un aumento no use un porcentaje negativo: −12% después de +12% queda 1.4% abajo. Use 🕘 Historial de precios → abra ese cambio → ↩ Regresar los precios.')) + '</div></div>' : '') +
       chk('flat', L('Specialty, print and set-up prices', 'Precios especiales, de impresión y de preparación'), L('The list at the top (notes 1, 2 and 3 on the tab).', 'La lista de arriba.')) +
       chk('line', L('Line costs', 'Costos de línea'), L('Worked out again: set-up charge for coating ÷ BB per hour, for each pass.', 'Se calculan de nuevo: cargo de preparación ÷ BB por hora, por pasada.')) +
       chk('app', L('Application costs', 'Costos de aplicación'), L('The coating material. Only if what you pay for the coatings went up.', 'El material. Solo si subió lo que paga por los recubrimientos.')) +

@@ -2306,9 +2306,11 @@ const base = {
     getRateHistory: () => R({ since: '2025-10-01', log: [
       { at: '2025-10-01 08:00:00', by: 'Ann', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Application', old: 4.79, now: 5 },
       { at: '2025-10-01 08:00:00', by: 'Ann', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Total', old: 11.23, now: 11.44 },
-      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Application', old: 5, now: 5.36 },
-      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Total', old: 11.44, now: 11.8 },
-      { at: '2026-10-01 09:31:00', by: 'Jo', group: 'Specialty / Low Volume / Setup', sub: '', item: 'WAX ONLY', what: 'Added', old: '', now: 7.68 }] }),
+      { at: '2026-03-01 08:00:00', by: 'Ann', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Application', old: 5, now: 5.1 },
+      { at: '2026-03-01 08:00:00', by: 'Ann', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Total', old: 11.44, now: 11.54 },
+      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Application', old: 5.1, now: 5.36 },
+      { at: '2026-10-01 09:30:00', by: 'Jo', group: '603X408', sub: '5-OUT', item: 'OUTSIDE WHITE COAT', what: 'Total', old: 11.54, now: 11.8 },
+      { at: '2026-10-01 09:30:00', by: 'Jo', group: 'Specialty / Low Volume / Setup', sub: '', item: 'WAX ONLY', what: 'Added', old: '', now: 7.68 }] }),
   }));
   await page.click('#tileLitho'); await page.click('#tileLithoCosts'); await page.waitForSelector('[data-lcrow]');
   const blocks = await page.$$eval('[data-lcblock] h3', (els) => els.map((e) => e.textContent));
@@ -2360,22 +2362,38 @@ const base = {
   // Price history: a card per change date, the cost change shown before opening it
   await page.waitForSelector('#lcHistOpen'); await page.click('[data-lcsize="all"]'); await page.click('#lcHistOpen'); await page.waitForSelector('[data-lcver]');
   const vers = await page.$$eval('[data-lcver]', (els) => els.map((e) => e.getAttribute('data-lcver')));
-  ok('one card per change date, newest first', vers.join() === '2026-10-01,2025-10-01', vers);
-  const c1 = await page.textContent('[data-lcver="2026-10-01"]'), c2 = await page.textContent('[data-lcver="2025-10-01"]');
-  ok('latest: the change from the version before, and that it is today\'s prices', c1.includes('latest') && c1.includes('1 price · average +3.1%') && c1.includes('1 added') && c1.includes('by Jo') && c1.includes('these are today\'s prices'), c1);
-  ok('older: its own change, and the change since then to today', c2.includes('Change from the version before: 1 price · average +1.9%') && c2.includes('From this version to today: 1 price · average +3.1% · 1 added'), c2);
+  ok('by year is the default: one card per year, newest first', vers.join() === '2026,2025' && (await page.getAttribute('[data-lcmode="year"]', 'class')) === 'active', vers);
+  const c1 = await page.textContent('[data-lcver="2026"]'), c2 = await page.textContent('[data-lcver="2025"]');
+  ok('this year: its 2 changes together, and that it is today\'s prices', c1.includes('latest') && c1.includes('2 changes (03-01 to 10-01)') && c1.includes('Change in 2026: 1 price · average +3.1%') && c1.includes('1 added')
+    && c1.includes('by Ann, Jo') && c1.includes('these are today\'s prices'), c1);
+  ok('last year: its change, and from the end of it to today', c2.includes('Change in 2025: 1 price · average +1.9%') && c2.includes('From the end of 2025 to today: 1 price · average +3.1% · 1 added'), c2);
   ok('nothing opened yet', !(await page.$('[data-lccmp]')));
-  await page.click('[data-lcver="2025-10-01"]'); await page.waitForSelector('[data-lccmp]');
+  await page.click('[data-lcver="2025"]'); await page.waitForSelector('[data-lccmp]');
   let det = await page.textContent('#lcHistBox');
-  ok('opened: every coating, before → that version, with the difference', det.includes('Before $11.23 → 2025-10-01 $11.44') && det.includes('+$0.21 (+1.9%)'), det);
+  ok('opened: every coating, before → that version, with the difference', det.includes('Before $11.23 → 2025 $11.44') && /vs\. the year before/.test(det) && !(await page.$('[data-lcrestore]')) && det.includes('+$0.21 (+1.9%)'), det);
   await page.click('[data-lccmp="now"]'); await page.waitForTimeout(60);
   det = await page.textContent('#lcHistBox');
-  ok('…or that version → today', det.includes('2025-10-01 $11.44 → Today $11.80') && det.includes('+$0.36 (+3.1%)') && /WAX ONLY[\s\S]*new/.test(det), det);
-  await page.click('[data-lcshow="2025-10-01"]'); await page.waitForTimeout(80);
-  ok('the full table from that date (and no editing)', /Showing the prices on 2025-10-01/.test(await page.textContent('#view')) && /\$5\.00[\s\S]*\$6\.44[\s\S]*\$11\.44/.test(await page.textContent('[data-lcrow="2"]'))
+  ok('…or that version → today', det.includes('2025 $11.44 → Today $11.80') && det.includes('+$0.36 (+3.1%)') && /WAX ONLY[\s\S]*new/.test(det), det);
+  await page.click('[data-lcshow="2025-10-01 08:00:00"]'); await page.waitForTimeout(80);
+  ok('the full table from that date (and no editing)', /Showing the prices from 2025-10-01 08:00/.test(await page.textContent('#view')) && /\$5\.00[\s\S]*\$6\.44[\s\S]*\$11\.44/.test(await page.textContent('[data-lcrow="2"]'))
     && !(await page.$('[data-lcadd]')) && !(await page.$('#lcPctOpen')) && !(await page.$('[data-lcrow="5"]')));
   await page.click('#lcHistToday'); await page.waitForTimeout(80);
   ok('back to today', /\$5\.36/.test(await page.textContent('[data-lcrow="2"]')) && !!(await page.$('[data-lcrow="5"]')));
+  // Each change: one card per save
+  await page.click('[data-lcmode="change"]'); await page.waitForTimeout(60);
+  const ch = await page.$$eval('[data-lcver]', (els) => els.map((e) => e.getAttribute('data-lcver')));
+  ok('each change: one card per save, newest first', ch.join() === '2026-10-01 09:30:00,2026-03-01 08:00:00,2025-10-01 08:00:00', ch);
+  ok('…each with its own change', (await page.textContent('[data-lcver="2026-10-01 09:30:00"]')).includes('Change from the version before: 1 price · average +2.3%'));
+  // Undo a change exactly (not with a minus percentage)
+  await page.click('[data-lcver="2026-10-01 09:30:00"]'); await page.waitForSelector('[data-lcrestore="2026-10-01 09:30:00"]');
+  await page.click('[data-lcrestore="2026-10-01 09:30:00"]'); await page.waitForSelector('#modalOk');
+  ok('restore asks first', /Put 1 prices back/.test(await page.textContent('#modalRoot')) && /exactly/.test(await page.textContent('#modalRoot')));
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  const rs = calls.filter((c) => c.fn === 'saveRates').slice(-1)[0];
+  ok('puts back the exact old prices (coatings added since stay)', rs && rs.args[0].length === 1 && rs.args[0][0].row === 2 && rs.args[0][0].appCost === 5.1 && rs.args[0][0].lineCost === 6.44, rs && rs.args);
+  await page.waitForSelector('#lcPctOpen'); await page.click('#lcPctOpen'); await page.fill('#lcPctIn', '-12'); await page.waitForTimeout(60);
+  ok('a minus percentage explains how to undo a raise instead', /don.t use a minus percentage/.test(await page.textContent('#lcPctBox')));
+  await page.click('#lcPctCancel');
   await page.click('#backBtn'); await page.waitForSelector('#tileLithoCosts');
   ok('back goes to the Litho Department', true);
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
