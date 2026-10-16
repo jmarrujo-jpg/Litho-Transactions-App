@@ -1886,7 +1886,8 @@ const base = {
   await page.fill('#mtScan', 'L1'); await page.press('#mtScan', 'Enter');
   ok('…and its lots can\'t be scanned', !(await page.$('[data-mtqty]')) && /Material List first/.test(await page.textContent('#toast')));
   await page.click('#mtAddItemBtn'); await page.waitForSelector('#mtItName');
-  ok('Add it now: the form has the name and type filled in', (await page.inputValue('#mtItName')) === 'Brand New 7' && (await page.inputValue('#mtItType')) === 'Compound' && (await page.inputValue('#mtItSupplier')) === 'DSM');
+  ok('Add it now: the form has the name and the delivery\'s supplier filled in', (await page.inputValue('#mtItName')) === 'Brand New 7' && /DSM/.test(await page.textContent('#mtItSupChips')));
+  await page.selectOption('#mtItType', 'Compound');
   await page.click('#mtItSave'); await page.waitForSelector('#mtScan');
   ok('…back on receiving with it picked', (await page.inputValue('#mtProduct')) === 'Brand New 7' && (await page.inputValue('#mtSupplier')) === 'DSM');
   await page.fill('#mtScan', 'L1'); await page.press('#mtScan', 'Enter');
@@ -2268,12 +2269,15 @@ const base = {
 
 // ---- 50. Types (each with a department), Material Receivers kept apart from steel, Receive in a department
 { const mats = {
-    materials: [{ id: 'M-1', lot: 'R-1', type: 'Resin', product: 'PP Resin 1', supplier: 'LYB', status: 'In Stock', qtyOnHand: 1, qtyReceived: 1, location: 'Silo', department: 'Plastics', receiver: 'MR-00001' }],
-    items: [{ id: 'MI-1', name: 'PP Resin 1', type: 'Resin', active: true, department: 'Plastics', deptSet: true }],
+    materials: [{ id: 'M-1', lot: 'R-1', type: 'Resin', product: 'PP Resin 1', supplier: 'LYB', status: 'In Stock', qtyOnHand: 1, qtyReceived: 1, location: 'Silo', department: 'Plastics', dept: 'Plastics', receiver: 'MR-00001' },
+      { id: 'M-9', lot: 'C-9', type: 'Compound', product: '9307G', supplier: 'DOW', status: 'In Stock', qtyOnHand: 2, qtyReceived: 2, location: 'Cage', department: 'Metals', dept: 'Metals' }],
+    items: [{ id: 'MI-1', name: 'PP Resin 1', type: 'Resin', active: true, department: 'Plastics', deptSet: true, suppliers: ['LYB'], supplier: 'LYB', container: 'Gaylord' },
+      { id: 'MI-2', name: 'Black MB', type: 'Pellet', active: true, department: 'Plastics', deptSet: true, suppliers: ['CLARIANT', 'AMPACET'], supplier: 'CLARIANT', expRequired: true, container: 'Bag' },
+      { id: 'MI-3', name: '9307G', type: 'Compound', active: true, department: 'Metals', deptSet: true, suppliers: ['DOW'], supplier: 'DOW' }],
     types: ['Compound', 'Powder', 'Resin', 'Pellet'],
     typeInfo: [{ name: 'Compound', department: 'Metals', container: 'Barrel', active: true, saved: true }, { name: 'Powder', department: 'Metals', container: 'Unit', active: true, saved: true },
       { name: 'Resin', department: 'Plastics', container: 'Gaylord', active: true, saved: true }, { name: 'Pellet', department: 'Plastics', container: 'Bag', active: true, saved: false }],
-    departments: ['Metals', 'Plastics', 'Litho'], machines: ['Injection 1'], machineInfo: [{ name: 'Injection 1', positions: [], materials: [], active: true, department: 'Plastics', deptSet: true }],
+    departments: ['Metals', 'Plastics', 'Litho'], machines: ['Injection 1'], machineInfo: [{ name: 'Injection 1', positions: ['Hopper'], materials: ['Black MB'], active: true, department: 'Plastics', deptSet: true }],
     suppliers: ['LYB'], containers: [], products: {},
     receivers: [{ id: 'MR-00002', name: '26-10-01--DOW--MR-00002', supplier: 'DOW', department: 'Metals' }, { id: 'MR-00001', name: '26-09-01--LYB--MR-00001', supplier: 'LYB', department: 'Plastics' },
       { id: 'R-00007', name: '26-01-01--AKZO--R-00007', supplier: 'AKZO', old: true }] };
@@ -2284,18 +2288,52 @@ const base = {
     getMatReceivers: () => R({ receivers: [{ id: 'MR-00001', name: '26-09-01--LYB--MR-00001', date: '2026-09-01', supplier: 'LYB', pos: 'P-1', department: 'Plastics', notes: '', lotCount: 1 },
       { id: 'MR-00002', name: '26-10-01--DOW--MR-00002', date: '2026-10-01', supplier: 'DOW', pos: '', department: 'Metals', notes: '', lotCount: 0 }], suppliers: ['DOW', 'LYB'] }),
     saveMatReceiver: (a) => R({ ok: true, id: a[0].id || 'MR-00003' }), deleteMatReceiver: (a) => R({ ok: true, id: a[0] }),
+    saveMaterialItem: (a) => R({ ok: true, item: Object.assign({ id: 'MI-9' }, a[0]) }),
   }));
   await page.click('#tilePlastics'); await page.click('#tilePlasticsMat'); await page.waitForSelector('#mtReceiveBtn'); await page.waitForTimeout(150);
   ok('a type not on the Types tab yet gets written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
-  await page.click('#mtReceiveBtn'); await page.waitForSelector('[data-mtrt]');
-  ok('Receive in Plastics: only Plastics types, starting on the first', (await page.$$eval('[data-mtrt]', (els) => els.map((e) => e.getAttribute('data-mtrt')))).join() === 'Resin,Pellet'
-    && (await page.getAttribute('[data-mtrt="Resin"]', 'class')) === 'active' && (await page.inputValue('#mtContainer')) === 'Gaylord');
+  await page.click('#mtReceiveBtn'); await page.waitForSelector('[data-mtrp]');
+  ok('Receive in Plastics, step 1: its materials as buttons (no other department\'s)', (await page.$$eval('[data-mtrp]', (els) => els.map((e) => e.getAttribute('data-mtrp')))).join() === 'PP Resin 1,Black MB'
+    && (await page.$$eval('[data-mtrt]', (els) => els.map((e) => e.getAttribute('data-mtrt')))).join() === ',Resin,Pellet', await page.$$eval('[data-mtrp]', (els) => els.map((e) => e.textContent)));
   ok('…and only Plastics material receivers (no steel ones)', (await page.$$eval('#mtReceiver option', (els) => els.map((e) => e.value))).join() === ',MR-00001');
-  await page.fill('#mtSupplier', 'LYB'); await page.fill('#mtProduct', 'PP Resin 1'); await page.fill('#mtScan', 'LOT-9'); await page.press('#mtScan', 'Enter');
+  await page.click('[data-mtrp="PP Resin 1"]');
+  ok('one supplier: filled in by itself; its container', (await page.inputValue('#mtSupplier')) === 'LYB' && !(await page.$('[data-mtrs]')) && (await page.inputValue('#mtContainer')) === 'Gaylord'
+    && /only supplier/.test(await page.textContent('#mtSupHint')));
+  ok('no expiration needed for it', /optional/.test(await page.textContent('#mtExpLabel')));
+  await page.fill('#mtPo', 'P-55');
+  await page.click('[data-mtgo="Silo"]');
+  ok('going to storage: no "loaded?" question', (await page.inputValue('#mtLoc')) === 'Silo' && !(await page.$('[data-mtld]')));
+  await page.fill('#mtScan', 'LOT-9'); await page.press('#mtScan', 'Enter');
+  // A second material on the same shipment
+  await page.click('[data-mtrp="Black MB"]');
+  ok('another material: its suppliers to pick from; the lots already scanned stay', (await page.$$eval('[data-mtrs]', (els) => els.map((e) => e.getAttribute('data-mtrs')))).join() === 'CLARIANT,AMPACET'
+    && /usually comes from CLARIANT or AMPACET/.test(await page.textContent('#mtSupHint')) && (await page.$$('[data-mtqty]')).length === 1);
+  ok('…it needs an expiration date', /required/.test(await page.textContent('#mtExpLabel')));
+  ok('…its machine is offered first', (await page.$$eval('#mtRcvGo [data-mtgo]', (els) => els.map((e) => e.getAttribute('data-mtgo'))))[0] === 'Injection 1');
+  await page.click('[data-mtgo="Injection 1"]'); await page.waitForSelector('[data-mtld]');
+  await page.click('[data-mtld="1"]'); await page.waitForSelector('[data-mtpos]'); await page.click('[data-mtpos="Hopper"]');
+  await page.fill('#mtScan', 'BMB-1'); await page.press('#mtScan', 'Enter');
+  ok('no expiration date: the lot is refused', (await page.$$('[data-mtqty]')).length === 1 && /needs one/.test(await page.textContent('#toast')));
+  await page.fill('#mtExp', '2027-05-01'); await page.fill('#mtScan', 'BMB-1'); await page.press('#mtScan', 'Enter');
+  ok('with it: added, shown as loaded on Injection 1 (Hopper)', (await page.$$('[data-mtqty]')).length === 2 && /loaded on Injection 1 \(Hopper\)/.test(await page.textContent('#mtLines')));
   await page.click('#mtSave'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(200);
   const rm = calls.filter((c) => c.fn === 'receiveMaterials')[0];
-  ok('the delivery is saved as Plastics', rm && rm.args[0].department === 'Plastics' && rm.args[1][0].type === 'Resin', rm && rm.args);
+  ok('the delivery is saved as Plastics, one lot stored and one loaded', rm && rm.args[0].department === 'Plastics' && rm.args[0].supplier === 'LYB' && rm.args[0].po === 'P-55'
+    && rm.args[1].some((l) => l.lot === 'LOT-9' && l.type === 'Resin' && l.location === 'Silo' && !l.loaded)
+    && rm.args[1].some((l) => l.lot === 'BMB-1' && l.product === 'Black MB' && l.location === 'Injection 1' && l.loaded && l.position === 'Hopper' && l.expiration === '2027-05-01'), rm && rm.args);
   if (await page.$('#modalOk')) await page.click('#modalOk');
+  // Setting up a material: its suppliers, where it goes, whether it has an expiration date
+  await page.waitForSelector('#mtMaintBtn'); await page.click('#mtMaintBtn'); await page.click('#mtListBtn'); await page.waitForSelector('#mtItemAdd');
+  await page.click('#mtItemAdd'); await page.waitForSelector('#mtItName');
+  ok('the form offers this department\'s machines for "Goes to"', (await page.$$eval('[data-mtitm]', (els) => els.map((e) => e.getAttribute('data-mtitm')))).join() === 'Injection 1');
+  await page.fill('#mtItName', 'Clear 2'); await page.selectOption('#mtItType', 'Resin');
+  await page.fill('#mtItSupplier', 'lyb'); await page.click('#mtItSupAdd'); await page.fill('#mtItSupplier', 'Braskem'); await page.press('#mtItSupplier', 'Enter');
+  ok('suppliers added one at a time', /lyb[\s\S]*Braskem/.test(await page.textContent('#mtItSupChips')));
+  await page.check('[data-mtitm="Injection 1"]'); await page.check('#mtItExp');
+  await page.click('#mtItSave'); await page.waitForTimeout(150);
+  const si = calls.filter((c) => c.fn === 'saveMaterialItem').pop();
+  ok('saves both suppliers, where it goes and that it needs an expiration date', si && si.args[0].suppliers.join() === 'lyb,Braskem' && si.args[0].machines.join() === 'Injection 1'
+    && si.args[0].expRequired === true && si.args[0].department === 'Plastics', si && si.args);
   // Master File: Types
   await page.evaluate(() => { dbTable = 'materials'; mfTab = 'types'; mfDept = 'all'; openDatabase(); }); await page.waitForSelector('[data-mfrow="Pellet"]');
   ok('Master File tabs in setup order', (await page.$$eval('[data-mft]', (els) => els.map((e) => e.getAttribute('data-mft')))).join() === 'machines,types,items,lots');

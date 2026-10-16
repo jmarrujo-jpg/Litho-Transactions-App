@@ -1768,5 +1768,50 @@ await concurrency(envBase, 'in-worker lock');
   ok('an empty one is removed; again is harmless', yes.ok && again.ok && again.result.alreadyGone && f.rows(SID, 'Machines').map((r) => r['Machine']).join() === 'Injection 1', f.rows(SID, 'Machines'));
 }
 
+// 50. Department-specific materials: several suppliers, where it goes, expiration required when
+// receiving, the department on every lot / load line, loading refuses another department's lot
+{ const f = fresh();
+  await call('saveMachine', [{ name: 'Injection 1', department: 'Plastics', positions: 'Hopper' }, 'Jo', 'op-50-a']);
+  await call('saveMachine', [{ name: 'Injection 2', department: 'Plastics' }, 'Jo', 'op-50-b']);
+  await call('saveMaterialType', [{ name: 'Resin', department: 'Plastics' }, 'Jo', 'op-50-c']);
+  const it = await call('saveMaterialItem', [{ name: 'PP 5520', type: 'Resin', department: 'Plastics', suppliers: ['lyb', 'Braskem', 'LYB'], expRequired: true, machines: ['Injection 1'] }, 'Jo', 'op-50-d']);
+  const row = f.rows(SID, 'Material List')[0];
+  ok('a material with two suppliers, expiration required, and where it goes', it.ok && row['Supplier'] === 'LYB, BRASKEM' && row['Expiration Required'] === 'Yes'
+    && it.result.item.suppliers.join() === 'LYB,BRASKEM' && it.result.item.expRequired === true
+    && f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Injection 1')[0]['Materials'] === 'PP 5520' && !f.rows(SID, 'Machines').filter((r) => r['Machine'] === 'Injection 2')[0]['Materials'], [row, f.rows(SID, 'Machines')]);
+  const mv = await call('saveMaterialItem', [{ id: 'MI-00001', name: 'PP 5520 Natural', type: 'Resin', department: 'Plastics', suppliers: 'LYB', expRequired: true, machines: ['Injection 2'] }, 'Jo', 'op-50-e']);
+  const mm = f.rows(SID, 'Machines');
+  ok('changing where it goes (and its name) updates the machines', mv.ok && mm.filter((r) => r['Machine'] === 'Injection 1')[0]['Materials'] === '' && mm.filter((r) => r['Machine'] === 'Injection 2')[0]['Materials'] === 'PP 5520 Natural', mm);
+  const other = await call('saveMaterialItem', [{ name: 'PP 5520 Natural', type: 'Resin', department: 'Metals' }, 'Jo', 'op-50-f']);
+  ok('another department can have a material with the same name', other.ok && f.rows(SID, 'Material List').length === 2, other);
+  // Receiving
+  const noExp = await call('receiveMaterials', [{ supplier: 'LYB', department: 'Plastics' }, [{ lot: 'B1', type: 'Resin', product: 'PP 5520 Natural' }], 'Jo', 'op-50-g']);
+  ok('a material that needs an expiration date: refused without one', !noExp.ok && /B1: enter the expiration date — PP 5520 Natural needs one/.test(noExp.error) && !f.rows(SID, 'Materials').length, noExp);
+  const rc = await call('receiveMaterials', [{ supplier: 'LYB', department: 'Plastics', po: 'P-7' }, [
+    { lot: 'B1', type: 'Resin', product: 'PP 5520 Natural', expiration: '2027-01-01', location: 'Silo', qty: 2 },
+    { lot: 'B2', type: 'Resin', product: 'PP 5520 Natural', expiration: '2027-02-01', location: 'Injection 1', loaded: true, position: 'Hopper' }], 'Jo', 'op-50-h']);
+  const lots = f.rows(SID, 'Materials');
+  ok('received: every lot says Plastics; one stored, one loaded onto its machine', rc.ok && lots.length === 2 && lots.every((r) => r['Department'] === 'Plastics')
+    && lots[0]['Status'] === 'In Stock' && lots[0]['Location'] === 'Silo' && lots[1]['Status'] === 'Loaded' && lots[1]['Location'] === 'Injection 1' && lots[1]['Position'] === 'Hopper', lots);
+  const ad = await call('addMaterialLots', [{ type: 'Resin', product: 'PP 5520 Natural', location: 'Silo', department: 'Plastics' }, [{ lot: 'OLD1', qty: 1 }], 'Jo', 'op-50-i']);
+  ok('Add Lots (stock on hand) doesn\'t need the expiration; the lot says Plastics', ad.ok && f.rows(SID, 'Materials')[2]['Department'] === 'Plastics', ad);
+  // Loading
+  const wrong = await call('loadMaterials', [{ machine: 'Line 4', department: 'Metals' }, [{ lot: 'B1' }], 'Jo', 'op-50-j']);
+  ok('loading in Metals refuses a Plastics lot', !wrong.ok && /B1 belongs to Plastics, not Metals/.test(wrong.error), wrong);
+  const right = await call('loadMaterials', [{ machine: 'Injection 1', department: 'Plastics' }, [{ lot: 'B1' }], 'Jo', 'op-50-k']);
+  ok('loading in Plastics works; the load line says Plastics', right.ok && f.rows(SID, 'Material Loads')[0]['Department'] === 'Plastics', [right, f.rows(SID, 'Material Loads')]);
+  // Older rows without a department get one
+  const lt = f.book(SID).tabs['Materials'], c = lt.rows[0].indexOf('Department');
+  lt.rows.slice(1).forEach((r) => { r[c] = ''; });
+  const ld = f.book(SID).tabs['Material Loads'], c2 = ld.rows[0].indexOf('Department');
+  ld.rows.slice(1).forEach((r) => { r[c2] = ''; });
+  const fd = await call('fillDepartments', ['Jo', 'op-50-l']);
+  ok('fillDepartments gives every lot and load line its department', fd.ok && fd.result.lots === 3 && fd.result.loads === 1
+    && f.rows(SID, 'Materials').every((r) => r['Department'] === 'Plastics') && f.rows(SID, 'Material Loads')[0]['Department'] === 'Plastics', [fd, f.rows(SID, 'Materials').map((r) => r['Department'])]);
+  const g = await call('getMaterials', []);
+  ok('getMaterials: lots carry their own department, materials their suppliers', g.result.materials.every((m) => m.dept === 'Plastics' && m.department === 'Plastics')
+    && g.result.items.filter((i) => i.department === 'Plastics')[0].suppliers.join() === 'LYB' && g.result.suppliers.indexOf('LYB') !== -1, g.result.items);
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

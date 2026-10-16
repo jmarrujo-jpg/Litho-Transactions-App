@@ -54,7 +54,7 @@ const RECEIVER_HEADERS = ['Receiver ID', 'File Name', 'Date Received', 'Supplier
 // PO. Product names are picked from the Material List (below).
 const MATERIALS = 'Materials';
 const MATERIAL_HEADERS = ['Material ID', 'Lot #', 'Type', 'Product', 'Supplier', 'Receiver', 'PO #', 'Date Received', 'Expiration Date',
-  'Qty Received', 'Qty On Hand', 'Container', 'Status', 'Comments', 'Received At', 'Received By', 'Last Updated At', 'Op ID', 'Last Load Op', 'Location', 'Position'];
+  'Qty Received', 'Qty On Hand', 'Container', 'Status', 'Comments', 'Received At', 'Received By', 'Last Updated At', 'Op ID', 'Last Load Op', 'Location', 'Position', 'Department'];
 const MATERIAL_TYPES = ['Compound', 'Powder', 'Copper', 'Ink', 'Make-Up', 'Solution/Grease'];
 // In Stock: in storage. Loaded: on a machine right now (both count toward stock; tap Used up when
 // a loaded one is empty). Used: gone.
@@ -66,7 +66,7 @@ const MATERIAL_LIST = 'Material List';
 // Unit / Per Container / Reorder Point: "a barrel of 9307G is 549 lbs; reorder at 1,098 lbs" — the
 // screens show stock as containers and amount, and LOW at or under the reorder point.
 const MATERIAL_LIST_HEADERS = ['Item ID', 'Name', 'Type', 'Supplier', 'Container', 'Part #', 'Notes', 'Active',
-  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location', 'Department'];
+  'Created At', 'Created By', 'Last Updated At', 'Op ID', 'Unit', 'Per Container', 'Reorder Point', 'Location', 'Department', 'Expiration Required'];
 // Which department a material (or machine) belongs to. Set on the Material List / Machines; a lot
 // takes its material's. Not set: litho types and machines are Litho, everything else Metals.
 const DEPARTMENTS = ['Metals', 'Plastics', 'Litho'];
@@ -93,7 +93,7 @@ const MACHINE_HEADERS = ['Machine', 'Positions', 'Materials', 'Active', 'Created
 // production can be traced to the lots that went into it and when each was changed.
 const MATERIAL_LOADS = 'Material Loads';
 const MATERIAL_LOAD_HEADERS = ['Load ID', 'Loaded At', 'Date', 'Machine', 'Lot #', 'Material ID', 'Type', 'Product', 'Container',
-  'Qty', 'Left After', 'Loaded By', 'Notes', 'Op ID', 'Position'];
+  'Qty', 'Left After', 'Loaded By', 'Notes', 'Op ID', 'Position', 'Department'];
 const LOADS_MAX = 100;       // lots in one save
 const LOADS_READ_MAX = 2000; // load lines returned by one history read
 // Find in Drive: each unassigned ticket's mill number is searched in the receiver scans shared with
@@ -200,7 +200,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'maint-100', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'receive-101', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -2989,7 +2989,7 @@ function materialOut(o) {
     qtyReceived: num(o['Qty Received']), qtyOnHand: num(o['Qty On Hand']), container: String(o['Container'] || '').trim(),
     status: String(o['Status'] || '').trim() || MATERIAL_STATUS.IN_STOCK, comments: String(o['Comments'] || ''),
     receivedAt: String(o['Received At'] || ''), receivedBy: String(o['Received By'] || ''), updatedAt: String(o['Last Updated At'] || ''),
-    location: String(o['Location'] || '').trim(), position: String(o['Position'] || '').trim() };
+    location: String(o['Location'] || '').trim(), position: String(o['Position'] || '').trim(), dept: deptIn(o['Department']) };
 }
 // A type as the app spells it ('compound' -> 'Compound'); anything else is kept as typed.
 function materialType(v) {
@@ -3057,7 +3057,7 @@ async function getMaterials(sheets) {
   const items = saved.concat(missingItems(saved, materials).map((a) => itemOut({ 'Name': a.name, 'Type': a.type, 'Supplier': a.supplier, 'Container': a.container })));
   items.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
   items.forEach((i) => {
-    if (i.supplier) sup[i.supplier] = 1;
+    (i.suppliers || []).forEach((x) => { sup[x] = 1; });
     if (i.container) cont[i.container] = 1;
     if (!i.active) return;
     const list = products[i.type] || (products[i.type] = []);
@@ -3072,7 +3072,7 @@ async function getMaterials(sheets) {
   const machineInfo = await readMachines(sheets);
   const deptByItem = {};
   items.forEach((i) => { deptByItem[itemKey(i.name, i.type)] = i.department; });
-  materials.forEach((m) => { m.department = deptByItem[itemKey(m.product, m.type)] || typeDept[m.type.toLowerCase()] || deptOf(m.type); });
+  materials.forEach((m) => { m.department = m.dept || deptByItem[itemKey(m.product, m.type)] || typeDept[m.type.toLowerCase()] || deptOf(m.type); });
   return { materials, items, types, typeInfo, departments: DEPARTMENTS, machines: machineList(loads, machineInfo), machineInfo, containerFor: MATERIAL_CONTAINERS, products, suppliers: Object.keys(sup).sort(), containers: Object.keys(cont).sort(), receivers };
 }
 
@@ -3087,6 +3087,9 @@ async function receiveMaterials(sheets, info, lots, operator, opId) {
   const date = materialDate(info.date, 'Date received') || todayYMD();
   const po = String(info.po || '').trim();
   const comments = String(info.comments || '').trim();
+  const infoDept = deptIn(info.department);
+  let listItems = [];
+  try { listItems = (await readObjects(sheets, MATERIAL_LIST)).rows.map(itemOut).filter((i) => i.name); } catch (e) { listItems = []; }
   const list = [], byKey = {};
   (Array.isArray(lots) ? lots : []).forEach((l) => {
     l = l || {};
@@ -3098,11 +3101,17 @@ async function receiveMaterials(sheets, info, lots, operator, opId) {
     if (!product) throw new Error('Lot ' + lot + ': enter the product name.');
     const qty = materialQty(l.qty == null || l.qty === '' ? 1 : l.qty, 'Lot ' + lot + ': the number of containers', 1);
     const expiration = materialDate(l.expiration, 'Lot ' + lot + ': the expiration date');
+    const it = itemForLot(listItems, product, type, infoDept);
+    // A material set up with an expiration date needs one on every lot received.
+    if (it && it.expRequired && !expiration) throw new Error('Lot ' + lot + ': enter the expiration date — ' + it.name + ' needs one.');
     const container = String(l.container || '').trim();
     const location = String(l.location || info.location || '').trim();
-    const key = [lot.toLowerCase(), type.toLowerCase(), product.toLowerCase()].join('|');
+    const loaded = !!(l.loaded && location);   // received straight onto that machine
+    const position = loaded ? String(l.position || '').trim() : '';
+    const dept = infoDept || (it && it.department) || deptOf(type);
+    const key = [lot.toLowerCase(), type.toLowerCase(), product.toLowerCase(), location.toLowerCase(), loaded ? 'L' : '', position.toLowerCase()].join('|');
     if (byKey[key]) { byKey[key].qty += qty; if (!byKey[key].expiration) byKey[key].expiration = expiration; return; }
-    byKey[key] = { lot, type, product, qty, expiration, container, location };
+    byKey[key] = { lot, type, product, qty, expiration, container, location, loaded, position, dept };
     list.push(byKey[key]);
   });
   if (!list.length) throw new Error('Scan at least one lot number.');
@@ -3125,8 +3134,8 @@ async function receiveMaterials(sheets, info, lots, operator, opId) {
     if (op && have[op]) { saved.push(materialOut(have[op])); return; }
     const obj = { 'Material ID': 'M-' + ('00000' + (++next)).slice(-5), 'Lot #': l.lot, 'Type': l.type, 'Product': l.product, 'Supplier': supplier,
       'Receiver': receiver, 'PO #': po, 'Date Received': date, 'Expiration Date': l.expiration, 'Qty Received': l.qty, 'Qty On Hand': l.qty,
-      'Container': l.container, 'Location': l.location, 'Status': MATERIAL_STATUS.IN_STOCK, 'Comments': comments, 'Received At': ts, 'Received By': operator,
-      'Last Updated At': ts, 'Op ID': op };
+      'Container': l.container, 'Location': l.location, 'Position': l.position, 'Status': l.loaded ? MATERIAL_STATUS.LOADED : MATERIAL_STATUS.IN_STOCK,
+      'Comments': comments, 'Received At': ts, 'Received By': operator, 'Last Updated At': ts, 'Op ID': op, 'Department': l.dept };
     add.push(obj); saved.push(materialOut(obj));
   });
   if (add.length) {
@@ -3135,7 +3144,7 @@ async function receiveMaterials(sheets, info, lots, operator, opId) {
     await sheets.appendMany(MATERIALS, values, () => columnHas(sheets, MATERIALS, t.headers, 'Material ID', firstId));
   }
   // Best effort: a product not on the Material List yet is added to it (the next save tries again).
-  try { await syncMaterialList(sheets, await materialListTab(sheets), newestFirst(t.rows.map(materialOut).concat(saved.map((m) => Object.assign({}, m, { supplier }))))); }
+  try { await syncMaterialList(sheets, await materialListTab(sheets), newestFirst(t.rows.map(materialOut).concat(saved.map((m) => Object.assign({}, m, { supplier, department: m.dept }))))); }
   catch (e) { /* the lots are saved; the list catches up on the next save */ }
   const containers = saved.reduce((n, m) => n + m.qtyReceived, 0);
   return { ok: true, receiver, receiverCreated, saved, lots: saved.length, containers, duplicate: !add.length };
@@ -3213,7 +3222,19 @@ function itemOut(o) {
     active: String(o['Active'] || '').trim().toLowerCase() !== 'no', createdAt: String(o['Created At'] || ''),
     createdBy: String(o['Created By'] || ''), updatedAt: String(o['Last Updated At'] || ''),
     unit: String(o['Unit'] || '').trim(), perContainer: optNum(o['Per Container']), reorder: optNum(o['Reorder Point']),
-    location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']), deptSet: !!deptIn(o['Department']) };
+    location: String(o['Location'] || '').trim(), department: deptOf(o['Type'], o['Department']), deptSet: !!deptIn(o['Department']),
+    suppliers: supplierList(o['Supplier']), expRequired: String(o['Expiration Required'] || '').trim().toLowerCase() === 'yes' };
+}
+// A material's suppliers: one or more in its Supplier cell, comma between.
+function supplierList(v) {
+  const out = [];
+  (Array.isArray(v) ? v : String(v || '').split(/[,;\n]+/)).map(cleanSupplier).forEach((x) => { if (x && out.indexOf(x) === -1) out.push(x); });
+  return out;
+}
+// The Material List item a lot belongs to: same name and type, in the lot's department if it has one.
+function itemForLot(items, product, type, dept) {
+  const hits = items.filter((i) => itemKey(i.name, i.type) === itemKey(product, type));
+  return (dept ? hits.filter((i) => i.department === dept)[0] : null) || hits[0] || null;
 }
 function optNum(v) { const s = String(v == null ? '' : v).trim(); return s === '' ? '' : num(s); }
 // '' or a number of 0 or more (decimals allowed: 52.5 lbs).
@@ -3226,14 +3247,15 @@ function amountIn(v, label) {
 }
 function newestFirst(lots) { return lots.slice().sort((a, b) => (b.id < a.id ? -1 : b.id > a.id ? 1 : 0)); }
 // Products received on lots (newest first) that aren't on the list: [{name, type, supplier, container}].
+// A lot with a department needs the material in THAT department (each department has its own list).
 function missingItems(items, lots) {
   const have = {}, add = [];
-  items.forEach((i) => { have[itemKey(i.name, i.type)] = 1; });
+  items.forEach((i) => { have[itemKey(i.name, i.type)] = 1; have[itemKey(i.name, i.type) + '|' + i.department] = 1; });
   lots.forEach((l) => {
-    const k = itemKey(l.product, l.type);
+    const d = deptIn(l.department || l.dept), k = itemKey(l.product, l.type) + (d ? '|' + d : '');
     if (!l.product || !l.type || have[k]) return;
-    have[k] = 1;
-    add.push({ name: l.product, type: l.type, supplier: l.supplier || '', container: l.container || '', department: deptIn(l.department) });
+    have[k] = 1; have[itemKey(l.product, l.type)] = 1;
+    add.push({ name: l.product, type: l.type, supplier: l.supplier || '', container: l.container || '', department: d });
   });
   return add;
 }
@@ -3280,18 +3302,20 @@ async function saveMaterialItem(sheets, item, operator, opId) {
   const type = savedTypes.map((x) => x.name).concat(MATERIAL_TYPES, items.map((i) => i.type), lots.map((l) => l.type)).filter((x) => x && x.toLowerCase() === typeIn.toLowerCase())[0] || typeIn;
   const ty = savedTypes.filter((x) => x.name === type)[0];
   const ts = nowStamp();
-  const fields = { 'Name': name, 'Type': type, 'Supplier': cleanSupplier(item.supplier),
+  const sups = supplierList(item.suppliers != null ? item.suppliers : item.supplier);
+  const fields = { 'Name': name, 'Type': type, 'Supplier': sups.join(', '),
     'Container': String(item.container || '').trim() || (ty && ty.container) || MATERIAL_CONTAINERS[type] || '', 'Part #': String(item.partNo == null ? '' : item.partNo).trim(),
     'Notes': String(item.notes || '').trim(), 'Active': item.active === false ? 'No' : 'Yes', 'Last Updated At': ts,
     'Unit': String(item.unit || '').trim(), 'Per Container': amountIn(item.perContainer, 'The amount per container'),
     'Reorder Point': amountIn(item.reorder, 'The reorder point'), 'Location': String(item.location || '').trim(),
     'Department': deptIn(item.department) || (ty && ty.department) || deptOf(type) };
+  if (item.expRequired != null) fields['Expiration Required'] = item.expRequired ? 'Yes' : 'No';
   let id = String(item.id || '').trim().toUpperCase();
   if (!id && opId) {
     const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
     if (ex) return { ok: true, item: itemOut(ex), duplicate: true };
   }
-  const clash = items.filter((i) => itemKey(i.name, i.type) === itemKey(name, type) && i.id !== id)[0];
+  const clash = items.filter((i) => itemKey(i.name, i.type) === itemKey(name, type) && i.department === fields['Department'] && i.id !== id)[0];
   // Saving a name that was only on the list because it was received (just added above) edits that item.
   if (!id && clash && added.indexOf(clash.id) !== -1) id = clash.id;
   else if (clash) throw new Error(name + ' (' + type + ') is already on the Material List' + (clash.active ? '' : ' (inactive — tap it to turn it back on)') + '.');
@@ -3304,6 +3328,7 @@ async function saveMaterialItem(sheets, item, operator, opId) {
       const data = [];
       lt.rows.forEach((r) => {
         if (itemKey(r['Product'], r['Type']) !== itemKey(old.name, old.type)) return;
+        if (deptIn(r['Department']) && deptIn(r['Department']) !== old.department) return;   // another department's material of the same name
         renamedLots++;
         data.push({ range: "'" + MATERIALS + "'!" + colLetter(lt.map['Product']) + r.__row, values: [[name]] });
         data.push({ range: "'" + MATERIALS + "'!" + colLetter(lt.map['Type']) + r.__row, values: [[type]] });
@@ -3311,12 +3336,38 @@ async function saveMaterialItem(sheets, item, operator, opId) {
       if (data.length) await sheets.batchUpdate(data);
     }
     await stampCells(sheets, MATERIAL_LIST, o.__row, t.map, fields);
-    return { ok: true, item: itemOut(Object.assign({}, o, fields)), renamedLots };
+    const machines = await syncItemMachines(sheets, name, old.name, fields['Department'], item.machines);
+    return { ok: true, item: itemOut(Object.assign({}, o, fields)), renamedLots, machines };
   }
   const obj = Object.assign({ 'Item ID': 'MI-' + ('00000' + (maxIdNumber(t.rows, 'Item ID', 'MI-') + 1)).slice(-5), 'Created At': ts,
     'Created By': String(operator || '').trim() || 'Materials', 'Op ID': opId || '' }, fields);
   await appendRowObj(sheets, MATERIAL_LIST, t.headers, obj);
-  return { ok: true, item: itemOut(obj), created: true };
+  const machines = await syncItemMachines(sheets, name, '', fields['Department'], item.machines);
+  return { ok: true, item: itemOut(obj), created: true, machines };
+}
+// Where a material goes = the machines whose "Materials" list has it (the Machines tab is the one
+// place it's kept). `machines` (names, from the material's screen): this department's machines are
+// set to exactly that. A rename renames it on every machine. Left out (undefined): only a rename.
+async function syncItemMachines(sheets, name, oldName, dept, machines) {
+  const renamed = oldName && oldName !== name;
+  if (!Array.isArray(machines) && !renamed) return null;
+  const mt = await machinesTab(sheets);
+  const want = Array.isArray(machines) ? machines.map((x) => String(x).trim().toLowerCase()) : null;
+  const names = [name.toLowerCase(), String(oldName || '').toLowerCase()].filter(Boolean);
+  const data = [], on = [];
+  mt.rows.forEach((r) => {
+    const m = String(r['Machine'] || '').trim();
+    if (!m) return;
+    const list = splitList(r['Materials']);
+    const had = list.some((x) => names.indexOf(x.toLowerCase()) !== -1);
+    const mine = machineOut(r).department === dept;
+    const keep = want ? (want.indexOf(m.toLowerCase()) !== -1 || (!mine && had)) : had;
+    let next = list.filter((x) => names.indexOf(x.toLowerCase()) === -1);
+    if (keep) { next.push(name); on.push(m); }
+    if (next.join(', ') !== list.join(', ')) data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Materials']) + r.__row, values: [[next.join(', ')]] });
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return on;
 }
 
 // Delete an item added by mistake — only while no lot was received under it (otherwise mark it inactive).
@@ -3449,10 +3500,11 @@ async function fillDepartments(sheets, operator, opId) {
   const lst = await materialListTab(sheets);
   const mt = await machinesTab(sheets);
   const tt = await typesTab(sheets);
-  const all = typeList(tt.rows.map(typeOut).filter((x) => x.name), lst.rows.map(itemOut).filter((i) => i.name), (await lotsTab(sheets)).rows.map(materialOut));
+  const lt = await materialsTab(sheets);
+  const all = typeList(tt.rows.map(typeOut).filter((x) => x.name), lst.rows.map(itemOut).filter((i) => i.name), lt.rows.map(materialOut));
   const typeDept = typeDeptMap(all);
   const data = [];
-  let items = 0, machines = 0;
+  let items = 0, machines = 0, lots = 0, loads = 0;
   tt.rows.forEach((r) => {
     if (!String(r['Type'] || '').trim() || deptIn(r['Department'])) return;
     data.push({ range: "'" + MATERIAL_TYPE_TAB + "'!" + colLetter(tt.map['Department']) + r.__row, values: [[deptOf(r['Type'])]] });
@@ -3468,6 +3520,30 @@ async function fillDepartments(sheets, operator, opId) {
     data.push({ range: "'" + MACHINES + "'!" + colLetter(mt.map['Department']) + r.__row, values: [[/litho/i.test(name) ? 'Litho' : 'Metals']] });
     machines++;
   });
+  // Every lot gets its material's department (each department has its own lots).
+  const itemsNow = lst.rows.map((r) => Object.assign(itemOut(r), { department: deptIn(r['Department']) || typeDept[String(r['Type'] || '').trim().toLowerCase()] || deptOf(r['Type']) })).filter((i) => i.name);
+  const lotDeptById = {};
+  lt.rows.forEach((r) => {
+    const id = String(r['Material ID'] || '').trim();
+    let d = deptIn(r['Department']);
+    if (!d && (id || String(r['Lot #'] || '').trim())) {
+      d = ((itemForLot(itemsNow, r['Product'], r['Type'], '') || {}).department) || typeDept[String(r['Type'] || '').trim().toLowerCase()] || deptOf(r['Type']);
+      data.push({ range: "'" + MATERIALS + "'!" + colLetter(lt.map['Department']) + r.__row, values: [[d]] });
+      lots++;
+    }
+    if (id) lotDeptById[id] = d;
+  });
+  // And every load line: its machine's department, else its lot's.
+  const machDept = {};
+  mt.rows.forEach((r) => { const n = String(r['Machine'] || '').trim(); if (n) machDept[n.toLowerCase()] = deptIn(r['Department']) || (/litho/i.test(n) ? 'Litho' : 'Metals'); });
+  let ld = null;
+  try { ld = await loadsTab(sheets); } catch (e) { ld = null; }
+  if (ld) ld.rows.forEach((r) => {
+    if (!String(r['Load ID'] || '').trim() || deptIn(r['Department'])) return;
+    const d = machDept[String(r['Machine'] || '').trim().toLowerCase()] || lotDeptById[String(r['Material ID'] || '').trim()] || deptOf(r['Type']);
+    data.push({ range: "'" + MATERIAL_LOADS + "'!" + colLetter(ld.map['Department']) + r.__row, values: [[d]] });
+    loads++;
+  });
   if (data.length) await sheets.batchUpdate(data);
   const add = all.filter((x) => !x.saved);
   if (add.length) {
@@ -3476,7 +3552,7 @@ async function fillDepartments(sheets, operator, opId) {
     await sheets.appendMany(MATERIAL_TYPE_TAB, objs.map((o) => tt.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
       () => columnHas(sheets, MATERIAL_TYPE_TAB, tt.headers, 'Type', objs[0]['Type']));
   }
-  return { ok: true, items, machines, types: add.length };
+  return { ok: true, items, machines, types: add.length, lots, loads };
 }
 // Add (no oldName) or edit a machine on the Machines tab. Renaming one moves the lots on it (their
 // Location) to the new name; the load history keeps the name it had then.
@@ -3580,14 +3656,25 @@ async function loadMaterials(sheets, info, scans, operator, opId) {
   const lt = await loadsTab(sheets);
   let lines = opId ? lt.rows.filter((r) => String(r['Op ID'] || '').indexOf(opId + '#') === 0) : [];
   const duplicate = lines.length > 0;
+  // Loading in a department: only that department's lots (each has its own).
+  const dept = deptIn(info.department);
+  let lotDept = () => '';
+  if (dept) {
+    let items = [];
+    try { items = (await readObjects(sheets, MATERIAL_LIST)).rows.map(itemOut).filter((i) => i.name); } catch (e) { items = []; }
+    const tdept = typeDeptMap(typeList(await readTypes(sheets), items, []));
+    lotDept = (r) => deptIn(r['Department']) || ((itemForLot(items, r['Product'], r['Type'], '') || {}).department) || tdept[String(r['Type'] || '').trim().toLowerCase()] || deptOf(r['Type']);
+  }
   if (!duplicate) {
     const avail = {}, errors = [];
     t.rows.forEach((r) => { avail[String(r['Material ID'] || '').trim()] = String(r['Status'] || '').trim() === MATERIAL_STATUS.IN_STOCK || !String(r['Status'] || '').trim() ? num(r['Qty On Hand']) : 0; });
     const plan = [];
     want.forEach((w) => {
-      const rows = t.rows.filter((r) => String(r['Lot #'] != null ? r['Lot #'] : '').trim().toLowerCase() === w.lot.toLowerCase()
+      const any = t.rows.filter((r) => String(r['Lot #'] != null ? r['Lot #'] : '').trim().toLowerCase() === w.lot.toLowerCase()
         && (!w.product || String(r['Product'] || '').trim().toLowerCase() === w.product.toLowerCase()))
         .sort((a, b) => (String(a['Material ID']) < String(b['Material ID']) ? -1 : 1));
+      const rows = dept ? any.filter((r) => lotDept(r) === dept) : any;
+      if (!rows.length && any.length) { errors.push('Lot ' + w.lot + ' belongs to ' + lotDept(any[0]) + ', not ' + dept + '.'); return; }
       if (!rows.length) { errors.push('Lot ' + w.lot + (w.product ? ' (' + w.product + ')' : '') + ' is not in inventory.'); return; }
       const prods = rows.map((r) => String(r['Product'] || '').trim()).filter((p, i, a) => a.findIndex((x) => x.toLowerCase() === p.toLowerCase()) === i);
       if (!w.product && prods.length > 1) { errors.push('Lot ' + w.lot + ' is on more than one material (' + prods.join(', ') + ') — pick which one.'); return; }
@@ -3608,7 +3695,8 @@ async function loadMaterials(sheets, info, scans, operator, opId) {
     lines = plan.map((p, i) => ({ 'Load ID': 'L-' + ('000000' + (++next)).slice(-6), 'Loaded At': ts, 'Date': date, 'Machine': machine,
       'Lot #': String(p.r['Lot #']).trim(), 'Material ID': String(p.r['Material ID']).trim(), 'Type': String(p.r['Type'] || '').trim(),
       'Product': String(p.r['Product'] || '').trim(), 'Container': String(p.r['Container'] || '').trim(), 'Qty': p.take, 'Left After': p.left,
-      'Loaded By': operator, 'Notes': notes, 'Op ID': opId ? opId + '#' + (i + 1) : '', 'Position': position }));
+      'Loaded By': operator, 'Notes': notes, 'Op ID': opId ? opId + '#' + (i + 1) : '', 'Position': position,
+      'Department': dept || deptIn(p.r['Department']) || (known && known.department) || '' }));
     await sheets.appendMany(MATERIAL_LOADS, lines.map((o) => lt.headers.map((h) => (o.hasOwnProperty(h) ? o[h] : ''))),
       () => columnHas(sheets, MATERIAL_LOADS, lt.headers, 'Load ID', lines[0]['Load ID']));
   }
@@ -3803,7 +3891,7 @@ async function addMaterialLots(sheets, c, lots, operator, opId) {
   const savedTypes = await readTypes(sheets);
   const type = savedTypes.map((x) => x.name).concat(MATERIAL_TYPES, items.map((i) => i.type)).filter((x) => x && x.toLowerCase() === typeIn.toLowerCase())[0] || typeIn;
   const ty = savedTypes.filter((x) => x.name === type)[0];
-  const item = items.filter((i) => itemKey(i.name, i.type) === itemKey(product, type))[0];
+  const item = itemForLot(items, product, type, deptIn(c.department));
   const name = item ? item.name : product;
   const container = String(c.container || '').trim() || (item && item.container) || (ty && ty.container) || MATERIAL_CONTAINERS[type] || '';
   const ts = nowStamp();
@@ -3827,7 +3915,7 @@ async function addMaterialLots(sheets, c, lots, operator, opId) {
     const obj = { 'Material ID': 'M-' + ('00000' + (++next)).slice(-5), 'Lot #': l.lot, 'Type': type, 'Product': name,
       'Supplier': supplier, 'Receiver': '', 'PO #': '', 'Date Received': todayYMD(), 'Expiration Date': l.expiration, 'Qty Received': l.qty, 'Qty On Hand': l.qty,
       'Container': container, 'Location': location, 'Position': position, 'Status': status, 'Comments': '', 'Received At': ts, 'Received By': operator,
-      'Last Updated At': ts, 'Op ID': op };
+      'Last Updated At': ts, 'Op ID': op, 'Department': deptIn(c.department) || (item && item.department) || (ty && ty.department) || deptOf(type) };
     add.push(obj); saved.push(materialOut(obj));
   });
   if (add.length) {
@@ -3838,9 +3926,9 @@ async function addMaterialLots(sheets, c, lots, operator, opId) {
   // Best effort: remember the supplier / put a new material on the list / a new machine on the Machines tab.
   try {
     if (!item) await syncMaterialList(sheets, lst, [Object.assign({}, saved[0], { supplier, department: deptIn(c.department) || (ty && ty.department) })]);
-    else if (supplier && item.supplier !== supplier) {
+    else if (supplier && item.suppliers.indexOf(cleanSupplier(supplier)) === -1) {   // another supplier for it
       const row = lst.rows.filter((r) => String(r['Item ID'] || '').trim() === item.id)[0];
-      if (row) await stampCells(sheets, MATERIAL_LIST, row.__row, lst.map, { 'Supplier': supplier, 'Last Updated At': ts });
+      if (row) await stampCells(sheets, MATERIAL_LIST, row.__row, lst.map, { 'Supplier': item.suppliers.concat([cleanSupplier(supplier)]).join(', '), 'Last Updated At': ts });
     }
   } catch (err) { /* the lots are saved */ }
   if (onMachine && !machine) {
