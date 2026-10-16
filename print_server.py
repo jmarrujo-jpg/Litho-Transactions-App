@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---- Settings -------------------------------------------------------------
 PRINTER_MAC = "60-95-32-0b-e0-1f"  # the printer's permanent hardware ID
-PRINTER_IP = "192.168.1.171"       # last known address; updated automatically
+PRINTER_IP = "192.168.1.118"       # last known address; updated automatically
 PRINTER_PORT = 9100                # standard raw printing port on Zebra printers
 SERVER_PORT = 8000                 # port your web app connects to on this PC
 TOKEN = "change-me"                # shared secret; your web app must send this
