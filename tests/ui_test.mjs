@@ -1734,6 +1734,10 @@ const base = {
     updateMaterial: () => R({ ok: true }),
   }));
   await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]');
+  ok('a department\'s Materials: Load, Receive, Maintenance', (await page.$$eval('#view > button', (els) => els.map((e) => e.id))).join() === 'mtLoadBtn,mtReceiveBtn,mtMaintBtn');
+  await page.click('#mtMaintBtn');
+  ok('Maintenance: Lots, Materials, Machines, Load History', (await page.$$eval('#view > button', (els) => els.map((e) => e.id))).join() === 'mtLotsBtn,mtListBtn,mtMachBtn,mtHistBtn');
+  await page.click('#mtLotsBtn');
   await page.waitForSelector('[data-mtopen]');
   let txt = await page.textContent('#mtList');
   ok('materials list: in-stock lots only by default; expired shows', txt.includes('PW-1') && !txt.includes('OLD-1') && txt.includes('EXPIRED 2020-01-01') && txt.includes('2 of 2 left'), txt);
@@ -1743,6 +1747,7 @@ const base = {
   txt = await page.textContent('#mtList');
   ok('type chip filters', txt.includes('OLD-1') && !txt.includes('PW-1'), txt);
   // Receive
+  await page.click('#backBtn'); await page.click('#backBtn'); await page.waitForSelector('#mtReceiveBtn');
   await page.click('#mtReceiveBtn');
   await page.waitForSelector('#mtScan');
   await page.fill('#mtSupplier', 'DSM');
@@ -1777,8 +1782,9 @@ const base = {
     && rc.args[1].some((l) => l.lot === 'PW-1' && l.type === 'Powder' && l.container === 'Unit'), rc && rc.args);
   ok('saved: says the receiver number to write on the slip', (await page.textContent('#modalRoot')).includes('R-00008'));
   await page.click('#modalOk'); await page.waitForTimeout(150);
-  ok('back on the list after saving; nothing pending', !!(await page.$('#mtReceiveBtn')) && !(await page.textContent('#view')).includes('not saved yet'));
+  ok('back on the department after saving; nothing pending', !!(await page.$('#mtReceiveBtn')) && !(await page.textContent('#view')).includes('not saved yet'));
   // Edit a lot
+  await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('[data-mtt="all"]');
   await page.click('[data-mtt="all"]');
   await page.waitForSelector('[data-mtopen="M-00002"]');
   await page.click('[data-mtopen="M-00002"]');
@@ -1827,8 +1833,9 @@ const base = {
     deleteMaterialItem: () => R({ ok: true }),
   }));
   await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]');
-  await page.waitForSelector('#mtListBtn');
+  await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn');
   ok('the type chips include a type added on the list', !!(await page.waitForSelector('[data-mtt="Solvent"]', { timeout: 2000 }).catch(() => null)));
+  await page.click('#backBtn'); await page.waitForSelector('#mtListBtn');
   await page.click('#mtListBtn');
   await page.waitForSelector('[data-mtitem]');
   let txt = await page.textContent('#mtItemList');
@@ -1869,7 +1876,7 @@ const base = {
   ok('the rename is sent with the id', sv && sv.args[0].id === 'MI-00001' && sv.args[0].name === 'WB-2100 Gold', sv && sv.args);
   mats[0].product = 'WB-2100 Gold';
   // Receiving: a name not on the list can't be scanned; "Add it now" adds it and comes back with it picked
-  await page.click('#backBtn'); await page.waitForSelector('#mtReceiveBtn');
+  await page.click('#backBtn'); await page.click('#backBtn'); await page.waitForSelector('#mtReceiveBtn');
   await page.click('#mtReceiveBtn'); await page.waitForSelector('#mtScan');
   await page.fill('#mtSupplier', 'DSM');
   await page.fill('#mtProduct', 'WB-2100 Gold');
@@ -1942,7 +1949,7 @@ const base = {
   await page.click('#modalOk'); await page.waitForSelector('#mlScan');
   ok('ready for the next load on the same machine', (await page.inputValue('#mlMachine')) === 'Press 3' && !(await page.$('[data-mlrm]')));
   // History
-  await page.click('#backBtn'); await page.waitForSelector('#mtHistBtn');
+  await page.click('#backBtn'); await page.waitForSelector('#mtMaintBtn'); await page.click('#mtMaintBtn'); await page.waitForSelector('#mtHistBtn');
   await page.click('#mtHistBtn'); await page.waitForSelector('[data-mhundo]');
   const hist = await page.textContent('#mhList');
   ok('history: grouped by machine with the time, lot, material and who', /Liner 1.*06:05.*X9.*Blue.*by Jo.*Press 3.*13:40.*A1.*WB-2100/.test(hist) && (await page.$$eval('#mhMachine option', (o) => o.length)) === 3, hist);
@@ -1975,9 +1982,9 @@ const base = {
     },
     loadMaterials: () => R({ ok: true, containers: 1, usedUp: [] }),
   }));
-  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('[data-mtopen]');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('[data-mtopen]');
   ok('lot cards show where they are kept', (await page.textContent('#mtList')).includes('📍 Pallet Area'));
-  await page.click('#mtListBtn'); await page.waitForSelector('#mtSetupBtn');
+  await page.click('#backBtn'); await page.waitForSelector('#mtListBtn'); await page.click('#mtListBtn'); await page.waitForSelector('#mtSetupBtn');
   ok('the list offers the setup from the count', (await page.textContent('#mtSetupBtn')).includes('2026-10-12'));
   await page.click('#mtSetupBtn'); await page.waitForSelector('#mtSetupSave');
   let txt = await page.textContent('#view');
@@ -1991,7 +1998,7 @@ const base = {
   txt = await page.textContent('#mtItemList');
   ok('the list shows stock as containers and amount, and the reorder point', /9307G.*In stock: 5 Barrels ≈ 2,745 lbs · reorder at 1,098 lbs/.test(txt) && /New Copper.*In stock: 6 Gaylords ≈ 22,800 lbs/.test(txt), txt);
   ok('at or under the reorder point shows LOW (powder: 4 units = 440 lbs, reorder at 440)', /VP 102 BPA-NI\s*LOW — reorder/.test(txt), txt);
-  await page.click('#backBtn'); await page.waitForSelector('#mtLowCard');
+  await page.click('#backBtn'); await page.waitForSelector('#mtMachBtn'); await page.click('#backBtn'); await page.waitForSelector('#mtLowCard');
   ok('the Materials screen says what to reorder', /Time to reorder \(3\).*VP 102 BPA-NI.*4 Units ≈ 440 lbs left · reorder at 440 lbs.*V7257-D — 4 Cartridges left · reorder at 5/.test(await page.textContent('#mtLowCard')), await page.textContent('#mtLowCard'));
   // Receiving: picking a material puts it where it's kept
   await page.click('#mtReceiveBtn'); await page.waitForSelector('#mtProduct');
@@ -2034,7 +2041,7 @@ const base = {
     updateMaterial: () => R({ ok: true }),
     removeStartLots: () => R({ ok: true, removed: 1, remaining: 0 }),
   }));
-  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.waitForSelector('#mtStartRemove');
+  await page.click('#tileMaterials'); await page.click('[data-mthome="Metals"]'); await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('#mtStartRemove');
   ok('Add Lots is there; the START lots can be removed', (await page.textContent('#mtAddBtn')).includes('Add Lots') && !!(await page.$('#mtStartRemove')));
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-maprod]');
   ok('compound shows its material codes as buttons', (await page.$$eval('[data-maprod]', (els) => els.map((e) => e.textContent))).join() === '9000-63-1,9307G');
@@ -2083,9 +2090,9 @@ const base = {
   await page.click('#modalOk'); await page.waitForTimeout(150);
   const up = calls.filter((c) => c.fn === 'updateMaterial')[0];
   ok('Used up marks that lot Used', up && JSON.stringify(up.args[1]) === '{"Status":"Used"}', up && up.args);
-  await page.waitForSelector('#mtListBtn'); await page.click('#mtListBtn'); await page.waitForSelector('[data-mtitem]');
+  await page.waitForSelector('[data-mtopen]'); await page.click('#backBtn'); await page.waitForSelector('#mtListBtn'); await page.click('#mtListBtn'); await page.waitForSelector('[data-mtitem]');
   ok('stock counts loaded containers too, and says how many', /9000-63-1.*In stock: 9 Barrels ≈ 4,725 lbs \(2 loaded\)/.test(await page.textContent('#mtItemList')), await page.textContent('#mtItemList'));
-  await page.click('#backBtn'); await page.waitForSelector('#mtStartRemove');
+  await page.click('#backBtn'); await page.waitForSelector('#mtLotsBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('#mtStartRemove');
   await page.click('#mtStartRemove'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(150);
   ok('Remove the START lots asks first, then removes them', calls.some((c) => c.fn === 'removeStartLots'));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
@@ -2178,15 +2185,35 @@ const base = {
   mats.machineInfo[0].deptSet = false;   // a row from before departments
   await page.click('#tilePlastics'); await page.waitForSelector('#tilePlasticsMat');
   ok('Plastics Department: Plastics Lines (coming soon), then Materials', (await page.textContent('#tilePlasticsLines')).includes('coming soon') && await page.$eval('#tilePlasticsLines', (e) => e.disabled));
-  await page.click('#tilePlasticsMat'); await page.waitForSelector('[data-mtopen]');
+  await page.click('#tilePlasticsMat'); await page.waitForSelector('#mtMaintBtn');
   await page.waitForTimeout(150);
   ok('a machine with no Department in the sheet gets it written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
+  ok('Plastics Materials: Load, Receive, Maintenance', (await page.textContent('#deptLabel')) === 'Plastics Materials' && (await page.$$eval('#view > button', (els) => els.map((e) => e.id))).join() === 'mtLoadBtn,mtReceiveBtn,mtMaintBtn');
+  await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('[data-mtopen]');
   let ids = await page.$$eval('[data-mtopen]', (els) => els.map((e) => e.getAttribute('data-mtopen')));
-  ok('the Plastics Department tile opens Plastics materials only', ids.join() === 'M-2' && (await page.textContent('#deptLabel')) === 'Plastics Materials', ids);
-  ok('…with its machine and what is loaded on it', /Injection 1/.test(await page.textContent('#mtOnBox')) && /R-1/.test(await page.textContent('#mtOnBox')) && !/Press 13/.test(await page.textContent('#mtOnBox')));
+  ok('Lots: Plastics lots only', ids.join() === 'M-2', ids);
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-matype]');
   ok('Add Lots is Plastics only (no department buttons), with its types and machines', !(await page.$('[data-madept]')) && (await page.$$('[data-matype]')).length === 1
     && !!(await page.$('[data-matype="Resin"]')) && (await page.$$eval('[data-mamach]', (els) => els.map((e) => e.getAttribute('data-mamach')))).join() === 'Injection 1');
+  await page.click('#backBtn'); await page.waitForSelector('#mtAddBtn');
+  await page.click('#backBtn'); await page.waitForSelector('#mtMachBtn');
+  // Machines
+  await page.click('#mtMachBtn'); await page.waitForSelector('[data-mmrow]');
+  ok('Machines: Plastics machines only, with what is loaded', (await page.$$eval('[data-mmrow]', (els) => els.map((e) => e.getAttribute('data-mmrow')))).join() === 'Injection 1'
+    && /Spots: Hopper/.test(await page.textContent('[data-mmrow="Injection 1"]')) && /Loaded now: R-1 · PP Resin 1/.test(await page.textContent('[data-mmrow="Injection 1"]')));
+  await page.click('#mmAdd'); await page.waitForSelector('#mmName');
+  ok('a new machine starts in Plastics', (await page.inputValue('#mmDept')) === 'Plastics' && !(await page.$('#mmRemove')));
+  await page.fill('#mmName', 'Injection 2'); await page.fill('#mmPos', 'Hopper'); await page.click('#mmSave'); await page.waitForTimeout(150);
+  const am = calls.filter((c) => c.fn === 'saveMachine').pop();
+  ok('add a machine', am && am.args[0].name === 'Injection 2' && am.args[0].oldName === '' && am.args[0].department === 'Plastics' && am.args[0].positions === 'Hopper' && am.args[0].active === true, am && am.args);
+  await page.waitForSelector('[data-mmrow="Injection 1"]'); await page.click('[data-mmrow="Injection 1"]'); await page.waitForSelector('#mmRemove');
+  await page.click('#mmRemove'); await page.waitForSelector('#modalOk');
+  ok('a machine with lots loaded can\'t be removed (says why)', /1 lot\(s\) are loaded on it/.test(await page.textContent('#modalRoot')) && !calls.some((c) => c.fn === 'deleteMachine'));
+  await page.click('#modalOk');
+  await page.uncheck('#mmActive'); await page.click('#mmSave'); await page.waitForTimeout(150);
+  const em = calls.filter((c) => c.fn === 'saveMachine').pop();
+  ok('…but it can be made not active', em && em.args[0].oldName === 'Injection 1' && em.args[0].active === false, em && em.args);
+  await page.waitForSelector('#mmAdd'); await page.click('#backBtn'); await page.waitForSelector('#mtMachBtn');
   await page.click('#backBtn'); await page.waitForSelector('#mtLoadBtn');
   await page.click('#backBtn'); await page.waitForSelector('#tilePlasticsMat');
   ok('back from Plastics materials goes to the Plastics Department', true);
@@ -2204,12 +2231,13 @@ const base = {
   await page.click('#backBtn'); await page.waitForSelector('#tilePlastics');
   await page.click('#tileMaterials'); await page.waitForSelector('[data-mthome]');
   ok('Materials: a tile per department', (await page.$$eval('[data-mthome]', (els) => els.map((e) => e.getAttribute('data-mthome')))).join() === 'Metals,Litho,Plastics');
-  await page.click('[data-mthome="Litho"]'); await page.waitForSelector('[data-mtopen]');
+  await page.click('[data-mthome="Litho"]'); await page.waitForSelector('#mtLoadBtn');
   await page.click('#mtLoadBtn'); await page.waitForSelector('#mlMachine');
   ok('Load on Litho: its machines as buttons', (await page.$$eval('[data-mlm]', (els) => els.map((e) => e.getAttribute('data-mlm')))).join() === 'Litho Line 3');
   await page.click('[data-mlm="Litho Line 3"]');
-  ok('…tapping one picks it', (await page.inputValue('#mlMachine')) === 'Litho Line 3' && !(await page.getAttribute('[data-mlm="Litho Line 3"]', 'class')).includes('secondary'));
-  await page.click('#backBtn'); await page.waitForSelector('#mtAddBtn');
+  ok('…tapping one picks it, and says what is on it', (await page.inputValue('#mlMachine')) === 'Litho Line 3' && !(await page.getAttribute('[data-mlm="Litho Line 3"]', 'class')).includes('secondary')
+    && /On it now: nothing loaded/.test(await page.textContent('#mlOnNow')));
+  await page.click('#backBtn'); await page.waitForSelector('#mtMaintBtn'); await page.click('#mtMaintBtn'); await page.click('#mtLotsBtn'); await page.waitForSelector('#mtAddBtn');
   await page.click('#mtAddBtn'); await page.waitForSelector('[data-matype]');
   ok('switching to Litho shows the litho types', !!(await page.$('[data-matype="Litho Coating"]')) && !!(await page.$('[data-maprod="Clear Size"]')) && !(await page.$('[data-matype="Resin"]')));
   // the Master File
@@ -2225,7 +2253,7 @@ const base = {
   ok('Machines: what is loaded on each', /R-1/.test(await page.textContent('#mfBox')));
   await page.click('[data-mfrow="Injection 1"]'); await page.waitForSelector('#mfSave');
   await page.fill('#mfName', 'Injection 01'); await page.fill('#mfPos', 'Hopper, Side'); await page.click('#mfSave'); await page.waitForTimeout(150);
-  const sm = calls.filter((c) => c.fn === 'saveMachine')[0];
+  const sm = calls.filter((c) => c.fn === 'saveMachine').pop();
   ok('renaming a machine sends the old name', sm && sm.args[0].oldName === 'Injection 1' && sm.args[0].name === 'Injection 01' && sm.args[0].positions === 'Hopper, Side' && sm.args[0].department === 'Plastics', sm && sm.args);
   await page.waitForSelector('[data-mft="items"]'); await page.click('[data-mft="items"]'); await page.waitForSelector('#mfAdd');
   await page.click('[data-mfd="Plastics"]'); await page.click('#mfAdd'); await page.waitForSelector('#mfSave');
@@ -2257,7 +2285,7 @@ const base = {
       { id: 'MR-00002', name: '26-10-01--DOW--MR-00002', date: '2026-10-01', supplier: 'DOW', pos: '', department: 'Metals', notes: '', lotCount: 0 }], suppliers: ['DOW', 'LYB'] }),
     saveMatReceiver: (a) => R({ ok: true, id: a[0].id || 'MR-00003' }), deleteMatReceiver: (a) => R({ ok: true, id: a[0] }),
   }));
-  await page.click('#tilePlastics'); await page.click('#tilePlasticsMat'); await page.waitForSelector('[data-mtopen]'); await page.waitForTimeout(150);
+  await page.click('#tilePlastics'); await page.click('#tilePlasticsMat'); await page.waitForSelector('#mtReceiveBtn'); await page.waitForTimeout(150);
   ok('a type not on the Types tab yet gets written (once)', calls.filter((c) => c.fn === 'fillDepartments').length === 1);
   await page.click('#mtReceiveBtn'); await page.waitForSelector('[data-mtrt]');
   ok('Receive in Plastics: only Plastics types, starting on the first', (await page.$$eval('[data-mtrt]', (els) => els.map((e) => e.getAttribute('data-mtrt')))).join() === 'Resin,Pellet'

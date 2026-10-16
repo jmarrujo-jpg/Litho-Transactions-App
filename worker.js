@@ -200,7 +200,7 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'costs-99', writeLock: !!env.WRITE_LOCK }, 200);
+    if (request.method === 'GET') return json({ ok: true, service: 'litho-api', stage: 'full', build: 'maint-100', writeLock: !!env.WRITE_LOCK }, 200);
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
 
     let payload;
@@ -392,6 +392,8 @@ async function handle(fn, args, env) {
       return fillDepartments(sheets, args[0], args[1]);
     case 'saveMachine': // ({name, oldName?, positions[], materials[], department, active}, operator, opId) add or edit a machine
       return saveMachine(sheets, args[0], args[1], args[2]);
+    case 'deleteMachine': // (name, operator, opId) take a machine off the Machines list (not while lots are loaded on it)
+      return deleteMachine(sheets, args[0], args[1], args[2]);
     case 'deleteMaterialItem': // (itemId, operator, opId) only while no lot was received under it
       return deleteMaterialItem(sheets, args[0], args[1], args[2]);
     case 'keepReceiverNumbers': // (operator, opId) write every receiver's kept mill / ticket numbers up to date
@@ -3513,6 +3515,25 @@ async function saveMachine(sheets, m, operator, opId) {
   const obj = Object.assign({ 'Created At': ts }, f);
   await appendRowObj(sheets, MACHINES, t.headers, obj);
   return { ok: true, machine: machineOut(obj), created: true };
+}
+// Remove a machine from the Machines list. Refused while lots are loaded on it (they'd have nowhere
+// to be); the load history keeps its name. Removing it again is harmless.
+async function deleteMachine(sheets, name, operator, opId) {
+  name = String(name || '').trim();
+  if (!name) throw new Error('Pick the machine.');
+  let t;
+  try { t = await readTab(sheets, MACHINES); } catch (e) { return { ok: true, name, alreadyGone: true }; }
+  const o = t.rows.filter((r) => String(r['Machine'] || '').trim().toLowerCase() === name.toLowerCase())[0];
+  if (!o) return { ok: true, name, alreadyGone: true };
+  const on = (await lotsTab(sheets)).rows.filter((r) => String(r['Location'] || '').trim().toLowerCase() === name.toLowerCase()
+    && String(r['Status'] || '').trim() === MATERIAL_STATUS.LOADED).length;
+  if (on) throw new Error(on + ' lot(s) are loaded on ' + name + '. Mark them used up first, or turn off "Active" instead.');
+  const grid = await sheetGrid(sheets, MACHINES);
+  if (!grid) throw new Error('Could not locate the Machines tab.');
+  const cell = await sheets.read("'" + MACHINES + "'!" + colLetter(t.map['Machine']) + o.__row);
+  if (String((cell[0] && cell[0][0]) || '').trim().toLowerCase() !== name.toLowerCase()) throw new Error('The Machines list changed while removing ' + name + ' — nothing was removed. Refresh and try again.');
+  await sheets.deleteRows(grid.sheetId, o.__row - 1, o.__row);
+  return { ok: true, name };
 }
 async function readMachines(sheets) {
   try { return (await readObjects(sheets, MACHINES)).rows.map(machineOut).filter((m) => m.name); } catch (e) { return []; }

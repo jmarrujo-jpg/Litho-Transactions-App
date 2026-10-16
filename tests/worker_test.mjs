@@ -1756,5 +1756,17 @@ await concurrency(envBase, 'in-worker lock');
     && h.result.log[0].by === 'Jo' && /^\d{4}-\d\d-\d\d/.test(h.result.since) && h.result.log.some((x) => x.what === 'Added' && x.item === 'GOLD EPOXY'), h.result);
 }
 
+// 49. Remove a machine: not while lots are loaded on it; again is harmless
+{ const f = fresh();
+  await call('saveMachine', [{ name: 'Injection 1', department: 'Plastics' }, 'Jo', 'op-49-a']);
+  await call('saveMachine', [{ name: 'Injection 2', department: 'Plastics' }, 'Jo', 'op-49-b']);
+  await call('addMaterialLots', [{ type: 'Resin', product: 'PP', location: 'Injection 1', onMachine: true, department: 'Plastics' }, [{ lot: 'R1', qty: 1 }], 'Jo', 'op-49-c']);
+  const no = await call('deleteMachine', ['Injection 1', 'Jo', 'op-49-d']);
+  ok('a machine with lots loaded on it can\'t be removed', !no.ok && /1 lot\(s\) are loaded on Injection 1/.test(no.error), no);
+  const yes = await call('deleteMachine', ['injection 2', 'Jo', 'op-49-e']);
+  const again = await call('deleteMachine', ['Injection 2', 'Jo', 'op-49-e']);
+  ok('an empty one is removed; again is harmless', yes.ok && again.ok && again.result.alreadyGone && f.rows(SID, 'Machines').map((r) => r['Machine']).join() === 'Injection 1', f.rows(SID, 'Machines'));
+}
+
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

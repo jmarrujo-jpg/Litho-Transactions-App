@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.99.3</span>
+      <span class="version" id="appVersion">v1.100.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -350,6 +350,10 @@
     "📦 Receive Materials": "📦 Recibir materiales",
     "Materials": "Materiales",
     "Plastics Department": "Departamento de Plásticos",
+    "🛠️ Materials Maintenance": "🛠️ Mantenimiento de materiales",
+    "🏷️ Lots": "🏷️ Lotes",
+    "🏭 Machines": "🏭 Máquinas",
+    "📋 Materials": "📋 Materiales",
     "💲 Litho Costs": "💲 Costos de Litho",
     "Litho Costs": "Costos de Litho",
     "🕘 Price history": "🕘 Historial de precios",
@@ -2003,10 +2007,12 @@
       case 'materials': mtBackFromDept(); return;   // -> the department it was opened from, else the Materials tiles
       case 'plasticsDept': renderLanding(); return;
       case 'lithoCosts': openLithoDept(); return;
-      case 'materialsReceive': case 'materialsEdit': case 'materialsList': case 'materialsLoad': case 'materialsLoads': openMaterials(); return;   // the scanned lots are kept
+      case 'materialsReceive': case 'materialsLoad': case 'materialsMaint': openMaterials(); return;   // the scanned lots are kept
+      case 'materialsLots': case 'materialsList': case 'materialsLoads': case 'materialsMachines': openMtMaint(); return;
+      case 'materialsEdit': openMtLots(); return;
       case 'materialsItem': if (mtItemFrom === 'receive') openMtReceive(); else if (mtItemFrom === 'add') openMtAdd(); else openMtList(); return;
       case 'materialsSetup': openMtList(); return;
-      case 'materialsAdd': openMaterials(); return;
+      case 'materialsAdd': openMtLots(); return;
       case 'databaseEdit': dbEditDone(); return;   // row editor -> database home (or the Master sheet it came from)
       default: renderLanding(); return;
     }
@@ -2134,7 +2140,7 @@
       mtFillDepts();
       if (after) after();
     }).withFailureHandler(function (err) {
-      var b = document.getElementById(state.view === 'materials' ? 'mtList' : 'mtLoadMsg');
+      var b = document.getElementById(state.view === 'materialsLots' ? 'mtList' : 'mtLoadMsg');
       if (b) b.innerHTML = '<div class="card empty">Could not load the materials: ' + esc(err.message) + ' <button class="btn secondary" id="mtRetry">Try again</button></div>';
       var r = document.getElementById('mtRetry');
       if (r) r.onclick = function () { b.innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(after); };
@@ -2239,35 +2245,65 @@
       '<button class="btn secondary" id="tilePlasticsMat" style="' + BIG_BTN + '">📦&nbsp; Materials</button>';
     document.getElementById('tilePlasticsMat').onclick = function () { openMtDept('Plastics', 'plasticsDept'); };
   }
-  // A department's materials screen (every sub-screen comes back here).
+  // A department's Materials: Load, Receive, and Maintenance (lots, materials, machines, load
+  // history). Load and Receive come back here; Maintenance's screens come back to Maintenance.
   function openMaterials() {
     if (mtDept === 'all') { openMaterialsHome(); return; }
     state.view = 'materials';
     nextViewToken();
     showTabbar(false); showBack(true); setDept(mtDept + ' Materials');
-    renderMaterials();
-    mtLoad(function () { if (state.view === 'materials') renderMtList(); });
-  }
-
-  function renderMaterials() {
     var view = document.getElementById('view');
     var pending = mtRcv && mtRcv.lines.length;
-    var chips = mtTypeChipsHtml();
     view.innerHTML =
-      '<button class="btn" id="mtLoadBtn" style="width:100%;padding:24px;font-size:20px;margin-bottom:8px">🏭&nbsp; Load Materials</button>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-bottom:8px">' +
-        '<button class="btn secondary" id="mtReceiveBtn" style="margin:0;padding:14px;font-size:16px">📦&nbsp; Receive Materials</button>' +
-        '<button class="btn secondary" id="mtAddBtn" style="margin:0;padding:14px;font-size:16px">➕&nbsp; Add Lots</button>' +
-        '<button class="btn secondary" id="mtListBtn" style="margin:0;padding:14px;font-size:16px">📋&nbsp; Material List</button>' +
-        '<button class="btn secondary" id="mtHistBtn" style="margin:0;padding:14px;font-size:16px">🕘&nbsp; Load History</button>' +
-      '</div>' +
+      '<button class="btn" id="mtLoadBtn" style="' + BIG_BTN + '">🏭&nbsp; Load Materials</button>' +
+      '<button class="btn" id="mtReceiveBtn" style="' + BIG_BTN + '">📦&nbsp; Receive Materials</button>' +
+      '<button class="btn secondary" id="mtMaintBtn" style="' + BIG_BTN + '">🛠️&nbsp; Materials Maintenance</button>' +
       (mtLd && mtLd.lines.length ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;color:var(--warn);font-weight:600">' +
         esc(L(mtLd.lines.length + ' scanned lot' + (mtLd.lines.length === 1 ? ' is' : 's are') + ' not loaded yet. Tap Load Materials to finish.',
           mtLd.lines.length + ' lote(s) escaneado(s) sin cargar. Toque Cargar materiales para terminar.')) + '</div>' : '') +
       (pending ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;color:var(--warn);font-weight:600">' +
         esc(L(mtRcv.lines.length + ' scanned lot' + (mtRcv.lines.length === 1 ? ' is' : 's are') + ' not saved yet. Tap Receive Materials to finish.',
           mtRcv.lines.length + ' lote(s) escaneado(s) sin guardar. Toque Recibir materiales para terminar.')) + '</div>' : '') +
-      '<div id="mtOnBox"></div><div id="mtLowBox"></div><div id="mtStartBox"></div>' +
+      '<div id="mtLowBox"></div>';
+    document.getElementById('mtLoadBtn').onclick = openMtLoad;
+    document.getElementById('mtReceiveBtn').onclick = openMtReceive;
+    document.getElementById('mtMaintBtn').onclick = openMtMaint;
+    if (mtData) renderMtLow(); else mtLoad(function () { if (state.view === 'materials') renderMtLow(); });   // the reorder warning; ready for the next screen
+  }
+  // Materials Maintenance: lots, materials, machines and the load history of this department.
+  function openMtMaint() {
+    state.view = 'materialsMaint';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept(mtDept + ' Maintenance');
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<button class="btn secondary" id="mtLotsBtn" style="' + BIG_BTN + '">🏷️&nbsp; Lots</button>' +
+      '<div class="sub" style="margin:-6px 0 12px;text-align:center">' + esc(L('Add, change or remove lots', 'Agregar, cambiar o quitar lotes')) + '</div>' +
+      '<button class="btn secondary" id="mtListBtn" style="' + BIG_BTN + '">📋&nbsp; Materials</button>' +
+      '<div class="sub" style="margin:-6px 0 12px;text-align:center">' + esc(L('The material list: add, change or remove materials', 'La lista de materiales')) + '</div>' +
+      '<button class="btn secondary" id="mtMachBtn" style="' + BIG_BTN + '">🏭&nbsp; Machines</button>' +
+      '<div class="sub" style="margin:-6px 0 12px;text-align:center">' + esc(L('Add, change or remove machines', 'Agregar, cambiar o quitar máquinas')) + '</div>' +
+      '<button class="btn secondary" id="mtHistBtn" style="' + BIG_BTN + '">🕘&nbsp; Load History</button>' +
+      '<div class="sub" style="margin:-6px 0 12px;text-align:center">' + esc(L('What was loaded on each machine, and when', 'Qué se cargó en cada máquina y cuándo')) + '</div>';
+    document.getElementById('mtLotsBtn').onclick = openMtLots;
+    document.getElementById('mtListBtn').onclick = openMtList;
+    document.getElementById('mtMachBtn').onclick = openMtMachines;
+    document.getElementById('mtHistBtn').onclick = function () { openMtHistory(); };
+  }
+  // Maintenance → Lots: add lots, find one and tap it to change or remove it.
+  function openMtLots() {
+    state.view = 'materialsLots';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept(mtDept + ' Lots');
+    renderMaterials();
+    mtLoad(function () { if (state.view === 'materialsLots') renderMtList(); });
+  }
+  function renderMaterials() {
+    var view = document.getElementById('view');
+    var chips = mtTypeChipsHtml();
+    view.innerHTML =
+      '<button class="btn" id="mtAddBtn" style="width:100%;padding:20px;font-size:19px;margin-bottom:8px">➕&nbsp; Add Lots</button>' +
+      '<div id="mtLowBox"></div><div id="mtStartBox"></div>' +
       '<div class="row" style="align-items:flex-end;gap:8px;margin-top:8px">' +
         '<div class="field" style="flex:1;margin:0"><label>Find a lot</label><input id="mtSearch" placeholder="lot #, product, supplier, receiver, PO, location…" autocomplete="off" value="' + esc(mtSearch) + '"></div>' +
         '<button class="btn secondary" id="mtReload" style="margin:0">↻</button>' +
@@ -2276,14 +2312,10 @@
       '<label class="sub" style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="mtShowUsed"' + (mtShowUsed ? ' checked' : '') + '> Show used-up lots too</label>' +
       '<div class="sub" id="mtCount" style="margin-bottom:8px"></div>' +
       '<div id="mtList"><div class="loading">Loading&hellip;</div></div>';
-    document.getElementById('mtReceiveBtn').onclick = openMtReceive;
-    document.getElementById('mtListBtn').onclick = openMtList;
-    document.getElementById('mtLoadBtn').onclick = openMtLoad;
     document.getElementById('mtAddBtn').onclick = openMtAdd;
-    document.getElementById('mtHistBtn').onclick = function () { openMtHistory(); };
     var s = document.getElementById('mtSearch');
     s.oninput = function () { mtSearch = s.value; renderMtList(); };
-    document.getElementById('mtReload').onclick = function () { mtData = null; document.getElementById('mtList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materials') renderMtList(); }); };
+    document.getElementById('mtReload').onclick = function () { mtData = null; document.getElementById('mtList').innerHTML = '<div class="loading">Loading&hellip;</div>'; mtLoad(function () { if (state.view === 'materialsLots') renderMtList(); }); };
     document.getElementById('mtShowUsed').onchange = function () { mtShowUsed = this.checked; renderMtList(); };
     bindMtTypeChips();
     if (mtData) renderMtList();
@@ -2306,25 +2338,6 @@
     });
   }
 
-  // The department's machines and the lots loaded on each now. Tap one to load it.
-  function renderMtOn() {
-    var box = document.getElementById('mtOnBox');
-    if (!box || mtDept === 'all') return;
-    var names = mtDeptMachines(mtDept);
-    if (!names.length) { box.innerHTML = ''; return; }
-    box.innerHTML = '<div class="card"><h3 style="margin:0 0 6px">' + esc(L('On the machines now', 'En las máquinas ahora')) + '</h3>' + names.map(function (n) {
-      var on = mtData.materials.filter(function (m) { return m.status === 'Loaded' && String(m.location).toLowerCase() === n.toLowerCase(); });
-      return '<div class="queue-item" data-mton="' + esc(n) + '" style="padding:8px 0;cursor:pointer;align-items:center"><div style="min-width:0;flex:1"><b>' + esc(n) + '</b>' +
-        '<div class="sub">' + (on.length ? esc(on.map(function (m) { return m.lot + ' · ' + m.product + (m.position ? ' (' + m.position + ')' : ''); }).join(', ')) : esc(L('Nothing loaded', 'Nada cargado'))) + '</div></div>' +
-        '<span class="sub">' + esc(L('Load ›', 'Cargar ›')) + '</span></div>';
-    }).join('') + '</div>';
-    Array.prototype.forEach.call(box.querySelectorAll('[data-mton]'), function (r) {
-      r.onclick = function () {
-        if (!mtLd || !mtLd.lines.length) { mtLd = mtNewLoad(); mtLd.machine = r.getAttribute('data-mton'); }
-        openMtLoad();
-      };
-    });
-  }
   // Materials at or under their reorder point, on top of the Materials screen.
   function renderMtLow() {
     var box = document.getElementById('mtLowBox');
@@ -2353,7 +2366,7 @@
           var go = function () {
             runMutation('removeStartLots', [lastOperator, newOpId()], function (res) {
               if (res && res.remaining) { go(); return; }
-              mtData = null; toast(L('START lots removed', 'Lotes START quitados')); openMaterials();
+              mtData = null; toast(L('START lots removed', 'Lotes START quitados')); openMtLots();
             }, function (err) { toast(L('Not removed: ', 'No se quitaron: ') + err.message); });
           };
           go();
@@ -2363,7 +2376,6 @@
   function renderMtList() {
     var box = document.getElementById('mtList'), cnt = document.getElementById('mtCount');
     if (!box || !mtData) return;
-    renderMtOn();
     renderMtLow();
     renderMtStart();
     var chipBox = document.getElementById('mtTypeChips');
@@ -2401,7 +2413,7 @@
         var m = mtById(b.getAttribute('data-mtusedup'));
         showConfirm(L('Lot ' + m.lot + ' used up?', '¿Se terminó el lote ' + m.lot + '?'), L(m.product + ' on ' + m.location + (m.position ? ' (' + m.position + ')' : '') + ' is empty.', m.product + ' en ' + m.location + (m.position ? ' (' + m.position + ')' : '') + ' está vacío.'), function () {
           runMutation('updateMaterial', [m.id, { 'Status': 'Used' }, lastOperator, newOpId()], function () {
-            mtData = null; toast(L('Lot ' + m.lot + ' marked used up', 'Lote ' + m.lot + ' marcado terminado')); openMaterials();
+            mtData = null; toast(L('Lot ' + m.lot + ' marked used up', 'Lote ' + m.lot + ' marcado terminado')); openMtLots();
           }, function (err) { toast(L('Not saved: ', 'No se guardó: ') + err.message); });
         }, L('Used up', 'Se terminó'));
       };
@@ -2886,6 +2898,7 @@
     var box = document.getElementById('mlPosBox'), d = mtLd;
     if (!box) return;
     var m = mtMachine(d.machine), pos = (m && m.positions) || [];
+    renderMlOn();
     if (!pos.length) { box.innerHTML = ''; d.position = ''; return; }
     if (d.position && pos.indexOf(d.position) === -1) d.position = '';
     box.innerHTML = '<label class="sub" style="display:block;margin-bottom:4px">' + esc(L('Which barrel', 'Qué barril')) + '</label><div class="tabbar">' +
@@ -2897,6 +2910,14 @@
         Array.prototype.forEach.call(box.querySelectorAll('[data-mlpos]'), function (x) { x.classList.toggle('active', x.getAttribute('data-mlpos') === d.position); });
       };
     });
+  }
+  // What's loaded on the picked machine right now.
+  function renderMlOn() {
+    var box = document.getElementById('mlOnNow'), n = String((mtLd && mtLd.machine) || '').trim().toLowerCase();
+    if (!box) return;
+    var on = n ? ((mtData && mtData.materials) || []).filter(function (m) { return m.status === 'Loaded' && String(m.location).toLowerCase() === n; }) : [];
+    box.innerHTML = n ? '<div class="sub" style="margin-bottom:8px">' + esc(L('On it now: ', 'Tiene ahora: ')) + (on.length ? '<b>' + esc(on.map(function (m) { return m.lot + ' · ' + m.product + (m.position ? ' (' + m.position + ')' : ''); }).join(', ')) + '</b>'
+      : esc(L('nothing loaded', 'nada cargado'))) + '</div>' : '';
   }
   // In-stock containers of a lot, by material: [{product, type, container, left}].
   function mtStockFor(lot) {
@@ -2931,7 +2952,7 @@
           '<div class="field"><label>Machine</label><input id="mlMachine" list="mlMachineList" autocomplete="off" placeholder="type it, or pick one used before" value="' + esc(d.machine) + '"><datalist id="mlMachineList">' + mtOptions((mtData && mtData.machines) || []) + '</datalist></div>' +
           operatorFieldHtml('mlOperator', 'Loaded by', d.operator) +
         '</div>' +
-        '<div id="mlPosBox" style="margin-bottom:8px"></div>' +
+        '<div id="mlOnNow"></div><div id="mlPosBox" style="margin-bottom:8px"></div>' +
         '<div class="field"><label>Notes (optional)</label><input id="mlNotes" autocomplete="off" value="' + esc(d.notes) + '"></div>' +
       '</div>' +
       '<div class="card">' +
@@ -3072,6 +3093,102 @@
       }, L('Load', 'Cargar'));
   }
 
+  // ---- Maintenance → Machines: this department's machines ----
+  // Add one, tap one to change it (name, barrels / spots, materials it runs, department, active) or
+  // remove it. Renaming moves the lots on it; a machine with lots loaded can't be removed.
+  var mtMachEdit = null;   // null = the list; '' = adding; a name = editing that machine
+  function openMtMachines() {
+    state.view = 'materialsMachines';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept(mtDept + ' Machines');
+    mtMachEdit = null;
+    if (!mtData) { document.getElementById('view').innerHTML = '<div id="mtLoadMsg"><div class="loading">Loading&hellip;</div></div>'; mtLoad(function () { if (state.view === 'materialsMachines') renderMtMachines(); }); return; }
+    renderMtMachines();
+  }
+  // The department's machines: every one on the Machines list (active first), plus any only known
+  // from old loads (not on the list yet).
+  function mtMachRows() {
+    var info = ((mtData && mtData.machineInfo) || []).filter(function (m) { return m.department === mtDept; });
+    var known = {};
+    ((mtData && mtData.machineInfo) || []).forEach(function (m) { known[m.name.toLowerCase()] = 1; });
+    var extra = mtDeptMachines(mtDept).filter(function (n) { return !known[n.toLowerCase()]; }).map(function (n) { return { name: n, positions: [], materials: [], active: true, department: mtDept, notListed: true }; });
+    return info.concat(extra).sort(function (a, b) { return (b.active ? 1 : 0) - (a.active ? 1 : 0) || a.name.localeCompare(b.name, undefined, { numeric: true }); });
+  }
+  function mtLoadedOn(name) {
+    var n = String(name).toLowerCase();
+    return ((mtData && mtData.materials) || []).filter(function (m) { return m.status === 'Loaded' && String(m.location).toLowerCase() === n; });
+  }
+  function renderMtMachines() {
+    var view = document.getElementById('view');
+    if (mtMachEdit !== null) { renderMtMachineForm(); return; }
+    var rows = mtMachRows();
+    view.innerHTML = '<button class="btn" id="mmAdd" style="width:100%;padding:20px;font-size:19px;margin-bottom:10px">➕&nbsp; ' + esc(L('Add a machine', 'Agregar una máquina')) + '</button>' +
+      (rows.length ? rows.map(function (m) {
+        var on = mtLoadedOn(m.name);
+        return '<div class="card" data-mmrow="' + esc(m.name) + '" style="cursor:pointer;' + (m.active ? '' : 'opacity:.6') + '">' +
+          '<div style="display:flex;justify-content:space-between;gap:8px"><b style="font-size:18px">' + esc(m.name) + '</b><span class="sub">' + esc(L('Change ›', 'Cambiar ›')) + '</span></div>' +
+          (m.notListed ? '<div class="sub" style="color:var(--warn)">' + esc(L('Not on the machine list yet — tap to add it', 'Todavía no está en la lista — toque para agregarla')) + '</div>' : '') +
+          (m.active ? '' : '<div class="sub"><b>' + esc(L('Not active', 'No activa')) + '</b></div>') +
+          (m.positions.length ? '<div class="sub">' + esc(L('Spots: ', 'Lugares: ') + m.positions.join(', ')) + '</div>' : '') +
+          (m.materials.length ? '<div class="sub">' + esc(L('Runs: ', 'Usa: ') + m.materials.join(', ')) + '</div>' : '') +
+          '<div class="sub">' + esc(L('Loaded now: ', 'Cargado ahora: ') + (on.length ? on.map(function (x) { return x.lot + ' · ' + x.product; }).join(', ') : L('nothing', 'nada'))) + '</div></div>';
+      }).join('') : '<div class="card empty">' + esc(L('No ' + mtDept + ' machines yet. Tap Add a machine.', 'Todavía no hay máquinas. Toque Agregar una máquina.')) + '</div>');
+    document.getElementById('mmAdd').onclick = function () { mtMachEdit = ''; renderMtMachines(); };
+    Array.prototype.forEach.call(view.querySelectorAll('[data-mmrow]'), function (c) {
+      c.onclick = function () { mtMachEdit = c.getAttribute('data-mmrow'); renderMtMachines(); };
+    });
+  }
+  function renderMtMachineForm() {
+    var view = document.getElementById('view');
+    var m = mtMachEdit ? mtMachRows().filter(function (x) { return x.name === mtMachEdit; })[0] : null;
+    var listed = m && !m.notListed;
+    var v = m || { name: '', positions: [], materials: [], active: true, department: mtDept };
+    var on = m ? mtLoadedOn(m.name) : [];
+    var mats = mtItems().filter(function (i) { return i.active && i.department === mtDept; }).map(function (i) { return i.name; });
+    view.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0">' + esc(listed ? L('Change ' + v.name, 'Cambiar ' + v.name) : L('Add a machine', 'Agregar una máquina')) + '</h3>' +
+      '<div class="field"><label>' + esc(L('Machine name', 'Nombre de la máquina')) + '</label><input id="mmName" autocomplete="off" placeholder="' + esc(L('e.g. Press 22', 'p. ej. Prensa 22')) + '" value="' + esc(v.name) + '" style="font-size:18px"></div>' +
+      '<div class="field"><label>' + esc(L('Spots on it (optional, comma between)', 'Lugares (opcional, separados por coma)')) + '</label><input id="mmPos" autocomplete="off" placeholder="' + esc(L('e.g. Barrel 1, Barrel 2', 'p. ej. Barril 1, Barril 2')) + '" value="' + esc(v.positions.join(', ')) + '"></div>' +
+      '<div class="field"><label>' + esc(L('Materials it runs (optional, comma between)', 'Materiales que usa (opcional)')) + '</label><input id="mmRuns" list="mmRunsL" autocomplete="off" value="' + esc(v.materials.join(', ')) + '"><datalist id="mmRunsL">' + mtOptions(mats) + '</datalist>' +
+        '<div class="sub">' + esc(L('Loading anything else gives a warning (not a block).', 'Cargar otra cosa da un aviso (no lo impide).')) + '</div></div>' +
+      '<div class="field"><label>' + esc(L('Department', 'Departamento')) + '</label><select id="mmDept">' + MT_DEPTS.map(function (d) { return '<option value="' + d + '"' + (d === v.department ? ' selected' : '') + '>' + esc(mtDeptName(d)) + '</option>'; }).join('') + '</select></div>' +
+      '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600"><input type="checkbox" id="mmActive"' + (v.active ? ' checked' : '') + ' style="width:20px;height:20px"> ' +
+        esc(L('Active (shows on Load Materials)', 'Activa (aparece en Cargar materiales)')) + '</label>' +
+      (listed && v.name ? '<div class="sub" style="margin-bottom:10px">' + esc(L('Renaming it moves the lots on it to the new name.', 'Al cambiar el nombre, los lotes en ella pasan al nombre nuevo.')) + '</div>' : '') +
+      '<div class="row" style="gap:8px"><button class="btn secondary" id="mmCancel">' + esc(L('Cancel', 'Cancelar')) + '</button>' +
+      (listed ? '<button class="btn danger" id="mmRemove">' + esc(L('Remove', 'Quitar')) + '</button>' : '') +
+      '<button class="btn success" id="mmSave" style="flex:1">' + esc(L('Save', 'Guardar')) + '</button></div></div>';
+    var back = function (msg) { if (msg) toast(msg); mtMachEdit = null; renderMtMachines(); };
+    document.getElementById('mmCancel').onclick = function () { back(); };
+    var save = document.getElementById('mmSave');
+    save.onclick = function () {
+      var name = document.getElementById('mmName').value.trim();
+      if (!name) { toast(L('Enter the machine name', 'Escriba el nombre de la máquina')); return; }
+      var mo = { name: name, oldName: listed ? v.name : '', department: document.getElementById('mmDept').value, positions: document.getElementById('mmPos').value,
+        materials: document.getElementById('mmRuns').value, active: document.getElementById('mmActive').checked };
+      save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
+      runMutation('saveMachine', [mo, lastOperator, newOpId()], function (res) {
+        mtData = null;
+        var msg = res && res.duplicate ? L(name + ' is already on the list', name + ' ya está en la lista') : L(name + ' saved', name + ' guardada') + (res && res.movedLots ? L(' (' + res.movedLots + ' lot(s) moved)', ' (' + res.movedLots + ' lote(s) movidos)') : '');
+        mtLoad(function () { if (state.view === 'materialsMachines') back(msg); });
+      }, function (err) { save.disabled = false; save.textContent = L('Save', 'Guardar'); showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' }); });
+    };
+    var rm = document.getElementById('mmRemove');
+    if (rm) rm.onclick = function () {
+      if (on.length) {
+        showModal({ title: L('Can\'t remove ' + v.name, 'No se puede quitar ' + v.name), message: L(on.length + ' lot(s) are loaded on it. Mark them used up first, or untick Active so it stops showing.',
+          on.length + ' lote(s) están cargados en ella. Márquelos terminados primero, o quite Activa.'), confirmText: 'OK' });
+        return;
+      }
+      showConfirm(L('Remove ' + v.name + '?', '¿Quitar ' + v.name + '?'), L('It comes off the machine list. Its load history is kept.', 'Sale de la lista de máquinas. Su historial de cargas se queda.'), function () {
+        runMutation('deleteMachine', [v.name, lastOperator, newOpId()], function () {
+          mtData = null;
+          mtLoad(function () { if (state.view === 'materialsMachines') back(L(v.name + ' removed', v.name + ' quitada')); });
+        }, function (err) { showModal({ title: L('Not removed', 'No se quitó'), message: err.message, confirmText: 'OK' }); });
+      }, L('Remove', 'Quitar'), 'danger');
+    };
+  }
+
   // ---- Load History: what went onto each machine on a day, and when ----
   function openMtHistory() {
     state.view = 'materialsLoads';
@@ -3090,8 +3207,10 @@
     dEl.onchange = function () { if (dEl.value) { mtHistDate = dEl.value; mtHistLoad(); } };
     mEl.onchange = function () { mtHistMachine = mEl.value; mtHistLoad(); };
     document.getElementById('mhReload').onclick = mtHistLoad;
-    mtHistLoad();
+    if (mtData) mtHistLoad(); else mtLoad(function () { if (state.view === 'materialsLoads') mtHistLoad(); });   // needs the machines' departments
   }
+  // Which department a machine is in (from the Machines list; not on it: Litho if named Litho, else Metals).
+  function mtMachineDept(name) { var m = mtMachine(name); return m ? m.department : /litho/i.test(name || '') ? 'Litho' : 'Metals'; }
   function mtHistLoad() {
     var box = document.getElementById('mhList'), tok = state.view;
     if (!box) return;
@@ -3099,6 +3218,10 @@
     google.script.run.withSuccessHandler(function (res) {
       if (state.view !== tok || !document.getElementById('mhList')) return;
       res = res || { loads: [], machines: [] };
+      if (mtDept !== 'all') {   // in a department: just its machines
+        res = Object.assign({}, res, { machines: (res.machines || []).filter(function (m) { return mtMachineDept(m) === mtDept; }),
+          loads: (res.loads || []).filter(function (l) { return mtMachineDept(l.machine) === mtDept; }) });
+      }
       var mEl = document.getElementById('mhMachine');
       mEl.innerHTML = '<option value="">' + esc(L('All machines', 'Todas las máquinas')) + '</option>' + (res.machines || []).map(function (m) {
         return '<option value="' + esc(m) + '"' + (m === mtHistMachine ? ' selected' : '') + '>' + esc(m) + '</option>';
@@ -3489,23 +3612,23 @@
           '<button class="btn success" id="mtEdSave" style="flex:1">Save</button>' +
         '</div>' +
       '</div>';
-    document.getElementById('mtEdCancel').onclick = openMaterials;
+    document.getElementById('mtEdCancel').onclick = openMtLots;
     document.getElementById('mtEdSave').onclick = function () {
       var out = {}, n = 0;
       MT_EDIT_FIELDS.forEach(function (f, i) {
         var el = document.getElementById('mtEd' + i), v = String(el.value == null ? '' : el.value).trim();
         if (v !== (m[f.key] != null ? String(m[f.key]) : '')) { out[f.col] = v; n++; }
       });
-      if (!n) { openMaterials(); return; }
+      if (!n) { openMtLots(); return; }
       var btn = this; btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
       runMutation('updateMaterial', [m.id, out, lastOperator, newOpId()], function () {
-        mtData = null; toast(L('Saved lot ' + m.lot, 'Lote ' + m.lot + ' guardado')); openMaterials();
+        mtData = null; toast(L('Saved lot ' + m.lot, 'Lote ' + m.lot + ' guardado')); openMtLots();
       }, function (err) { btn.disabled = false; btn.textContent = L('Save', 'Guardar'); toast(L('Not saved: ', 'No se guardó: ') + err.message); });
     };
     document.getElementById('mtEdDelete').onclick = function () {
       showConfirm(L('Delete lot ' + m.lot + '?', '¿Borrar el lote ' + m.lot + '?'), L('Only for a lot saved by mistake (a wrong scan). This can\'t be undone.', 'Solo para un lote guardado por error (un escaneo equivocado). No se puede deshacer.'), function () {
         runMutation('deleteMaterial', [m.id, lastOperator, newOpId()], function () {
-          mtData = null; toast(L('Deleted lot ' + m.lot, 'Lote ' + m.lot + ' borrado')); openMaterials();
+          mtData = null; toast(L('Deleted lot ' + m.lot, 'Lote ' + m.lot + ' borrado')); openMtLots();
         }, function (err) { toast(L('Not deleted: ', 'No se borró: ') + err.message); });
       }, L('Delete', 'Borrar'), 'danger');
     };
