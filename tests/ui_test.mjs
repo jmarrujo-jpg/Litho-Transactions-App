@@ -2207,6 +2207,19 @@ const base = {
   await page.fill('#mmName', 'Injection 2'); await page.fill('#mmPos', 'Hopper'); await page.click('#mmSave'); await page.waitForTimeout(150);
   const am = calls.filter((c) => c.fn === 'saveMachine').pop();
   ok('add a machine', am && am.args[0].name === 'Injection 2' && am.args[0].oldName === '' && am.args[0].department === 'Plastics' && am.args[0].positions === 'Hopper' && am.args[0].active === true, am && am.args);
+  // Changing the department warns first
+  await page.waitForSelector('#mmAdd'); await page.click('#mmAdd'); await page.waitForSelector('#mmName');
+  await page.fill('#mmName', 'Grinder'); await page.selectOption('#mmDept', 'Metals');
+  ok('picking another department says it moves it out', /moves it out of Plastics/.test(await page.textContent('#mmDeptWarn')));
+  const before = calls.filter((c) => c.fn === 'saveMachine').length;
+  await page.click('#mmSave'); await page.waitForSelector('#modalOk');
+  ok('saving asks first, saying what changes', /Move Grinder to Metals/.test(await page.textContent('#modalRoot')) && /no longer show in Plastics/.test(await page.textContent('#modalRoot'))
+    && calls.filter((c) => c.fn === 'saveMachine').length === before);
+  await page.click('#modalCancel'); await page.waitForTimeout(60);
+  ok('Cancel: nothing saved, still on the form', calls.filter((c) => c.fn === 'saveMachine').length === before && !!(await page.$('#mmSave')));
+  await page.click('#mmSave'); await page.waitForSelector('#modalOk'); await page.click('#modalOk'); await page.waitForTimeout(150);
+  const mv = calls.filter((c) => c.fn === 'saveMachine').pop();
+  ok('Move it: saved in Metals', mv && mv.args[0].name === 'Grinder' && mv.args[0].department === 'Metals', mv && mv.args);
   await page.waitForSelector('[data-mmrow="Injection 1"]'); await page.click('[data-mmrow="Injection 1"]'); await page.waitForSelector('#mmRemove');
   await page.click('#mmRemove'); await page.waitForSelector('#modalOk');
   ok('a machine with lots loaded can\'t be removed (says why)', /1 lot\(s\) are loaded on it/.test(await page.textContent('#modalRoot')) && !calls.some((c) => c.fn === 'deleteMachine'));

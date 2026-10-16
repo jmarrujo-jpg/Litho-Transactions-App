@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.101.0</span>
+      <span class="version" id="appVersion">v1.101.1</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -3183,6 +3183,7 @@
   // Add one, tap one to change it (name, barrels / spots, materials it runs, department, active) or
   // remove it. Renaming moves the lots on it; a machine with lots loaded can't be removed.
   var mtMachEdit = null;   // null = the list; '' = adding; a name = editing that machine
+  var mtMachMoveOk = false; // the "move it to another department?" warning was answered Yes
   function openMtMachines() {
     state.view = 'materialsMachines';
     nextViewToken();
@@ -3237,7 +3238,8 @@
       '<div class="field"><label>' + esc(L('Spots on it (optional, comma between)', 'Lugares (opcional, separados por coma)')) + '</label><input id="mmPos" autocomplete="off" placeholder="' + esc(L('e.g. Barrel 1, Barrel 2', 'p. ej. Barril 1, Barril 2')) + '" value="' + esc(v.positions.join(', ')) + '"></div>' +
       '<div class="field"><label>' + esc(L('Materials it runs (optional, comma between)', 'Materiales que usa (opcional)')) + '</label><input id="mmRuns" list="mmRunsL" autocomplete="off" value="' + esc(v.materials.join(', ')) + '"><datalist id="mmRunsL">' + mtOptions(mats) + '</datalist>' +
         '<div class="sub">' + esc(L('Loading anything else gives a warning (not a block).', 'Cargar otra cosa da un aviso (no lo impide).')) + '</div></div>' +
-      '<div class="field"><label>' + esc(L('Department', 'Departamento')) + '</label><select id="mmDept">' + MT_DEPTS.map(function (d) { return '<option value="' + d + '"' + (d === v.department ? ' selected' : '') + '>' + esc(mtDeptName(d)) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field"><label>' + esc(L('Department', 'Departamento')) + '</label><select id="mmDept">' + MT_DEPTS.map(function (d) { return '<option value="' + d + '"' + (d === v.department ? ' selected' : '') + '>' + esc(mtDeptName(d)) + '</option>'; }).join('') + '</select>' +
+        '<div class="sub" id="mmDeptWarn" style="color:var(--warn);font-weight:600"></div></div>' +
       '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600"><input type="checkbox" id="mmActive"' + (v.active ? ' checked' : '') + ' style="width:20px;height:20px"> ' +
         esc(L('Active (shows on Load Materials)', 'Activa (aparece en Cargar materiales)')) + '</label>' +
       (listed && v.name ? '<div class="sub" style="margin-bottom:10px">' + esc(L('Renaming it moves the lots on it to the new name.', 'Al cambiar el nombre, los lotes en ella pasan al nombre nuevo.')) + '</div>' : '') +
@@ -3245,6 +3247,10 @@
       (listed ? '<button class="btn danger" id="mmRemove">' + esc(L('Remove', 'Quitar')) + '</button>' : '') +
       '<button class="btn success" id="mmSave" style="flex:1">' + esc(L('Save', 'Guardar')) + '</button></div></div>';
     var back = function (msg) { if (msg) toast(msg); mtMachEdit = null; renderMtMachines(); };
+    var dSel = document.getElementById('mmDept');
+    dSel.onchange = function () {
+      document.getElementById('mmDeptWarn').textContent = dSel.value !== mtDept ? L('⚠ This moves it out of ' + mtDeptName(mtDept) + '.', '⚠ Esto la saca de ' + mtDeptName(mtDept) + '.') : '';
+    };
     document.getElementById('mmCancel').onclick = function () { back(); };
     var save = document.getElementById('mmSave');
     save.onclick = function () {
@@ -3252,6 +3258,16 @@
       if (!name) { toast(L('Enter the machine name', 'Escriba el nombre de la máquina')); return; }
       var mo = { name: name, oldName: listed ? v.name : '', department: document.getElementById('mmDept').value, positions: document.getElementById('mmPos').value,
         materials: document.getElementById('mmRuns').value, active: document.getElementById('mmActive').checked };
+      // Moving it to another department takes it out of this one — say so first.
+      if (mo.department !== mtDept && !mtMachMoveOk) {
+        showConfirm(L('Move ' + name + ' to ' + mtDeptName(mo.department) + '?', '¿Pasar ' + name + ' a ' + mtDeptName(mo.department) + '?'),
+          L(name + ' will no longer show in ' + mtDeptName(mtDept) + ': not on its Load Materials, Machines or Load History.' +
+            (on.length ? ' The ' + on.length + ' lot(s) loaded on it stay ' + mtDeptName(mtDept) + ' lots.' : '') + '\nOnly do this if the machine really belongs to ' + mtDeptName(mo.department) + '.',
+            name + ' ya no aparecerá en ' + mtDeptName(mtDept) + ': ni en Cargar materiales, Máquinas ni el Historial de cargas.' +
+            (on.length ? ' Los ' + on.length + ' lote(s) cargados en ella siguen siendo de ' + mtDeptName(mtDept) + '.' : '') + '\nHágalo solo si la máquina de verdad es de ' + mtDeptName(mo.department) + '.'),
+          function () { mtMachMoveOk = true; save.onclick(); mtMachMoveOk = false; }, L('Move it', 'Pasarla'), 'warn');
+        return;
+      }
       save.disabled = true; save.textContent = L('Saving…', 'Guardando…');
       runMutation('saveMachine', [mo, lastOperator, newOpId()], function (res) {
         mtData = null;
@@ -3643,6 +3659,7 @@
       if (!out.name) { toast(L('Enter the material name', 'Escriba el nombre del material')); document.getElementById('mtItName').focus(); return; }
       if (!out.type) { toast(L('Pick the type', 'Elija el tipo')); (typeSel.value === '__new' ? newType : typeSel).focus(); return; }
       var rename = saved && n && (out.name !== it.name || out.type !== it.type);
+      var was = it ? it.department : (mtDept !== 'all' ? mtDept : out.department);
       var go = function () {
         var btn = document.getElementById('mtItSave');
         btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…');
@@ -3659,10 +3676,19 @@
           back();
         }, function (err) { btn.disabled = false; btn.textContent = L('Save', 'Guardar'); toast(L('Not saved: ', 'No se guardó: ') + err.message); });
       };
-      if (rename) showConfirm(L('Rename ' + it.name + '?', '¿Cambiar el nombre de ' + it.name + '?'),
-        L('The ' + n + ' lot' + (n === 1 ? '' : 's') + ' received as ' + it.name + ' will be renamed to ' + out.name + ' too.',
-          'Los ' + n + ' lote(s) recibidos como ' + it.name + ' también pasarán a llamarse ' + out.name + '.'), go, L('Rename', 'Cambiar'));
-      else go();
+      var renameThenGo = function () {
+        if (rename) showConfirm(L('Rename ' + it.name + '?', '¿Cambiar el nombre de ' + it.name + '?'),
+          L('The ' + n + ' lot' + (n === 1 ? '' : 's') + ' received as ' + it.name + ' will be renamed to ' + out.name + ' too.',
+            'Los ' + n + ' lote(s) recibidos como ' + it.name + ' también pasarán a llamarse ' + out.name + '.'), go, L('Rename', 'Cambiar'));
+        else go();
+      };
+      // Moving it to another department takes it out of this one — say so first.
+      if (out.department !== was) showConfirm(L('Move ' + out.name + ' to ' + mtDeptName(out.department) + '?', '¿Pasar ' + out.name + ' a ' + mtDeptName(out.department) + '?'),
+        L(out.name + ' will no longer show in ' + mtDeptName(was) + ': not when receiving, adding lots or on its Materials list.' + (n ? ' The ' + n + ' lot(s) already received stay ' + mtDeptName(was) + ' lots.' : '') +
+          '\nOnly do this if the material really belongs to ' + mtDeptName(out.department) + '.',
+          out.name + ' ya no aparecerá en ' + mtDeptName(was) + ': ni al recibir, ni al agregar lotes, ni en su lista de materiales.' + (n ? ' Los ' + n + ' lote(s) ya recibidos siguen siendo de ' + mtDeptName(was) + '.' : '') +
+          '\nHágalo solo si el material de verdad es de ' + mtDeptName(out.department) + '.'), renameThenGo, L('Move it', 'Pasarlo'), 'warn');
+      else renameThenGo();
     };
     var del = document.getElementById('mtItDelete');
     if (del) del.onclick = function () {
