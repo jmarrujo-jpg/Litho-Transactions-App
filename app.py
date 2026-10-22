@@ -17,6 +17,11 @@ Alignment knobs:
   VERTICAL_NUDGE : n/216". 36=one line, 9=quarter. Negative=up. Default -9.
   COL_OFFSET     : whole-ticket left(-)/right(+) in chars.
   COL_L/M/R      : value column starts. R1..R5 : the five field rows.
+
+Data Matrix barcode of the ticket number prints in the top band between the
+QTY and the big ticket number. Turn off with DATAMATRIX_ON = False; move it
+with DATAMATRIX_CENTER. If the barcode or big numbers print garbled, set
+GRAPHIC_DPI = 60.
 """
 
 # ===========================================================================
@@ -89,13 +94,25 @@ BIG_TICKET_EDGE = EDGE_R   # big number right-aligns to the section-R line
 #   "block"   = block-character number (guaranteed but blocky).
 BIG_STYLE = "graphic"
 BIG_GRAPHIC_ROW = 2      # text-row where the graphic number starts (rows 2-4ish)
-BIG_GRAPHIC_GAP = 3      # dot columns between digits
+BIG_GRAPHIC_RAISE = 18   # 1/216" to lift the top graphics above that row. 18=half line.
+BIG_GRAPHIC_GAP = 3      # dot columns between digits (at 60 dpi)
 BIG_GRAPHIC_PASSES = 2   # overstrike passes: 1=normal, 2=darker, 3=boldest
+# Graphics density: 120 = ESC L double density (square barcode cells),
+#                    60 = ESC K single density (fallback if 120 misprints).
+GRAPHIC_DPI = 120
 
 # QTY (sheet count) graphic number — same row/style as the ticket number,
-# right-aligned to this column line (5.6 on the grid = column 56). Blank for coils.
+# right-aligned to this column line (5.2 on the grid = column 52). Blank for coils.
 QTY_FROM = "qty"
-QTY_GRAPHIC_EDGE = 56
+QTY_GRAPHIC_EDGE = 52
+
+# -------- DATA MATRIX BARCODE (ticket number) ----------------------------
+# Printed in the top band between the QTY and the big ticket number, top
+# lined up with the numbers. Needs a 2D scanner (or phone) to read.
+DATAMATRIX_ON     = True
+DATAMATRIX_CENTER = 58      # column the barcode is centered on (grid 5.8)
+DATAMATRIX_CELL   = 3       # cell height in pins (1/72"). 3 = 0.042" cells,
+                            # 14x14 cells (~0.58" square) for a NNNNNN-NNN ticket.
 
 BIG_FONT_24 = {
     '0': "003fe000fff801fffc03c01e03000603000603000603e03e01fffc00fff8003fe0",
@@ -130,10 +147,11 @@ BIG_FONT = {
  ' ':['    ','    ','    ','    '],
 }
 
-ESC_K = b"\x1bK"   # single-density 8-dot bit-image graphics
+ESC_K = b"\x1bK"   # single-density (60 dpi) 8-dot bit-image graphics
+ESC_L = b"\x1bL"   # double-density (120 dpi) 8-dot bit-image graphics
 
 def _glyph_columns(text):
-    """Return list of (band0,band1,band2) dot-column triples for `text`."""
+    """Return list of (band0,band1,band2) dot-column triples for `text` (60 dpi)."""
     cols = []
     for ch in str(text):
         hexs = BIG_FONT_24.get(ch)
@@ -150,13 +168,116 @@ def _glyph_columns(text):
     return cols
 
 
-def big_graphic_bytes(items):
-    """Render one or more numbers on the SAME 24-dot-tall graphic line.
+# ---------------------------------------------------------------------------
+# Data Matrix (ECC200) encoder — ASCII mode, square 10x10..26x26 symbols.
+# Self-contained so nothing extra has to be installed on the print PC.
+# ---------------------------------------------------------------------------
+_DM_SIZES = [(10,3,5),(12,5,7),(14,8,10),(16,12,12),(18,18,14),(20,22,18),(22,30,20),(24,36,24),(26,44,28)]
+
+def _dm_ascii(text):
+    out, i, s = [], 0, text.encode("latin-1", "replace")
+    while i < len(s):
+        if i + 1 < len(s) and 48 <= s[i] <= 57 and 48 <= s[i+1] <= 57:
+            out.append(130 + (s[i]-48)*10 + (s[i+1]-48)); i += 2
+        elif s[i] < 128:
+            out.append(s[i] + 1); i += 1
+        else:
+            out += [235, s[i] - 127]; i += 1
+    return out
+
+def _dm_rs(data, n):
+    exp, log = [0]*512, [0]*256
+    x = 1
+    for i in range(255):
+        exp[i] = x; log[x] = i
+        x <<= 1
+        if x & 0x100: x ^= 0x12D
+    for i in range(255, 512): exp[i] = exp[i-255]
+    mul = lambda a, b: exp[log[a]+log[b]] if a and b else 0
+    g = [1]
+    for i in range(1, n+1):
+        g = [a ^ mul(b, exp[i]) for a, b in zip(g+[0], [0]+g)]
+    rem = [0]*n
+    for d in data:
+        f = d ^ rem[0]
+        rem = rem[1:] + [0]
+        for j in range(n):
+            rem[j] ^= mul(g[j+1], f)
+    return rem
+
+def datamatrix(text):
+    """Return a square list-of-lists of 0/1 modules (1 = dark), finder included."""
+    cw = _dm_ascii(text)
+    for size, nd, ne in _DM_SIZES:
+        if len(cw) <= nd: break
+    else:
+        raise ValueError("text too long for Data Matrix")
+    if len(cw) < nd:
+        cw.append(129)
+        while len(cw) < nd:
+            r = ((149 * (len(cw)+1)) % 253) + 1
+            v = 129 + r
+            cw.append(v - 254 if v > 254 else v)
+    cw = cw + _dm_rs(cw, ne)
+    n = size - 2
+    m = [[None]*n for _ in range(n)]
+    def mod(r, c, ch, bit):
+        if r < 0: r += n; c += 4 - ((n + 4) % 8)
+        if c < 0: c += n; r += 4 - ((n + 4) % 8)
+        m[r][c] = (cw[ch] >> (7 - bit)) & 1
+    def utah(r, c, ch):
+        for b, (dr, dc) in enumerate([(-2,-2),(-2,-1),(-1,-2),(-1,-1),(-1,0),(0,-2),(0,-1),(0,0)]):
+            mod(r+dr, c+dc, ch, b)
+    def corner(ch, cells):
+        for b, (r, c) in enumerate(cells):
+            m[r][c] = (cw[ch] >> (7 - b)) & 1
+    ch, r, c = 0, 4, 0
+    while True:
+        if r == n and c == 0:
+            corner(ch, [(n-1,0),(n-1,1),(n-1,2),(0,n-2),(0,n-1),(1,n-1),(2,n-1),(3,n-1)]); ch += 1
+        elif r == n-2 and c == 0 and n % 4:
+            corner(ch, [(n-3,0),(n-2,0),(n-1,0),(0,n-4),(0,n-3),(0,n-2),(0,n-1),(1,n-1)]); ch += 1
+        elif r == n-2 and c == 0 and n % 8 == 4:
+            corner(ch, [(n-3,0),(n-2,0),(n-1,0),(0,n-2),(0,n-1),(1,n-1),(2,n-1),(3,n-1)]); ch += 1
+        elif r == n+4 and c == 2 and n % 8 == 0:
+            corner(ch, [(n-1,0),(n-1,n-1),(0,n-3),(0,n-2),(0,n-1),(1,n-3),(1,n-2),(1,n-1)]); ch += 1
+        while True:
+            if r < n and c >= 0 and m[r][c] is None: utah(r, c, ch); ch += 1
+            r -= 2; c += 2
+            if not (r >= 0 and c < n): break
+        r += 1; c += 3
+        while True:
+            if r >= 0 and c < n and m[r][c] is None: utah(r, c, ch); ch += 1
+            r += 2; c -= 2
+            if not (r < n and c >= 0): break
+        r += 3; c += 1
+        if not (r < n or c < n): break
+    if m[n-1][n-1] is None:
+        m[n-1][n-1] = m[n-2][n-2] = 1
+        m[n-1][n-2] = m[n-2][n-1] = 0
+    out = [[0]*size for _ in range(size)]
+    for i in range(size):
+        out[size-1][i] = 1                 # bottom solid
+        out[i][0] = 1                      # left solid
+        out[0][i] = 1 if i % 2 == 0 else 0 # top alternating
+        out[i][size-1] = 1 if (size-1-i) % 2 == 0 else 0  # right alternating (dark at bottom)
+    for r in range(n):
+        for c in range(n):
+            out[r+1][c+1] = m[r][c] or 0
+    return out
+
+
+def big_graphic_bytes(items, barcode=""):
+    """Render the top band as one bit-image graphic: one or more big numbers
+    plus an optional Data Matrix barcode of `barcode`.
     `items` = list of (text, edge_col) pairs; each number is right-aligned so
-    its last dot lands on edge_col. Returns (bytes, used_rows)."""
-    # Build a single wide dot canvas spanning to the right-most edge needed.
-    placed = []   # (start_dot, cols)
-    max_dot = 0
+    its last dot lands on edge_col. The barcode is centered on
+    DATAMATRIX_CENTER with its top lined up with the numbers.
+    Returns (bytes, n_bands) — each band is 8 pins (24/216") tall."""
+    scale = 2 if GRAPHIC_DPI == 120 else 1        # number fonts are drawn at 60 dpi
+    dots = {}                                      # (pin_row, dot_col) -> on
+
+    placed = []                                    # [start_dot, cols, edge_dot]
     for text, edge_col in items:
         text = str(text).strip()
         if not text:
@@ -164,36 +285,68 @@ def big_graphic_bytes(items):
         cols = _glyph_columns(text)
         if not cols:
             continue
-        edge_dots = int(round((edge_col + COL_OFFSET) / CPI * 60))
-        start_dot = edge_dots - len(cols)
-        if start_dot < 0:
-            start_dot = 0
-        placed.append((start_dot, cols))
-        max_dot = max(max_dot, start_dot + len(cols))
-    if not placed:
+        edge_dots = int(round((edge_col + COL_OFFSET) / CPI * GRAPHIC_DPI))
+        placed.append([edge_dots - len(cols) * scale, cols, edge_dots])
+    pins_tall = 24
+
+    barcode = str(barcode).strip()
+    if barcode:
+        grid = datamatrix(barcode)
+        n = len(grid)
+        cell_h = DATAMATRIX_CELL                               # pins (1/72")
+        cell_w = max(1, int(round(cell_h / 72 * GRAPHIC_DPI)))  # dots, ~square
+        bw, gap = n * cell_w, 2 * cell_w                       # gap = quiet zone
+        center = int(round((DATAMATRIX_CENTER + COL_OFFSET) / CPI * GRAPHIC_DPI))
+        x0 = center - bw // 2
+        # A long ticket number (e.g. -LR1) reaches further left: slide the
+        # barcode left of it, then push any number on the left out of the way.
+        for p in placed:
+            if p[2] > center:                          # numbers right of the barcode
+                x0 = min(x0, p[0] - gap - bw)
+        for p in placed:
+            end = p[0] + len(p[1]) * scale
+            if p[2] <= center and end > x0 - gap:      # numbers left of it
+                p[0] -= end - (x0 - gap)
+        x0 = max(x0, 0)
+        for r in range(n):
+            for c in range(n):
+                if grid[r][c]:
+                    for y in range(cell_h):
+                        for x in range(cell_w):
+                            dots[(r * cell_h + y, x0 + c * cell_w + x)] = 1
+        pins_tall = max(pins_tall, n * cell_h)
+
+    for start, cols, _ in placed:
+        start = max(start, 0)
+        for k, triple in enumerate(cols):
+            for b, byte in enumerate(triple):
+                for bit in range(8):
+                    if byte & (0x80 >> bit):
+                        for s in range(scale):
+                            dots[(b * 8 + bit, start + k * scale + s)] = 1
+
+    if not dots:
         return b"", 0
 
-    # Compose the full-width canvas (list of triples), gaps = blank dots.
-    canvas = [(0, 0, 0)] * max_dot
-    for start_dot, cols in placed:
-        for k, triple in enumerate(cols):
-            canvas[start_dot + k] = triple
-
-    ncols = max_dot
+    ncols = max(x for _, x in dots) + 1
+    n_bands = (pins_tall + 7) // 8
     n1, n2 = ncols & 0xFF, (ncols >> 8) & 0xFF
+    cmd = ESC_L if GRAPHIC_DPI == 120 else ESC_K
 
     out = bytearray()
-    out += LINE_216(24)                      # 8-dot line spacing
+    out += LINE_216(24)                      # 8-pin bands, no gaps between them
     CR = b"\r"
-    for b in range(3):
-        data = bytes(canvas[c][b] for c in range(ncols))
-        band_cmd = ESC_K + bytes([n1, n2]) + data
+    for b in range(n_bands):
+        data = bytes(
+            sum(0x80 >> bit for bit in range(8) if dots.get((b * 8 + bit, c)))
+            for c in range(ncols))
+        band_cmd = cmd + bytes([n1, n2]) + data
         passes = max(1, BIG_GRAPHIC_PASSES)
         for p in range(passes):
             out += band_cmd
             out += CR if p < passes - 1 else CRLF
     out += LINE_216(SPACING_6)
-    return bytes(out), 3
+    return bytes(out), n_bands
 
 
 def big_block_rows(text):
@@ -207,7 +360,7 @@ def big_block_rows(text):
 
 # Dummy data pre-loaded into the first table row for quick testing.
 # Set USE_DUMMY_DATA = False to start with blank rows instead.
-USE_DUMMY_DATA = True
+USE_DUMMY_DATA = False
 DUMMY_DATA = {
     "row": "R1",
     "ticket": "062626-001",
@@ -375,6 +528,7 @@ def build_form_text(values):
     qty_text = str(values.get(QTY_FROM, "")).strip()
     big_tall_row = None        # row that gets the special tall rendering
     big_graphic = b""          # pre-rendered bit-image graphic bytes (if used)
+    big_bands = 0
     if big_text or (qty_text and BIG_STYLE == "graphic"):
         if BIG_STYLE == "graphic":
             # Ticket number (right-aligned to EDGE_R) + optional QTY count
@@ -384,7 +538,8 @@ def build_form_text(values):
                 items.append((big_text, BIG_TICKET_EDGE))
             if qty_text:
                 items.append((qty_text, QTY_GRAPHIC_EDGE))
-            big_graphic, _ = big_graphic_bytes(items)
+            barcode = big_text if DATAMATRIX_ON else ""
+            big_graphic, big_bands = big_graphic_bytes(items, barcode)
         elif BIG_STYLE == "block":
             for i, brow in enumerate(big_block_rows(big_text)):
                 place(BIG_TICKET_ROW + i, BIG_TICKET_EDGE, brow, wide=False, raw=True)
@@ -411,14 +566,15 @@ def build_form_text(values):
     if big_graphic:
         # Emit the bit-image number near the top, then feed the rest of the way
         # down to the first field row. The graphic itself advances the paper.
-        pre = (BIG_GRAPHIC_ROW - 1) * SPACING_6 + VERTICAL_NUDGE   # feed to graphic top
+        pre = (BIG_GRAPHIC_ROW - 1) * SPACING_6 + VERTICAL_NUDGE - BIG_GRAPHIC_RAISE
         pre = max(pre, 0)
+        used = pre
         while pre > 0:
             n = min(pre, 255); out += LINE_216(n) + LF; pre -= n
-        out += big_graphic                      # 3 ESC K bands; advances ~2 lines
-        # Graphic consumed BIG_GRAPHIC_ROW..(+2 lines). Feed down to first_row.
-        graphic_end_line = BIG_GRAPHIC_ROW + 2
-        remain = (first_row - graphic_end_line) * SPACING_6
+        out += big_graphic                      # bit-image bands; each advances 24/216"
+        used += big_bands * 24
+        # Feed down to where first_row would sit without the graphic.
+        remain = (first_row - 1) * SPACING_6 + VERTICAL_NUDGE - used
         remain = max(remain, 0)
         while remain > 0:
             n = min(remain, 255); out += LINE_216(n) + LF; remain -= n
