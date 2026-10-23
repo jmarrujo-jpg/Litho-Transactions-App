@@ -1757,14 +1757,20 @@ const base = {
   await page.fill('#mtProduct', 'WB-2100');
   await page.fill('#mtExp', '2027-04-01');
   for (const lot of ['24A0915', '24A0915', '24A0922']) { await page.fill('#mtScan', lot); await page.press('#mtScan', 'Enter'); }
-  const qtys = await page.$$eval('[data-mtqty]', (els) => els.map((e) => e.textContent));
+  let qtys = await page.$$eval('[data-mtqty]', (els) => els.map((e) => e.value));
   ok('the same lot scanned twice counts 2 containers', qtys.join() === '1,2', qtys);
+  // A whole batch on one lot number: scan once, type the count in its box
+  await page.fill('[data-mtqty="0"]', '20'); await page.press('[data-mtqty="0"]', 'Enter');
+  qtys = await page.$$eval('[data-mtqty]', (els) => els.map((e) => e.value));
+  ok('typing a count sets the containers; Enter goes back to the scan box', qtys.join() === '20,2' && (await page.evaluate(() => document.activeElement.id)) === 'mtScan', qtys);
+  await page.fill('[data-mtqty="0"]', '0'); await page.press('[data-mtqty="0"]', 'Enter');
+  ok('a count under 1 is refused (keeps 20)', (await page.$eval('[data-mtqty="0"]', (e) => e.value)) === '20');
   ok('the scan box is cleared and ready for the next', (await page.$eval('#mtScan', (e) => e.value)) === '' && (await page.evaluate(() => document.activeElement.id)) === 'mtScan');
   await page.click('[data-mtrt="Powder"]');
   ok('a new type: its container, blank product, its product list', (await page.$eval('#mtContainer', (e) => e.value)) === 'Unit' && (await page.$eval('#mtProduct', (e) => e.value)) === ''
     && (await page.$eval('#mtProdList', (e) => e.innerHTML)).includes('Stripe 9'));
   await page.fill('#mtScan', 'PW-1');
-  ok('save button counts lots and containers', (await page.textContent('#mtSave')).includes('Save 2 lots (3 containers)'), await page.textContent('#mtSave'));
+  ok('save button counts lots and containers', (await page.textContent('#mtSave')).includes('Save 2 lots (22 containers)'), await page.textContent('#mtSave'));
   // Back keeps the scanned lots
   await page.click('#backBtn'); await page.waitForTimeout(100);
   ok('stepping out keeps the scanned lots (warning on the list)', (await page.textContent('#view')).includes('2 scanned lots are not saved yet'));
@@ -1778,6 +1784,7 @@ const base = {
   await page.waitForTimeout(200);
   const rc = calls.filter((c) => c.fn === 'receiveMaterials')[0];
   ok('receiveMaterials gets the delivery and every lot', rc && rc.args[0].supplier === 'DSM' && rc.args[0].po === '7731-DC' && rc.args[0].receiver === '' && rc.args[1].length === 3
+    && rc.args[1].some((l) => l.lot === '24A0922' && l.qty === 20)
     && rc.args[1].some((l) => l.lot === '24A0915' && l.qty === 2 && l.expiration === '2027-04-01' && l.product === 'WB-2100' && l.type === 'Compound')
     && rc.args[1].some((l) => l.lot === 'PW-1' && l.type === 'Powder' && l.container === 'Unit'), rc && rc.args);
   ok('saved: says the receiver number to write on the slip', (await page.textContent('#modalRoot')).includes('R-00008'));
@@ -1793,6 +1800,8 @@ const base = {
   await page.click('#mtEdSave'); await page.waitForTimeout(150);
   const up = calls.filter((c) => c.fn === 'updateMaterial')[0];
   ok('edit sends only the changed field', up && up.args[0] === 'M-00002' && JSON.stringify(up.args[1]) === '{"Qty On Hand":"0"}', up && up.args);
+  await page.click('#homeLogo'); await page.waitForTimeout(100);
+  ok('tapping the logo goes to the main page', !!(await page.$('#tileLitho')) && !(await page.isVisible('#backBtn')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
   await page.close();
 }
