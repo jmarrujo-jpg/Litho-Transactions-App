@@ -614,6 +614,25 @@ const base = {
   await page.close();
 }
 
+// ---- 18b. Reports: materials loaded onto the machines, with totals and in the CSV
+{ const ld = (machine, lot, product, n, by) => ({ date: '2026-10-22', machine, lot, product, type: 'Powder', containers: n, container: 'Unit', by });
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getDepartmentReport: () => R({ start: '2026-10-22', end: '2026-10-22', dept: 'all', sections: [
+      { key: 'materials', label: 'Materials — loaded onto machines', rows: [ld('Line 1', 'PW-77', 'Stripe 9', 2, 'Sam'), ld('Line 2', 'PW-77', 'Stripe 9', 1, 'Ann'), ld('Line 2', 'K-5', 'Seal 4', 3, 'Ann')] }] }),
+  }));
+  await page.evaluate(() => openReports()); await page.waitForTimeout(100);
+  ok('Materials loaded is a report choice', (await page.$$eval('#reportDeptSel option', (os) => os.map((o) => o.value))).includes('materials'));
+  await page.click('#runReportBtn'); await page.waitForTimeout(300);
+  const txt = await page.textContent('#reportSections');
+  ok('materials rows: machine, lot, material, containers, who', txt.includes('Materials — loaded onto machines') && txt.includes('PW-77') && txt.includes('Line 2') && txt.includes('3 Unit') && txt.includes('Ann'), txt);
+  ok('totals by material', txt.includes('Stripe 9 — 3 Unit') && txt.includes('Seal 4 — 3 Unit'), txt);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#reportCsvBtn')]);
+  const csv = (await import('fs')).readFileSync(await dl.path(), 'utf8').trim().split(/\r\n/);
+  ok('CSV: each load line with its lot, material and containers', csv.length === 4 && csv[0].endsWith('Lot #,Material,Material Type,Containers') && csv[1].includes('PW-77,Stripe 9,Powder,2 Unit'), csv);
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 // ---- 19. Move To WIP: a WIP ticket opens to its coatings; marked removals go with the move
 { const coats = [{ passNumber: 1, group: '603X408', sub: '10-OUT', item: 'SIZE', chemCode: 'C1', cost: 2.5 },
     { passNumber: 2, group: '603X408', sub: '10-OUT', item: 'VARNISH', chemCode: 'C2', cost: 4 }];

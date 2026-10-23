@@ -1441,6 +1441,12 @@ await concurrency(envBase, 'in-worker lock');
   ok('history: today by default, newest first; machines listed', today.loads.length === 4 && today.machines.join() === 'Liner 1,Press 3', today);
   const old = (await call('getMaterialLoads', [{ from: '2026-01-05', machine: 'liner 1' }])).result;
   ok('history: a day and a machine', old.loads.length === 1 && old.loads[0].lot === 'A1' && old.loads[0].left === 1, old);
+  const mrep = (await call('getDepartmentReport', ['2026-01-05', '2026-01-05', 'materials'])).result;
+  ok('report: materials loaded that day, by machine', mrep.sections.length === 1 && mrep.sections[0].key === 'materials' && mrep.sections[0].rows.length === 1
+    && mrep.sections[0].rows[0].machine === 'Liner 1' && mrep.sections[0].rows[0].lot === 'A1' && mrep.sections[0].rows[0].containers === 1 && mrep.sections[0].rows[0].by === 'Sam', mrep);
+  const mall = (await call('getDepartmentReport', [today.from, today.from, 'all'])).result;
+  const msec = mall.sections.filter((x) => x.key === 'materials')[0];
+  ok('report: All departments includes today\'s 4 load lines', msec && msec.rows.length === 4 && msec.rows.every((r) => r.machine === 'Press 3'), msec);
   const g = await call('getMaterials', []);
   ok('getMaterials lists the machines used', g.result.machines.join() === 'Liner 1,Press 3', g.result.machines);
   // Undo the B7 line: back in stock; retry-safe

@@ -5992,6 +5992,19 @@ async function getDepartmentReport(sheets, start, end, dept) {
     if (want('scrolls')) { scrollRows.sort(byDate); sections.push({ key: 'scrolls', label: 'Scrolls — pallets made', rows: scrollRows }); }
   }
 
+  // Materials loaded onto machines (from the Material Loads log; an undone scan is no longer there).
+  if (want('materials')) {
+    let rows = [];
+    try {
+      rows = (await readObjects(sheets, MATERIAL_LOADS)).rows.map(loadOut)
+        .filter((l) => l.id && inRange(l.date, start, end))
+        .map((l) => ({ date: l.date, at: l.at, loadId: l.id, machine: l.machine, position: l.position, lot: l.lot, product: l.product, type: l.type,
+          containers: l.qty, container: l.container, left: l.left, by: l.by, notes: l.notes }));
+    } catch (e) { /* none */ }
+    rows.sort((a, b) => byDate(a, b) || a.machine.localeCompare(b.machine, undefined, { numeric: true }) || (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    sections.push({ key: 'materials', label: 'Materials — loaded onto machines', rows });
+  }
+
   if (want('count')) {
     let rows = [];
     try {

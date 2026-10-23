@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.103.0</span>
+      <span class="version" id="appVersion">v1.104.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -6513,8 +6513,8 @@
     var today = todayStr();
     view.innerHTML = reportTabsHtml() +
       '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
-        '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range. Tap a row for its full trace: the mill and supplier, every coating with its chem code, the job / customer, and where the steel went. For a product trace, pick All time and type the ticket, load #, mill, customer or chem code in the trace box.</div>' +
-        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'count', text: 'Count' }], reportDept) +
+        '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range, and the materials loaded onto the machines. Tap a row for its full trace: the mill and supplier, every coating with its chem code, the job / customer, and where the steel went. For a product trace, pick All time and type the ticket, load #, mill, customer or chem code in the trace box.</div>' +
+        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'materials', text: 'Materials loaded' }, { value: 'count', text: 'Count' }], reportDept) +
         '<div class="row">' +
           '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
           '<div class="field"><label>To</label><input type="date" id="reportTo" value="' + esc(today) + '"></div>' +
@@ -6821,6 +6821,19 @@
     } else if (sec.key === 'direct') {
       head = ['Date', 'Ticket', 'Job / Customer', 'Mill', 'Coatings', 'Cost', 'Litho'];
       cells = function (x) { return [esc(x.date), histTicketLink(x), dash(x.customer), dash(x.mill), dash(coatsShort(x.coatings)), x.cost ? money(x.cost) : '—', x.litho ? money(x.litho) : '—']; };
+    } else if (sec.key === 'materials') {
+      head = ['Date', 'Machine', 'Lot #', 'Material', 'Type', 'Containers', 'By'];
+      cells = function (x) { return [esc(x.date), '<b>' + dash(x.machine) + '</b>' + (x.position ? ' <span class="sub">(' + esc(x.position) + ')</span>' : ''), '<b>' + esc(x.lot) + '</b>', dash(x.product), dash(x.type),
+        esc(x.containers) + (x.container ? ' ' + esc(x.container) : ''), dash(x.by)]; };
+      detail = null;
+      // Totals by material over the range: "Stripe 9 — 5 Unit".
+      var tot = {}, order = [];
+      keep.forEach(function (k) {
+        var key = (k.x.product + '|' + k.x.container).toLowerCase();
+        if (!tot[key]) { tot[key] = { product: k.x.product, container: k.x.container, n: 0 }; order.push(key); }
+        tot[key].n += Number(k.x.containers) || 0;
+      });
+      html += '<div class="sub" style="margin-top:4px"><b>Totals:</b> ' + order.map(function (key) { var t = tot[key]; return esc(t.product + ' — ' + t.n + (t.container ? ' ' + t.container : '')); }).join(' &middot; ') + '</div>';
     } else if (sec.key === 'count') {
       head = ['Date', 'Session', 'By', 'Current', 'Promoted', 'WIP', 'Missing'];
       cells = function (x) { return [esc(x.date), '<span class="sub">' + esc(x.sessionId) + '</span>', esc(x.by), esc(x.currentFound), esc(x.promoted), esc(x.wipFound), esc(x.missing)]; };
@@ -6845,7 +6858,7 @@
     if (!reportData) return;
     var cols = ['Section', 'Date', 'Ticket', 'Skid ID', 'Job / Customer', 'Job ID', 'Mill', 'Supplier', 'PO', 'Receiver', 'End Use', 'BW', 'Tested BW', 'Type', 'Temper',
       'Width', 'Length', 'Sheets', 'Weight', 'Coatings', 'Chem Codes', 'Coated On', 'Coated By', 'Litho', 'Cost', 'Status', 'Used On', 'Machine', 'By',
-      'Load #', 'Output', 'Cut From'];
+      'Load #', 'Output', 'Cut From', 'Lot #', 'Material', 'Material Type', 'Containers'];
     var q = function (v) { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
     var lines = [cols.join(',')];
     (reportData.sections || []).forEach(function (sec) {
@@ -6858,7 +6871,9 @@
           pick('bw'), pick('testedBw'), pick('type'), pick('temper'), x.width, x.length, x.sheets != null ? x.sheets : x.qty, x.weight,
           coats.map(function (c) { return c.item + (c.date ? ' ' + c.date : '') + (c.by ? ' ' + c.by : ''); }).join('; '),
           coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),
-          x.coatedOn, x.coatedBy, x.litho, x.cost, x.status, x.usedOn, x.machine, x.by, x.loadNo, x.output != null ? x.output + ' ' + (x.unit || '') : '', x.from
+          x.coatedOn, x.coatedBy, x.litho, x.cost, x.status, x.usedOn, x.machine, x.by, x.loadNo, x.output != null ? x.output + ' ' + (x.unit || '') : '', x.from,
+          sec.key === 'materials' ? x.lot : '', sec.key === 'materials' ? x.product : '', sec.key === 'materials' ? x.type : '',
+          sec.key === 'materials' ? x.containers + (x.container ? ' ' + x.container : '') : ''
         ].map(q).join(','));
       });
     });
