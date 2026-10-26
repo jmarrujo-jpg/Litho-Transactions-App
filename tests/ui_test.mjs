@@ -379,6 +379,7 @@ const base = {
   await page.waitForSelector('#jobTestedBw');
   ok('Tested BW box shows the ticket BW as a hint', (await page.textContent('#jobPickedTicketCard')).includes('ticket says 75'));
   ok('Tested BW box uses the decimal keypad', (await page.$eval('#jobTestedBw', (el) => el.inputMode)) === 'decimal');
+  ok('the example is the ticket BW less 3, and the box starts empty', (await page.$eval('#jobTestedBw', (el) => el.placeholder)) === 'e.g. 72' && (await page.$eval('#jobTestedBw', (el) => el.value)) === '');
   await page.evaluate(() => { const el = document.getElementById('jobTestedBw'); el.type = 'text'; el.value = '7x'; });   // what a paste could leave
   await page.click('#addTicketToJobBtn');
   await page.waitForTimeout(150);

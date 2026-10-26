@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.104.0</span>
+      <span class="version" id="appVersion">v1.105.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -9197,7 +9197,7 @@
       var sErr = sheetsError(sheets, origQty);
       if (sErr) { toast(sErr); return; }
       var testedBw = readTestedBw('jrTestedBw');
-      if (testedBw === null) { toast('Tested BW must be a number, e.g. 75.2'); return; }
+      if (testedBw === null) { toast('Tested BW must be a number, e.g. ' + testedBwExample(entry)); return; }
       var btn = document.getElementById('jrAddTicketBtn'); btn.disabled = true;
       runMutation('jobAddTicket', [state.jobId, skidId, sheets, partial, lithoNote, operator, newOpId(), '', testedBw],
         function (result) {
@@ -9868,10 +9868,15 @@
   }
 
   // Tested BW: the basis weight measured on the floor for this skid (the ticket's BW is nominal).
-  // Optional; saved to the skid's 'Tested BW' column when the ticket is added to a job.
+  // Optional; saved to the skid's own 'Tested BW' column (the ticket's BW is never changed) when the
+  // ticket is added to a job. The example is the ticket's BW less 3 (tested usually comes in ~3 under).
+  function testedBwExample(entry) {
+    var n = parseFloat(String(entry && entry.bw != null ? entry.bw : '').replace(/[^\d.]/g, ''));
+    return n > 3 ? String(Math.round((n - 3) * 100) / 100) : '75.2';
+  }
   function testedBwFieldHtml(id, entry) {
     return '<div class="field"><label>Tested BW (optional' + (entry && entry.bw ? ' — ticket says ' + esc(entry.bw) : '') + ')</label>' +
-      '<input type="number" inputmode="decimal" step="0.01" min="0" id="' + id + '" placeholder="e.g. 75.2" value="' + esc(entry && entry.testedBw ? entry.testedBw : '') + '"></div>';
+      '<input type="number" inputmode="decimal" step="0.01" min="0" id="' + id + '" placeholder="e.g. ' + esc(testedBwExample(entry)) + '" value="' + esc(entry && entry.testedBw ? entry.testedBw : '') + '"></div>';
   }
   // Returns '' (left blank), the cleaned number as a string, or null if it isn't a valid number.
   function readTestedBw(id) {
@@ -9950,7 +9955,7 @@
       var sErr = sheetsError(sheetsRun, origQty);
       if (sErr) { toast(sErr); return; }
       var testedBw = readTestedBw('jobTestedBw');
-      if (testedBw === null) { toast('Tested BW must be a number, e.g. 75.2'); return; }
+      if (testedBw === null) { toast('Tested BW must be a number, e.g. ' + testedBwExample(entry)); return; }
       var opEl = document.getElementById('jobTicketOperator');
       var operator = opEl ? opEl.value.trim() : currentJob.operator;
       if (!operator) { toast('Enter your name first'); if (opEl) opEl.focus(); return; }
