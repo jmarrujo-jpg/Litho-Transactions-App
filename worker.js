@@ -150,7 +150,7 @@ const TICKET_NUMERIC_COLS = { 'QTY/LOAD': true, 'Weight': true, 'Spoilage': true
 // double-tapping or retrying) but not two devices landing on different Cloudflare servers.
 const READ_ONLY_FNS = new Set(['getRateTree', 'getAllTickets', 'getUsedTickets', 'getOperatorNames', 'getTicketCard',
   'getJobsForDate', 'getOpenJobs', 'getJobDetail', 'getProductionRuns', 'getRunDetail', 'getRawTable', 'getSlitterSessions',
-  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getMaterials', 'getMaterialLoads', 'getDriveMatches', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getUseTrace', 'getActiveCount', 'getCountHistory',
+  'getSlitterDetail', 'getMasterSheet', 'getSkidHistory', 'getReceivers', 'getMaterials', 'getMaterialLoads', 'getDriveMatches', 'getLithoReport', 'getMetalsReport', 'getDepartmentReport', 'getAccessExport', 'getUseTrace', 'getActiveCount', 'getCountHistory',
   'snapshotCurrentWip']);   // the snapshot only READS the live sheet (it writes to the separate snapshots file)
 const LOCK_MAX_HOLD_MS = 120000;   // a write stuck longer than this stops blocking the ones behind it
 let lockChain = Promise.resolve();
@@ -483,6 +483,12 @@ async function handle(fn, args, env) {
       return getLithoReport(sheets, args[0], args[1]);
     case 'getMetalsReport': // (startYMD, endYMD)
       return getMetalsReport(sheets, args[0], args[1]);
+    case 'getAccessExport': // () the tickets not sent to Access yet, as Access rows (or the one-time setup)
+      return getAccessExport(sheets);
+    case 'setupAccessExport': // (lastSkidId, operator) one time: that skid and every one before it are already in Access
+      return setupAccessExport(sheets, args[0], args[1]);
+    case 'markSentToAccess': // (skidIds, skip, operator) stamp them sent (or skipped) so they leave the list
+      return markSentToAccess(sheets, args[0], args[1], args[2]);
     case 'getDepartmentReport': // (startYMD, endYMD, dept)
       return getDepartmentReport(sheets, args[0], args[1], args[2]);
     case 'getUseTrace': // (dateYMD, diameter, daysEachSide)
@@ -4967,6 +4973,7 @@ async function importStaging(sheets, opId) {
   ['Ticket', 'Skid ID', 'Status'].forEach(add);
   parts.forEach((p) => p.headers.forEach(add));                 // every source column, in order
   IMPORT_LIFECYCLE_COLS.forEach(add);                           // app columns, pre-created blank
+  add(ACCESS_COL);                                              // every imported ticket came from Access
   ['Last Updated At', 'Last Updated By'].forEach(add);
   // Keep System Notes right next to Comments (Comments = human "who it's for"; System Notes = auto notes).
   const ci = header.indexOf('Comments'), si = header.indexOf('System Notes');
@@ -5020,6 +5027,7 @@ async function importStaging(sheets, opId) {
       rec['Status'] = p.status;
       rec['Last Updated At'] = date;
       rec['Last Updated By'] = 'import';
+      rec[ACCESS_COL] = ACCESS_FROM;
       const sysNote = p.status === STATUS.USED ? o.__note : used.openNotes[String(o['Ticket']).trim()];
       if (sysNote) rec['System Notes'] = String(rec['System Notes'] || '').trim() ? rec['System Notes'] + ' | ' + sysNote : sysNote;
       if (p.status === STATUS.USED) {
@@ -5055,6 +5063,77 @@ async function importStaging(sheets, opId) {
     usedMultiDay: used.multi.slice(0, 100), usedMultiDayCount: used.multi.length, usedAlsoOpen: used.alsoOpen.slice(0, 100), usedAlsoOpenCount: used.alsoOpen.length,
     receiversRestored: restored, receiversNotBack: notBack.slice(0, 100), receiversNotBackCount: notBack.length, receiverConflicts: conflicts.slice(0, 100),
     firstSkid: n ? fmtId('SKD-', 1) : '', lastSkid: n ? fmtId('SKD-', n) : '', columns: header.length };
+}
+
+// ================= COPY NEW TICKETS FOR ACCESS =========================
+// New tickets (printed on the shop PC, or made by the app) are copied as tab-separated rows in
+// Access's column order, to paste into Access. 'Sent to Access' on Steel Tickets says which went:
+// blank = not yet. Numbers go as stored, never rounded or padded (2255, not 2,255.00); TC keeps
+// its text as shown (.20). Access's own extra columns after PO Number go blank.
+const ACCESS_COL = 'Sent to Access';
+const ACCESS_FROM = 'Already in Access';
+const ACCESS_FROM_SHEET = ['Ticket', 'Row', 'Supplier', 'B/C', 'BW', 'TM', 'TC', 'C/S', 'Width', 'Length', 'Weight', 'Cost', 'Litho',
+  'Mill', 'End Use', 'Comments', 'QTY/LOAD', 'PO Number'];
+const ACCESS_COLS = ACCESS_FROM_SHEET.concat(['Batch for Coating1', 'MFG Date', 'Total', '#OUT/SHT', 'SHT/STRP/BB', 'TESTED BW', 'Base Boxes',
+  'Total1', 'Field1', 'Field11', 'TESTED BW1', 'Base Boxes1', 'Total11', 'QTY/LOAD1', 'Field111', 'Allocation']);
+const ACCESS_AS_SHOWN = { 'TC': true };   // text like ".20" that a number would turn into 0.2
+const ACCESS_SETUP_RECENT = 15;
+function skidNo(id) { const m = /^SKD-0*(\d+)$/i.exec(String(id || '').trim()); return m ? parseInt(m[1], 10) : 0; }
+function accessCell(col, raw, shown) {
+  const v = ACCESS_AS_SHOWN[col] ? shown : raw;
+  if (v == null || v === '') return '';
+  const t = typeof v === 'number' ? String(v) : String(v).trim();
+  return t.replace(/[\t\r\n]+/g, ' ');   // a tab or line break would split the Access row
+}
+async function getAccessExport(sheets) {
+  const raw = await readTab(sheets, MASTER, true);
+  const shown = (await readObjects(sheets, MASTER)).rows;
+  const base = raw.rows.map((o, i) => ({ o, f: shown[i] || {} })).filter((x) => String(x.o['Ticket'] || '').trim() && skidNo(x.o['Skid ID']));
+  const brief = (x) => ({ skidId: String(x.o['Skid ID']).trim(), ticket: String(x.f['Ticket'] || x.o['Ticket']).trim(), status: String(x.o['Status'] || '').trim(),
+    splitOf: String(x.o['Split Of'] || '').trim() });
+  if (!raw.map[ACCESS_COL]) {
+    const recent = base.slice().sort((a, b) => skidNo(b.o['Skid ID']) - skidNo(a.o['Skid ID'])).slice(0, ACCESS_SETUP_RECENT).map(brief);
+    return { setup: true, recent, total: base.length };
+  }
+  const rows = base.filter((x) => !String(x.o[ACCESS_COL] == null ? '' : x.o[ACCESS_COL]).trim())
+    .sort((a, b) => skidNo(a.o['Skid ID']) - skidNo(b.o['Skid ID']))
+    .map((x) => Object.assign(brief(x), { cells: ACCESS_COLS.map((c) => (ACCESS_FROM_SHEET.indexOf(c) === -1 ? '' : accessCell(c, x.o[c], x.f[c]))) }));
+  return { setup: false, columns: ACCESS_COLS, rows };
+}
+// One time: marks lastSkidId and every skid before it as already in Access ('ALL' = every skid now).
+async function setupAccessExport(sheets, lastSkidId, operator) {
+  const t = await readTab(sheets, MASTER);
+  if (t.map[ACCESS_COL]) return { ok: true, already: true };
+  const all = String(lastSkidId || '').trim().toUpperCase() === 'ALL';
+  const upTo = all ? Infinity : skidNo(lastSkidId);
+  if (!upTo) throw new Error('Pick the newest ticket that is already in Access.');
+  const { map } = await ensureColumn(sheets, MASTER, t.headers, ACCESS_COL);
+  if (!map[ACCESS_COL]) throw new Error('Could not add the "' + ACCESS_COL + '" column to Steel Tickets.');
+  const last = t.rows.reduce((n, o) => Math.max(n, o.__row), 1);
+  let marked = 0;
+  if (last >= 2) {
+    const col = [];
+    for (let r = 2; r <= last; r++) col.push(['']);
+    t.rows.forEach((o) => { const n = skidNo(o['Skid ID']); if (n && n <= upTo) { col[o.__row - 2] = [ACCESS_FROM]; marked++; } });
+    const L = colLetter(map[ACCESS_COL]);
+    await sheets.update("'" + MASTER + "'!" + L + '2:' + L + last, col);
+  }
+  return { ok: true, marked, by: String(operator || '') };
+}
+async function markSentToAccess(sheets, skidIds, skip, operator) {
+  const ids = (Array.isArray(skidIds) ? skidIds : []).map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+  if (!ids.length) throw new Error('Pick at least one ticket.');
+  const t = await readTab(sheets, MASTER);
+  if (!t.map[ACCESS_COL]) throw new Error('Set up Copy for Access first.');
+  const stamp = (skip ? 'Skipped ' : 'Sent ') + todayYMD() + (String(operator || '').trim() ? ' by ' + String(operator).trim() : '');
+  const want = {}; ids.forEach((id) => { want[id] = 1; });
+  const data = [];
+  t.rows.forEach((o) => {
+    if (!want[String(o['Skid ID'] || '').trim().toUpperCase()]) return;
+    data.push({ range: "'" + MASTER + "'!" + colLetter(t.map[ACCESS_COL]) + o.__row, values: [[stamp]] });
+  });
+  if (data.length) await sheets.batchUpdate(data);
+  return { ok: true, marked: data.length, stamp };
 }
 
 // ================= SLITTER / SCROLL (skid-at-a-time cutting) =========================

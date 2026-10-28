@@ -634,6 +634,44 @@ const base = {
   await page.close();
 }
 
+// ---- 18c. Database: Copy new tickets for Access (setup, copy text, untick, mark sent)
+{ const cols = ['Ticket', 'Row', 'Supplier', 'B/C', 'BW', 'TM', 'TC', 'C/S', 'Width', 'Length', 'Weight', 'Cost', 'Litho', 'Mill', 'End Use', 'Comments', 'QTY/LOAD', 'PO Number'];
+  const cells = (t, w) => [t, 'W-034', 'RN', 'D', '75', 'T-5', '.20', 'S', w, '27.75', '2255', '', '', '1561222', '404 ENDS', '401 ENDS', '1031', '8813-DC'].concat(Array(16).fill(''));
+  let setupDone = false;
+  const { page, calls } = await boot(Object.assign({}, base, {
+    getAccessExport: () => R(setupDone ? { setup: false, columns: cols.concat(Array(16).fill('X')), rows: [
+      { skidId: 'SKD-000003', ticket: '121318-001', status: 'Current', splitOf: '', cells: cells('121318-001', '31.531') },
+      { skidId: 'SKD-000004', ticket: '121318-001-LR1', status: 'Current', splitOf: 'SKD-000003', cells: cells('121318-001-LR1', '32.6875') }] }
+      : { setup: true, total: 2, recent: [{ skidId: 'SKD-000002', ticket: '101', status: 'Current' }, { skidId: 'SKD-000001', ticket: '100', status: 'Used' }] }),
+    setupAccessExport: () => { setupDone = true; return R({ ok: true, marked: 2 }); },
+    markSentToAccess: (a) => R({ ok: true, marked: a[0].length }),
+  }));
+  await page.evaluate(() => openDatabase()); await page.waitForTimeout(100);
+  await page.click('#dbAccessBtn'); await page.waitForSelector('[data-acclast]');
+  ok('access: first time lists the newest tickets to pick from', (await page.$$('[data-acclast]')).length === 2);
+  await page.click('[data-acclast="SKD-000002"]'); await page.waitForSelector('#modalOk'); await page.click('#modalOk');
+  await page.waitForSelector('#accCopy');
+  ok('access: setup sent the picked skid', calls.some((c) => c.fn === 'setupAccessExport' && c.args[0] === 'SKD-000002'));
+  let txt = await page.$eval('#accText', (e) => e.value);
+  ok('access: one tab-separated line per ticket, no header', txt.split(/\r?\n/).length === 2 && txt.split(/\r?\n/)[0].split('\t').length === 34
+    && txt.startsWith('121318-001\tW-034\tRN\tD\t75\tT-5\t.20\tS\t31.531\t27.75\t2255\t\t\t1561222\t404 ENDS\t401 ENDS\t1031\t8813-DC\t'), txt);
+  ok('access: the leftover is marked as one', (await page.textContent('#view')).includes('leftover of SKD-000003'));
+  await page.click('[data-accrow="SKD-000004"]'); await page.waitForTimeout(50);
+  txt = await page.$eval('#accText', (e) => e.value);
+  ok('access: unticked ones are left out', !txt.includes('LR1') && (await page.textContent('#accCopy')).includes('Copy 1 ticket'), txt);
+  await page.click('#accHeader'); await page.waitForTimeout(50);
+  ok('access: column names as the first line when asked', (await page.$eval('#accText', (e) => e.value)).startsWith('Ticket\tRow\tSupplier'));
+  await page.click('#accSent'); await page.waitForSelector('#modalOk');
+  ok('access: marking before copying warns', (await page.textContent('#modalRoot')).includes('haven’t tapped Copy'));
+  await page.click('#modalOk'); await page.waitForTimeout(150);
+  const mk = calls.filter((c) => c.fn === 'markSentToAccess')[0];
+  ok('access: marks only the ticked ones as sent', mk && mk.args[0].join() === 'SKD-000003' && mk.args[1] === false, mk && mk.args);
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  ok('access: Back returns to the Database', !!(await page.$('#dbAccessBtn')));
+  ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));
+  await page.close();
+}
+
 // ---- 19. Move To WIP: a WIP ticket opens to its coatings; marked removals go with the move
 { const coats = [{ passNumber: 1, group: '603X408', sub: '10-OUT', item: 'SIZE', chemCode: 'C1', cost: 2.5 },
     { passNumber: 2, group: '603X408', sub: '10-OUT', item: 'VARNISH', chemCode: 'C2', cost: 4 }];

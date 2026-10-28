@@ -706,6 +706,7 @@ await concurrency(envBase, 'in-worker lock');
   addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill'], ['201', 10, 'MA2']]);
   const imp = await call('importStaging', ['op-24-i']);
   ok('import ok', imp.ok && imp.result.total === 5, imp);
+  ok('import: every imported ticket is already in Access', f.rows(SID, 'Steel Tickets').every((r) => r['Sent to Access'] === 'Already in Access'));
   const byT = (t) => f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === t)[0];
   ok('import: back on by mill', byT('200')['Receiver'] === 'R-00001' && byT('201')['Receiver'] === 'R-00002' && byT('999')['Receiver'] === 'R-00002',
     f.rows(SID, 'Steel Tickets').map((r) => [r['Ticket'], r['Skid ID'], r['Receiver']]));
@@ -1842,6 +1843,40 @@ await concurrency(envBase, 'in-worker lock');
     && f.rows(SID, 'Machines')[0]['Materials'] === '9307G', f.rows(SID, 'Material List'));
   await call('deleteMachine', ['Line 5', 'Jo', 'op-51-h']);
   ok('removing a machine takes it off the materials', f.rows(SID, 'Material List')[0]['Goes To'] === 'Line 4A', f.rows(SID, 'Material List')[0]);
+}
+
+// Copy new tickets for Access: one-time setup, Access's columns, numbers as stored, mark sent / skip
+{ const H = ['Ticket', 'Skid ID', 'Status', 'Row', 'Supplier', 'B/C', 'BW', 'TM', 'TC', 'C/S', 'Width', 'Length', 'Weight', 'Cost', 'Litho',
+    'Mill', 'End Use', 'Comments', 'QTY/LOAD', 'PO Number', 'Split Of'];
+  const r = (o) => H.map((h) => (o[h] == null ? '' : o[h]));
+  const f = makeFake({ [SID]: { 'Steel Tickets': [H,
+    r({ 'Ticket': '100', 'Skid ID': 'SKD-000001', 'Status': 'Used' }),
+    r({ 'Ticket': '101', 'Skid ID': 'SKD-000002', 'Status': 'Current' }),
+    r({ 'Ticket': '121318-001', 'Skid ID': 'SKD-000003', 'Status': 'Current', 'Row': 'W-034', 'Supplier': 'RN', 'B/C': 'D', 'BW': 75, 'TM': 'T-5', 'TC': '.20', 'C/S': 'S',
+      'Width': 31.531, 'Length': 27.75, 'Weight': 2255, 'Mill': 1561222, 'End Use': '404 ENDS', 'Comments': '401 ENDS', 'QTY/LOAD': 1031, 'PO Number': '8813-DC' }),
+    r({ 'Ticket': '121318-001-LR1', 'Skid ID': 'SKD-000004', 'Status': 'Current', 'Width': 32.6875, 'Comments': 'a\tb', 'Split Of': 'SKD-000003' }),
+  ], 'Transactions': [TX_H] } });
+  globalThis.fetch = f.fetchImpl;
+  const s0 = (await call('getAccessExport', [])).result;
+  ok('access: first time asks what is already in Access, newest first', s0.setup && s0.recent.map((x) => x.skidId).join() === 'SKD-000004,SKD-000003,SKD-000002,SKD-000001' && s0.total === 4, s0);
+  const bad = await call('setupAccessExport', ['', 'Jo']);
+  ok('access: setup needs a ticket', !bad.ok, bad);
+  const su = await call('setupAccessExport', ['SKD-000002', 'Jo']);
+  ok('access: setup marks that skid and the ones before it', su.ok && su.result.marked === 2 && f.rows(SID, 'Steel Tickets')[1]['Sent to Access'] === 'Already in Access'
+    && f.rows(SID, 'Steel Tickets')[2]['Sent to Access'] === '', f.rows(SID, 'Steel Tickets'));
+  const ex = (await call('getAccessExport', [])).result;
+  const c = ex.rows[0].cells;
+  ok('access: the two after it are listed, oldest first', !ex.setup && ex.rows.map((x) => x.ticket).join() === '121318-001,121318-001-LR1' && ex.rows[1].splitOf === 'SKD-000003', ex.rows);
+  ok('access: 34 columns in Access order, extras blank', ex.columns.length === 34 && ex.columns[17] === 'PO Number' && ex.columns[33] === 'Allocation' && c.length === 34 && c.slice(18).every((x) => x === ''), ex.columns);
+  ok('access: values as stored — no commas, no padding, width/length exact, TC as text, PO as typed',
+    c.slice(0, 18).join('|') === '121318-001|W-034|RN|D|75|T-5|.20|S|31.531|27.75|2255|||1561222|404 ENDS|401 ENDS|1031|8813-DC', c);
+  ok('access: 32.6875 not rounded; a tab inside a value can\'t split the row', ex.rows[1].cells[8] === '32.6875' && ex.rows[1].cells[15] === 'a b', ex.rows[1].cells);
+  const m = await call('markSentToAccess', [['SKD-000003'], false, 'Jo']);
+  ok('access: mark sent stamps the date and who', m.ok && m.result.marked === 1 && /^Sent \d{4}-\d\d-\d\d by Jo$/.test(f.rows(SID, 'Steel Tickets')[2]['Sent to Access']), f.rows(SID, 'Steel Tickets')[2]);
+  const sk = await call('markSentToAccess', [['skd-000004'], true, '']);
+  ok('access: skip takes it off too', sk.ok && /^Skipped /.test(f.rows(SID, 'Steel Tickets')[3]['Sent to Access']) && (await call('getAccessExport', [])).result.rows.length === 0, f.rows(SID, 'Steel Tickets')[3]);
+  const again = await call('setupAccessExport', ['ALL', 'Jo']);
+  ok('access: setup again changes nothing', again.ok && again.result.already && /^Sent /.test(f.rows(SID, 'Steel Tickets')[2]['Sent to Access']), again);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');
