@@ -639,12 +639,15 @@ const base = {
   const cells = (t, w) => [t, 'W-034', 'RN', 'D', '75', 'T-5', '.20', 'S', w, '27.75', '2255', '', '', '1561222', '404 ENDS', '401 ENDS', '1031', '8813-DC'].concat(Array(16).fill(''));
   let setupDone = false;
   const { page, calls } = await boot(Object.assign({}, base, {
-    getAccessExport: () => R(setupDone ? { setup: false, columns: cols.concat(Array(16).fill('X')), rows: [
+    getAccessExport: (a) => R(a[0] ? { setup: false, find: [a[0]], canMark: true, total: 1, columns: cols.concat(Array(16).fill('X')), rows: [
+      { skidId: 'SKD-000009', ticket: '102826-001', status: 'Current', splitOf: '', sent: 'Sent 2026-10-28 by Jo', cells: cells('102826-001', '30.5') }] }
+      : setupDone ? { setup: false, columns: cols.concat(Array(16).fill('X')), rows: [
       { skidId: 'SKD-000003', ticket: '121318-001', status: 'Current', splitOf: '', cells: cells('121318-001', '31.531') },
       { skidId: 'SKD-000004', ticket: '121318-001-LR1', status: 'Current', splitOf: 'SKD-000003', cells: cells('121318-001-LR1', '32.6875') }] }
       : { setup: true, total: 2, recent: [{ skidId: 'SKD-000002', ticket: '101', status: 'Current' }, { skidId: 'SKD-000001', ticket: '100', status: 'Used' }] }),
     setupAccessExport: () => { setupDone = true; return R({ ok: true, marked: 2 }); },
     markSentToAccess: (a) => R({ ok: true, marked: a[0].length }),
+    writeAccessTab: (a) => R({ ok: true, tab: 'For Access', written: a[0].length }),
   }));
   await page.evaluate(() => openDatabase()); await page.waitForTimeout(100);
   await page.click('#dbAccessBtn'); await page.waitForSelector('[data-acclast]');
@@ -666,6 +669,19 @@ const base = {
   await page.click('#modalOk'); await page.waitForTimeout(150);
   const mk = calls.filter((c) => c.fn === 'markSentToAccess')[0];
   ok('access: marks only the ticked ones as sent', mk && mk.args[0].join() === 'SKD-000003' && mk.args[1] === false, mk && mk.args);
+  await page.click('#backBtn'); await page.waitForTimeout(100);
+  await page.click('#dbAccessBtn'); await page.waitForSelector('#accFind');
+  await page.fill('#accFind', '102826'); await page.press('#accFind', 'Enter'); await page.waitForTimeout(200);
+  ok('access find: sends what was typed; lists the match with whether it went already', calls.some((c) => c.fn === 'getAccessExport' && c.args[0] === '102826')
+    && (await page.textContent('#view')).includes('1 ticket starting with 102826') && (await page.textContent('#view')).includes('Sent 2026-10-28 by Jo')
+    && (await page.$eval('#accText', (e) => e.value)).includes('\n102826-001\t'), await page.textContent('#view'));
+  ok('access find: no "never send" button there', !(await page.$('#accSkip')));
+  await page.click('#accTab'); await page.waitForSelector('#modalOk');
+  const wt = calls.filter((c) => c.fn === 'writeAccessTab')[0];
+  ok('access tab: the ticked tickets go to the For Access tab', wt && wt.args[0].join() === 'SKD-000009' && (await page.textContent('#modalRoot')).includes('1 ticket(s) are on the For Access tab'), wt && wt.args);
+  await page.click('#modalOk'); await page.waitForTimeout(50);
+  await page.click('#accFindClear'); await page.waitForSelector('[data-accrow="SKD-000004"]');
+  ok('access find: Show new tickets goes back to the list', (await page.$eval('#accFind', (e) => e.value)) === '' && !(await page.$('#accFindClear')) && !(await page.textContent('#view')).includes('102826-001'));
   await page.click('#backBtn'); await page.waitForTimeout(100);
   ok('access: Back returns to the Database', !!(await page.$('#dbAccessBtn')));
   ok('no page errors', !calls.some((c) => c.fn === '__pageerror'), calls.filter((c) => c.fn === '__pageerror'));

@@ -483,10 +483,12 @@ async function handle(fn, args, env) {
       return getLithoReport(sheets, args[0], args[1]);
     case 'getMetalsReport': // (startYMD, endYMD)
       return getMetalsReport(sheets, args[0], args[1]);
-    case 'getAccessExport': // () the tickets not sent to Access yet, as Access rows (or the one-time setup)
-      return getAccessExport(sheets);
+    case 'getAccessExport': // (find?) the tickets not sent to Access yet (or the one-time setup); with find, every ticket starting with one of its numbers
+      return getAccessExport(sheets, args[0]);
     case 'setupAccessExport': // (lastSkidId, operator) one time: that skid and every one before it are already in Access
       return setupAccessExport(sheets, args[0], args[1]);
+    case 'writeAccessTab': // (skidIds) the 'For Access' tab: Access's column names + those tickets, to copy into Access
+      return writeAccessTab(sheets, args[0]);
     case 'markSentToAccess': // (skidIds, skip, operator) stamp them sent (or skipped) so they leave the list
       return markSentToAccess(sheets, args[0], args[1], args[2]);
     case 'getDepartmentReport': // (startYMD, endYMD, dept)
@@ -5085,20 +5087,55 @@ function accessCell(col, raw, shown) {
   const t = typeof v === 'number' ? String(v) : String(v).trim();
   return t.replace(/[\t\r\n]+/g, ' ');   // a tab or line break would split the Access row
 }
-async function getAccessExport(sheets) {
+// find: ticket numbers or how they start ("102826" = every ticket received 10/28/26), separated by
+// spaces / commas / lines. Lists those tickets whether sent or not, and needs no setup.
+const ACCESS_FIND_MAX = 500;
+function accessFindList(find) { return String(find || '').split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean); }
+async function getAccessExport(sheets, find) {
   const raw = await readTab(sheets, MASTER, true);
   const shown = (await readObjects(sheets, MASTER)).rows;
   const base = raw.rows.map((o, i) => ({ o, f: shown[i] || {} })).filter((x) => String(x.o['Ticket'] || '').trim() && skidNo(x.o['Skid ID']));
   const brief = (x) => ({ skidId: String(x.o['Skid ID']).trim(), ticket: String(x.f['Ticket'] || x.o['Ticket']).trim(), status: String(x.o['Status'] || '').trim(),
     splitOf: String(x.o['Split Of'] || '').trim() });
+  const starts = accessFindList(find);
+  const cellsOf = (x) => ACCESS_COLS.map((c) => (ACCESS_FROM_SHEET.indexOf(c) === -1 ? '' : accessCell(c, x.o[c], x.f[c])));
+  if (starts.length) {
+    const hit = base.filter((x) => { const t = String(x.f['Ticket'] || x.o['Ticket']).trim().toLowerCase(); return starts.some((p) => t.indexOf(p) === 0); })
+      .sort((a, b) => skidNo(a.o['Skid ID']) - skidNo(b.o['Skid ID']));
+    return { setup: false, find: starts, canMark: !!raw.map[ACCESS_COL], columns: ACCESS_COLS, total: hit.length,
+      rows: hit.slice(0, ACCESS_FIND_MAX).map((x) => Object.assign(brief(x), { sent: String(x.o[ACCESS_COL] == null ? '' : x.o[ACCESS_COL]).trim(), cells: cellsOf(x) })) };
+  }
   if (!raw.map[ACCESS_COL]) {
     const recent = base.slice().sort((a, b) => skidNo(b.o['Skid ID']) - skidNo(a.o['Skid ID'])).slice(0, ACCESS_SETUP_RECENT).map(brief);
     return { setup: true, recent, total: base.length };
   }
   const rows = base.filter((x) => !String(x.o[ACCESS_COL] == null ? '' : x.o[ACCESS_COL]).trim())
     .sort((a, b) => skidNo(a.o['Skid ID']) - skidNo(b.o['Skid ID']))
-    .map((x) => Object.assign(brief(x), { cells: ACCESS_COLS.map((c) => (ACCESS_FROM_SHEET.indexOf(c) === -1 ? '' : accessCell(c, x.o[c], x.f[c]))) }));
-  return { setup: false, columns: ACCESS_COLS, rows };
+    .map((x) => Object.assign(brief(x), { cells: cellsOf(x) }));
+  return { setup: false, canMark: true, columns: ACCESS_COLS, rows };
+}
+// The 'For Access' tab: wiped, then Access's column names and one row per picked ticket (RAW, so
+// .20 / 31.531 / 8813-DC stay exactly as they are). Only changes when the button is pressed.
+const ACCESS_TAB = 'For Access';
+async function writeAccessTab(sheets, skidIds) {
+  const want = {};
+  (Array.isArray(skidIds) ? skidIds : []).forEach((x) => { const id = String(x || '').trim().toUpperCase(); if (id) want[id] = 1; });
+  if (!Object.keys(want).length) throw new Error('Pick at least one ticket.');
+  const raw = await readTab(sheets, MASTER, true);
+  const shown = (await readObjects(sheets, MASTER)).rows;
+  const rows = raw.rows.map((o, i) => ({ o, f: shown[i] || {} })).filter((x) => want[String(x.o['Skid ID'] || '').trim().toUpperCase()])
+    .sort((a, b) => skidNo(a.o['Skid ID']) - skidNo(b.o['Skid ID']))
+    .map((x) => ACCESS_COLS.map((c) => (ACCESS_FROM_SHEET.indexOf(c) === -1 ? '' : accessCell(c, x.o[c], x.f[c]))));
+  if (!rows.length) throw new Error('None of those tickets were found.');
+  await ensureTab(sheets, ACCESS_TAB, ACCESS_COLS);
+  await resetTabToHeader(sheets, ACCESS_TAB, ACCESS_COLS);
+  const grid = await sheetGrid(sheets, ACCESS_TAB);
+  if (grid) {
+    if (grid.columnCount && ACCESS_COLS.length > grid.columnCount) await sheets.appendColumns(grid.sheetId, ACCESS_COLS.length - grid.columnCount);
+    if (grid.rowCount && rows.length + 1 > grid.rowCount) await sheets.appendRows(grid.sheetId, rows.length + 1 - grid.rowCount);
+  }
+  for (let i = 0; i < rows.length; i += 500) await sheets.update("'" + ACCESS_TAB + "'!A" + (2 + i), rows.slice(i, i + 500));
+  return { ok: true, tab: ACCESS_TAB, written: rows.length };
 }
 // One time: marks lastSkidId and every skid before it as already in Access ('ALL' = every skid now).
 async function setupAccessExport(sheets, lastSkidId, operator) {

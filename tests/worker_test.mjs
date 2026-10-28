@@ -1857,6 +1857,19 @@ await concurrency(envBase, 'in-worker lock');
     r({ 'Ticket': '121318-001-LR1', 'Skid ID': 'SKD-000004', 'Status': 'Current', 'Width': 32.6875, 'Comments': 'a\tb', 'Split Of': 'SKD-000003' }),
   ], 'Transactions': [TX_H] } });
   globalThis.fetch = f.fetchImpl;
+  const f0 = (await call('getAccessExport', ['121318'])).result;
+  ok('access find: works before setup; every ticket starting with it; no marking yet', !f0.setup && f0.canMark === false && f0.rows.map((x) => x.ticket).join() === '121318-001,121318-001-LR1'
+    && f0.rows[0].cells[8] === '31.531', f0);
+  const f1 = (await call('getAccessExport', ['100, 121318-001-lr1'])).result;
+  ok('access find: several starts / whole numbers, any case', f1.rows.map((x) => x.ticket).join() === '100,121318-001-LR1', f1.rows);
+  const wt = await call('writeAccessTab', [['SKD-000004', 'SKD-000003']]);
+  const tab = f.rows(SID, 'For Access');
+  ok('access tab: made with Access\'s column names and one row per ticket, values as text', wt.ok && wt.result.written === 2 && tab.length === 2
+    && tab[0]['Ticket'] === '121318-001' && tab[0]['TC'] === '.20' && String(tab[0]['Width']) === '31.531' && tab[0]['PO Number'] === '8813-DC' && String(tab[1]['Width']) === '32.6875'
+    && Object.keys(tab[0]).indexOf('Allocation') !== -1, tab);
+  await call('writeAccessTab', [['SKD-000001']]);
+  ok('access tab: pressing again replaces what was there', f.rows(SID, 'For Access').map((r) => r['Ticket']).join() === '100', f.rows(SID, 'For Access'));
+  ok('access tab: nothing picked is refused', !(await call('writeAccessTab', [[]])).ok);
   const s0 = (await call('getAccessExport', [])).result;
   ok('access: first time asks what is already in Access, newest first', s0.setup && s0.recent.map((x) => x.skidId).join() === 'SKD-000004,SKD-000003,SKD-000002,SKD-000001' && s0.total === 4, s0);
   const bad = await call('setupAccessExport', ['', 'Jo']);
@@ -1875,6 +1888,8 @@ await concurrency(envBase, 'in-worker lock');
   ok('access: mark sent stamps the date and who', m.ok && m.result.marked === 1 && /^Sent \d{4}-\d\d-\d\d by Jo$/.test(f.rows(SID, 'Steel Tickets')[2]['Sent to Access']), f.rows(SID, 'Steel Tickets')[2]);
   const sk = await call('markSentToAccess', [['skd-000004'], true, '']);
   ok('access: skip takes it off too', sk.ok && /^Skipped /.test(f.rows(SID, 'Steel Tickets')[3]['Sent to Access']) && (await call('getAccessExport', [])).result.rows.length === 0, f.rows(SID, 'Steel Tickets')[3]);
+  const f2 = (await call('getAccessExport', ['121318'])).result;
+  ok('access find: lists sent ones too, with when', f2.canMark && f2.rows.length === 2 && /^Sent /.test(f2.rows[0].sent) && /^Skipped /.test(f2.rows[1].sent), f2.rows);
   const again = await call('setupAccessExport', ['ALL', 'Jo']);
   ok('access: setup again changes nothing', again.ok && again.result.already && /^Sent /.test(f.rows(SID, 'Steel Tickets')[2]['Sent to Access']), again);
 }

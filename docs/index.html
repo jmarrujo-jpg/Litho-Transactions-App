@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.106.0</span>
+      <span class="version" id="appVersion">v1.107.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -6897,7 +6897,24 @@
   // ---------------- Copy new tickets for Access (Database) ----------------
   // The tickets whose 'Sent to Access' is blank, as tab-separated rows in Access's column order
   // (the Worker builds the cells). Copy -> paste into Access -> Mark as sent. Unticked ones stay.
-  var acc = { data: null, off: {}, header: false, copied: false };
+  // Find: ticket numbers or how they start (102826 = everything received 10/28/26), sent or not.
+  var acc = { data: null, off: {}, header: false, copied: false, find: '' };
+  function accFindHtml() {
+    return '<div class="card"><div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">' +
+      '<div class="field" style="flex:1;margin:0;min-width:200px"><label>Find tickets — type ticket numbers or how they start (e.g. 102826 for everything received 10/28/26). Several? Put a space between.</label>' +
+        '<input id="accFind" autocomplete="off" placeholder="e.g. 102826 102726" value="' + esc(acc.find) + '"></div>' +
+      '<button class="btn" id="accFindBtn" style="margin:0">Find</button>' +
+      (acc.find ? '<button class="btn secondary" id="accFindClear" style="margin:0">Show new tickets</button>' : '') +
+      '</div></div>';
+  }
+  function wireAccFind() {
+    var box = document.getElementById('accFind');
+    var go = function () { acc.find = String(box.value || '').trim(); openAccessExport(); };
+    document.getElementById('accFindBtn').onclick = go;
+    box.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+    var c = document.getElementById('accFindClear');
+    if (c) c.onclick = function () { acc.find = ''; openAccessExport(); };
+  }
   function openAccessExport() {
     if (!FULL_APP) { renderLanding(); return; }
     state.view = 'accessExport';
@@ -6910,8 +6927,9 @@
       acc.data = r || { rows: [] }; renderAccessExport();
     }).withFailureHandler(function (err) {
       if (state.view !== 'accessExport') return;
-      document.getElementById('view').innerHTML = '<div class="card empty">Could not load the tickets: ' + esc(err.message) + '</div>';
-    }).getAccessExport();
+      document.getElementById('view').innerHTML = accFindHtml() + '<div class="card empty">Could not load the tickets: ' + esc(err.message) + '</div>';
+      wireAccFind();
+    }).getAccessExport(acc.find);
   }
   function accPicked() { return ((acc.data && acc.data.rows) || []).filter(function (r) { return !acc.off[r.skidId]; }); }
   function accText() {
@@ -6923,7 +6941,7 @@
     var view = document.getElementById('view'), d = acc.data;
     if (!view || !d) return;
     if (d.setup) {
-      view.innerHTML = '<div class="card"><h3 style="margin-top:0">First time: what\u2019s already in Access?</h3>' +
+      view.innerHTML = accFindHtml() + '<div class="card"><h3 style="margin-top:0">First time: what\u2019s already in Access?</h3>' +
         '<div class="sub" style="margin-bottom:10px">Tap the newest ticket you have <b>already</b> put into Access. It and every ticket before it are marked as in Access; only the ones after it will show up to copy. You only do this once.</div>' +
         (d.recent || []).map(function (r) {
           return '<button class="btn secondary" data-acclast="' + esc(r.skidId) + '" style="width:100%;text-align:left;margin-bottom:6px"><b>' + esc(r.ticket) + '</b> <span class="sub">' + esc(r.skidId + ' · ' + r.status) + '</span></button>';
@@ -6939,29 +6957,42 @@
         b.onclick = function () { var t = b.querySelector('b').textContent; setup(b.getAttribute('data-acclast'), 'Ticket ' + t + ' and every ticket before it. The tickets after it will be listed to copy.'); };
       });
       document.getElementById('accAllIn').onclick = function () { setup('ALL', 'Every ticket in the app now. Only tickets printed from now on will be listed to copy.'); };
+      wireAccFind();
       return;
     }
-    var rows = d.rows || [], picked = accPicked(), n = picked.length;
-    if (!rows.length) { view.innerHTML = '<div class="card empty">Nothing new — every ticket is already in Access.</div>'; return; }
+    var rows = d.rows || [], picked = accPicked(), n = picked.length, finding = !!(d.find && d.find.length), canMark = d.canMark !== false;
+    var what = finding ? 'starting with ' + d.find.join(', ') : '';
+    if (!rows.length) {
+      view.innerHTML = accFindHtml() + '<div class="card empty">' + (finding ? 'No tickets ' + esc(what) + '.' : 'Nothing new — every ticket is already in Access.') + '</div>';
+      wireAccFind(); return;
+    }
     var COLS = [['Ticket', 0], ['Row', 1], ['Supplier', 2], ['BW', 4], ['TC', 6], ['Width', 8], ['Length', 9], ['Weight', 10], ['Mill', 13], ['End Use', 14], ['QTY', 16], ['PO', 17]];
-    view.innerHTML = '<div class="card"><h3 style="margin-top:0">' + rows.length + ' new ticket' + (rows.length === 1 ? '' : 's') + ' not in Access yet</h3>' +
-        '<div class="sub" style="margin-bottom:8px">1. Tap <b>Copy</b>. 2. Paste into Access. 3. Come back and tap <b>Mark as sent</b> so they leave this list. Untick any you don\u2019t want to send now — they stay for next time.</div>' +
+    if (finding) COLS.push(['In Access?', -1]);
+    view.innerHTML = accFindHtml() + '<div class="card"><h3 style="margin-top:0">' + (finding
+          ? rows.length + ' ticket' + (rows.length === 1 ? '' : 's') + ' ' + esc(what) + (d.total > rows.length ? ' (first ' + rows.length + ' of ' + d.total + ')' : '')
+          : rows.length + ' new ticket' + (rows.length === 1 ? '' : 's') + ' not in Access yet') + '</h3>' +
+        '<div class="sub" style="margin-bottom:8px">' + (finding
+          ? 'Every ticket that starts with what you typed, whether it went to Access before or not. Untick any you don\u2019t want, tap <b>Copy</b>, paste into Access.'
+          : '1. Tap <b>Copy</b>. 2. Paste into Access. 3. Come back and tap <b>Mark as sent</b> so they leave this list. Untick any you don\u2019t want to send now — they stay for next time.') + '</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:8px"><input type="checkbox" id="accHeader"' + (acc.header ? ' checked' : '') + ' style="width:18px;height:18px"> Include the column names as the first line</label>' +
         '<div class="row" style="gap:8px;flex-wrap:wrap">' +
           '<button class="btn" id="accCopy" style="flex:1"' + (n ? '' : ' disabled') + '>📋 Copy ' + n + ' ticket' + (n === 1 ? '' : 's') + '</button>' +
-          '<button class="btn ' + (acc.copied ? 'success' : 'secondary') + '" id="accSent" style="flex:1"' + (n ? '' : ' disabled') + '>✓ Mark ' + n + ' as sent</button>' +
+          (canMark ? '<button class="btn ' + (acc.copied ? 'success' : 'secondary') + '" id="accSent" style="flex:1"' + (n ? '' : ' disabled') + '>✓ Mark ' + n + ' as sent</button>' : '') +
         '</div>' +
-        '<button class="btn secondary" id="accSkip" style="width:100%;margin-top:8px;font-size:13px;padding:8px"' + (n ? '' : ' disabled') + '>Never send the ' + n + ' ticked (take them off this list)</button>' +
+        '<button class="btn secondary" id="accTab" style="width:100%;margin-top:8px"' + (n ? '' : ' disabled') + '>📄 Put the ' + n + ' ticked on the \u201cFor Access\u201d tab in the Google Sheet</button>' +
+        (canMark && !finding ? '<button class="btn secondary" id="accSkip" style="width:100%;margin-top:8px;font-size:13px;padding:8px"' + (n ? '' : ' disabled') + '>Never send the ' + n + ' ticked (take them off this list)</button>' : '') +
       '</div>' +
       '<div class="card"><div style="overflow-x:auto"><table><thead><tr><th><input type="checkbox" id="accAll"' + (n === rows.length ? ' checked' : '') + ' style="width:18px;height:18px"></th>' +
         COLS.map(function (c) { return '<th>' + esc(c[0]) + '</th>'; }).join('') + '</tr></thead><tbody>' +
         rows.map(function (r) {
           return '<tr><td><input type="checkbox" data-accrow="' + esc(r.skidId) + '"' + (acc.off[r.skidId] ? '' : ' checked') + ' style="width:18px;height:18px"></td>' +
-            COLS.map(function (c, i) { return '<td' + (i === 0 ? ' style="white-space:nowrap"' : '') + '>' + (i === 0 ? '<b>' + dash(r.cells[c[1]]) + '</b>' + (r.splitOf ? '<div class="sub">leftover of ' + esc(r.splitOf) + '</div>' : '') : dash(r.cells[c[1]])) + '</td>'; }).join('') + '</tr>';
+            COLS.map(function (c, i) { if (c[1] === -1) return '<td>' + (r.sent ? esc(r.sent) : '<span class="badge wip">not yet</span>') + '</td>';
+              return '<td' + (i === 0 ? ' style="white-space:nowrap"' : '') + '>' + (i === 0 ? '<b>' + dash(r.cells[c[1]]) + '</b>' + (r.splitOf ? '<div class="sub">leftover of ' + esc(r.splitOf) + '</div>' : '') : dash(r.cells[c[1]])) + '</td>'; }).join('') + '</tr>';
         }).join('') + '</tbody></table></div></div>' +
       '<div class="card"><div class="sub" style="margin-bottom:6px">If Copy doesn\u2019t work, click in this box, press Ctrl+A then Ctrl+C:</div>' +
         '<textarea id="accText" readonly style="width:100%;height:90px;font-family:monospace;font-size:12px;white-space:pre"></textarea></div>';
     document.getElementById('accText').value = accText();
+    wireAccFind();
     document.getElementById('accHeader').onchange = function () { acc.header = this.checked; renderAccessExport(); };
     document.getElementById('accAll').onchange = function () { var on = this.checked; rows.forEach(function (r) { if (on) delete acc.off[r.skidId]; else acc.off[r.skidId] = 1; }); renderAccessExport(); };
     Array.prototype.forEach.call(view.querySelectorAll('[data-accrow]'), function (b) {
@@ -6986,8 +7017,16 @@
           }).withFailureHandler(function (err) { toast('Not saved: ' + err.message); }).markSentToAccess(ids, !!skip, lastOperator);
         }, skip ? 'Never send' : 'Mark sent', skip ? 'danger' : 'success');
     };
-    document.getElementById('accSent').onclick = function () { mark(false); };
-    document.getElementById('accSkip').onclick = function () { mark(true); };
+    document.getElementById('accTab').onclick = function () {
+      var btn = this; btn.disabled = true; btn.textContent = 'Writing\u2026';
+      google.script.run.withSuccessHandler(function (res) {
+        acc.copied = true; renderAccessExport();
+        showModal({ title: 'On the \u201cFor Access\u201d tab', message: (res && res.written) + ' ticket(s) are on the For Access tab (column names in row 1). Open the Google Sheet, copy the rows and paste them into Access' + (canMark ? ', then come back and tap Mark as sent.' : '.'), confirmText: 'OK' });
+      }).withFailureHandler(function (err) { btn.disabled = false; toast('Not written: ' + err.message); renderAccessExport(); })
+        .writeAccessTab(picked.map(function (r) { return r.skidId; }));
+    };
+    if (document.getElementById('accSent')) document.getElementById('accSent').onclick = function () { mark(false); };
+    if (document.getElementById('accSkip')) document.getElementById('accSkip').onclick = function () { mark(true); };
   }
 
   // ---------------- Ticket history panel (Database + Reports) ----------------
