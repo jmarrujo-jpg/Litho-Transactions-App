@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.107.0</span>
+      <span class="version" id="appVersion">v1.108.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -833,6 +833,14 @@
     "Marking…": "Marcando…",
     "Master sheet": "Hoja maestra",
     "Metal Lines": "Líneas de metal",
+    "Which machine are you on?": "¿En qué máquina está?",
+    "🏭 Body Maker": "🏭 Body Maker",
+    "🥫 Double Seamer": "🥫 Engargoladora doble",
+    "Double Seamer — Ends Used": "Engargoladora doble — Tapas usadas",
+    "Each time a pallet of ends goes on the seamer, scan the label: the product code, then the date. A label with both on it is one scan.": "Cada vez que ponga una tarima de tapas en la engargoladora, escanee la etiqueta: el código de producto y luego la fecha. Una etiqueta con los dos es un solo escaneo.",
+    "Line #": "Línea #",
+    "Day seamed": "Día engargolado",
+    "Enter": "Entrar",
     "Metal Lines — Log Work": "Líneas de metal — Registrar trabajo",
     "Metals": "Metales",
     "Metals Department": "Departamento de Metales",
@@ -2001,7 +2009,9 @@
       case 'lithoLogin': case 'moveWip': openLithoDept(); return;
       case 'lithoDept': renderLanding(); return;
       case 'metalsHome': renderLanding(); return;          // department chooser -> landing
-      case 'prodHome': case 'slitterPick': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
+      case 'prodHome': if (metalsTab === 'lines') { openLinesChooser(); return; } openProduction(); return;   // Body Maker -> Body Maker / Double Seamer
+      case 'seamer': openLinesChooser(); return;
+      case 'linesPick': case 'slitterPick': case 'usedHome': case 'coilHome': openProduction(); return; // a section home -> chooser
       case 'slitterHome': openMetalsSection('slitter'); return;   // Slitters / Scrolls -> the two big buttons
       case 'prodAdd': askLeaveRun(); return;              // save the work session or delete it
       case 'prodReview': openMetalsSection(metalsTab); return;
@@ -6521,7 +6531,7 @@
     view.innerHTML = reportTabsHtml() +
       '<div class="card"><h3 style="margin-top:0">Reports</h3>' +
         '<div class="sub" style="margin-bottom:10px">See what each department completed for a day or a date range, and the materials loaded onto the machines. Tap a row for its full trace: the mill and supplier, every coating with its chem code, the job / customer, and where the steel went. For a product trace, pick All time and type the ticket, load #, mill, customer or chem code in the trace box.</div>' +
-        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'materials', text: 'Materials loaded' }, { value: 'count', text: 'Count' }], reportDept) +
+        selectField('reportDeptSel', 'Department', [{ value: 'all', text: 'All departments' }, { value: 'litho', text: 'Litho' }, { value: 'lines', text: 'Metal Lines' }, { value: 'press', text: 'Press' }, { value: 'slitter', text: 'Slitter' }, { value: 'scrolls', text: 'Scrolls' }, { value: 'direct', text: 'Used in Production (direct)' }, { value: 'materials', text: 'Materials loaded' }, { value: 'seamer', text: 'Double Seamer — ends used' }, { value: 'count', text: 'Count' }], reportDept) +
         '<div class="row">' +
           '<div class="field"><label>From</label><input type="date" id="reportFrom" value="' + esc(today) + '"></div>' +
           '<div class="field"><label>To</label><input type="date" id="reportTo" value="' + esc(today) + '"></div>' +
@@ -6807,6 +6817,20 @@
       }).join('');
   }
 
+  // A seamer pallet opened: the steel of its end size used on the day its ends were made.
+  function seamerDetailHtml(x) {
+    if (!x.size) return '<div class="sub">The end size for product code ' + esc(x.code) + ' isn’t known yet, so its steel can’t be found. Add it on the End Products tab of the Google Sheet (Product Code, End Size like 401) or the next time it’s scanned on the seamer.</div>';
+    var src = x.sources || [];
+    var head = '<div class="sub" style="margin-bottom:4px">' + esc(x.size) + ' ends made ' + esc(x.made) + (x.description ? ' (' + esc(x.description) + ')' : '') + ' &mdash; ';
+    if (!src.length) return head + 'no ' + esc(x.size) + ' ENDS steel is recorded as used that day. Try 🔍 Begin trace for the days around it.</div>';
+    return head + src.length + ' ticket' + (src.length === 1 ? '' : 's') + ' of ' + esc(x.size) + ' ENDS steel used that day:</div>' +
+      src.map(function (t) {
+        return '<div style="border-left:3px solid var(--line);padding-left:10px;margin:6px 0">' +
+          '<div><strong>' + esc(t.ticket || '(no ticket)') + '</strong> <span class="sub">' + esc(t.skidId || '') + (t.used ? ' &middot; ' + esc(t.used) : '') + '</span></div>' +
+          traceDetailHtml(t) + '</div>';
+      }).join('');
+  }
+
   // Render one department section. Each row opens to its full trace (see traceDetailHtml).
   function reportSectionHtml(sec, range, keep) {
     var rows = sec.rows || [];
@@ -6841,6 +6865,12 @@
         tot[key].n += Number(k.x.containers) || 0;
       });
       html += '<div class="sub" style="margin-top:4px"><b>Totals:</b> ' + order.map(function (key) { var t = tot[key]; return esc(t.product + ' — ' + t.n + (t.container ? ' ' + t.container : '')); }).join(' &middot; ') + '</div>';
+    } else if (sec.key === 'seamer') {
+      head = ['Date', 'Line', 'Product code', 'End size', 'Made', 'Steel (tickets)', 'By'];
+      cells = function (x) { var n = (x.sources || []).length;
+        return [esc(x.date), '<b>' + dash(x.machine) + '</b>', '<b>' + esc(x.code) + '</b>' + (x.pallet ? ' <span class="sub">#' + esc(x.pallet) + '</span>' : ''), x.size ? esc(x.size) + ' ends' : '<span class="badge inprogress">size?</span>',
+          esc(x.made) + (x.shift ? ' <span class="sub">(' + esc(x.shift) + ')</span>' : ''), n ? n + ' ticket' + (n === 1 ? '' : 's') : '<span class="sub">none found</span>', dash(x.by)]; };
+      detail = seamerDetailHtml;
     } else if (sec.key === 'count') {
       head = ['Date', 'Session', 'By', 'Current', 'Promoted', 'WIP', 'Missing'];
       cells = function (x) { return [esc(x.date), '<span class="sub">' + esc(x.sessionId) + '</span>', esc(x.by), esc(x.currentFound), esc(x.promoted), esc(x.wipFound), esc(x.missing)]; };
@@ -6865,7 +6895,7 @@
     if (!reportData) return;
     var cols = ['Section', 'Date', 'Ticket', 'Skid ID', 'Job / Customer', 'Job ID', 'Mill', 'Supplier', 'PO', 'Receiver', 'End Use', 'BW', 'Tested BW', 'Type', 'Temper',
       'Width', 'Length', 'Sheets', 'Weight', 'Coatings', 'Chem Codes', 'Coated On', 'Coated By', 'Litho', 'Cost', 'Status', 'Used On', 'Machine', 'By',
-      'Load #', 'Output', 'Cut From', 'Lot #', 'Material', 'Material Type', 'Containers'];
+      'Load #', 'Output', 'Cut From', 'Lot #', 'Material', 'Material Type', 'Containers', 'Product Code', 'End Size', 'Made Date'];
     var q = function (v) { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
     var lines = [cols.join(',')];
     (reportData.sections || []).forEach(function (sec) {
@@ -6880,7 +6910,8 @@
           coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),
           x.coatedOn, x.coatedBy, x.litho, x.cost, x.status, x.usedOn, x.machine, x.by, x.loadNo, x.output != null ? x.output + ' ' + (x.unit || '') : '', x.from,
           sec.key === 'materials' ? x.lot : '', sec.key === 'materials' ? x.product : '', sec.key === 'materials' ? x.type : '',
-          sec.key === 'materials' ? x.containers + (x.container ? ' ' + x.container : '') : ''
+          sec.key === 'materials' ? x.containers + (x.container ? ' ' + x.container : '') : '',
+          sec.key === 'seamer' ? x.code : '', sec.key === 'seamer' ? x.size : '', sec.key === 'seamer' ? x.made : ''
         ].map(q).join(','));
       });
     });
@@ -10220,7 +10251,7 @@
         '<button class="btn success" id="metalsPickUsed" style="width:100%;padding:30px;font-size:22px">✅&nbsp; Used in Production</button>' +
         '<button class="btn" id="metalsPrintTickets" style="width:100%;padding:30px;font-size:22px;margin-top:14px">🖨️&nbsp; Print New Steel Tickets</button>' +
         '<div class="sub" style="margin:8px 0 0;text-align:center">Opens the steel-ticket printer (local network only).</div>' : '');
-    document.getElementById('metalsPickLines').onclick = function () { openMetalsSection('lines'); };
+    document.getElementById('metalsPickLines').onclick = openLinesChooser;
     document.getElementById('metalsPickPress').onclick = function () { openMetalsSection('press'); };
     document.getElementById('metalsPickSlitter').onclick = function () { openMetalsSection('slitter'); };
     document.getElementById('metalsPickCoil').onclick = function () { openMetalsSection('coil'); };
@@ -10241,6 +10272,255 @@
     else if (tab === 'used') { state.view = 'usedHome'; renderUsedHome(); }
     else if (tab === 'coil') { openCoilLine(); }
     else { state.view = 'prodHome'; renderProductionHome(tab === 'press' ? 'Press' : 'Line'); }
+  }
+
+  // ----- Metal Lines: Body Maker or Double Seamer -----
+  // Body Maker is the run flow (load the skids you run). Double Seamer logs the pallets of ends put
+  // on the line: scan the pallet label's product code and its date made (old labels: two scans; the
+  // new label: one), so Reports can trace the ends back to the steel pressed that day.
+  function openLinesChooser() {
+    state.view = 'linesPick'; metalsTab = 'lines';
+    nextViewToken();
+    showTabbar(false); showBack(true); setDept('Metals');
+    var view = document.getElementById('view');
+    view.innerHTML =
+      '<div class="sub" style="margin:4px 0 16px;font-size:16px">Which machine are you on?</div>' +
+      '<button class="btn" id="linesPickBody" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🏭&nbsp; Body Maker</button>' +
+      '<button class="btn" id="linesPickSeamer" style="width:100%;padding:30px;font-size:22px;margin-bottom:14px">🥫&nbsp; Double Seamer</button>';
+    document.getElementById('linesPickBody').onclick = function () { openMetalsSection('lines'); };
+    document.getElementById('linesPickSeamer').onclick = openSeamer;
+  }
+
+  var seam = { line: '', date: '', code: '', made: '', shift: '', pallet: '', scan: '', entries: [], products: {}, loaded: false, busy: false, askSize: null };
+  try { seam.line = localStorage.getItem('cscSeamLine') || ''; } catch (e) { /* no storage */ }
+
+  // What a label scan says. Old labels are two scans: the product code, then the date ("10/28/26 01":
+  // date + shift). A new label is one scan with both (and maybe the pallet number), e.g.
+  // "40112345 10/28/26 01 0007". Returns { code, made (YYYY-MM-DD), shift, pallet, badDate }.
+  function seamParse(s) {
+    s = String(s || '').replace(/[\u0000-\u001f]+/g, ' ').trim();
+    var out = { code: '', made: '', shift: '', pallet: '', badDate: false }, rest = s;
+    var m = /(^|[^\d])(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4}|\d{2})(?!\d)(?:\s+(\d{1,2})(?!\d))?/.exec(s);
+    var iso = /(^|[^\d])(\d{4})-(\d\d)-(\d\d)(?!\d)/.exec(s);
+    if (m) {
+      var y = m[4].length === 2 ? 2000 + +m[4] : +m[4], mo = +m[2], d = +m[3];
+      var dt = new Date(Date.UTC(y, mo - 1, d));
+      if (mo >= 1 && mo <= 12 && d >= 1 && dt.getUTCDate() === d) {
+        out.made = y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
+        out.shift = m[5] ? ('0' + +m[5]).slice(-2) : '';
+      } else out.badDate = true;
+      rest = s.slice(0, m.index + m[1].length) + ' ' + s.slice(m.index + m[0].length);
+    } else if (iso) {
+      out.made = iso[2] + '-' + iso[3] + '-' + iso[4];
+      rest = s.slice(0, iso.index + iso[1].length) + ' ' + s.slice(iso.index + iso[0].length);
+    }
+    var parts = rest.split(/[\s|;,]+/).filter(Boolean);
+    out.code = parts[0] || '';
+    out.pallet = parts.slice(1).join(' ');
+    return out;
+  }
+  function seamSizeOf(code) {
+    var p = seam.products[String(code || '').trim().toUpperCase()];
+    return p ? p.size : '';
+  }
+  function seamFmtDate(ymd) { var p = String(ymd || '').split('-'); return p.length === 3 ? (+p[1]) + '/' + (+p[2]) + '/' + p[0].slice(2) : (ymd || ''); }
+
+  function openSeamer() {
+    state.view = 'seamer'; metalsTab = 'lines';
+    showTabbar(false); showBack(true); setDept('Metals');
+    seam.date = seam.date && seam.date <= todayStr() ? seam.date : todayStr();
+    seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; seam.askSize = null;
+    seam.loaded = false; seam.entries = [];
+    renderSeamer();
+    seamLoad();
+  }
+  function seamLoad() {
+    var tok = viewToken, line = seam.line, date = seam.date;
+    if (!line) return;
+    google.script.run.withSuccessHandler(function (r) {
+      if (tok !== viewToken || state.view !== 'seamer' || line !== seam.line || date !== seam.date) return;
+      seam.entries = (r && r.entries) || [];
+      seam.products = {};
+      ((r && r.products) || []).forEach(function (p) { seam.products[String(p.code).trim().toUpperCase()] = p; });
+      seam.loaded = true;
+      renderSeamerList();
+    }).withFailureHandler(function (err) {
+      if (tok !== viewToken) return;
+      var el = document.getElementById('seamList'); if (el) el.innerHTML = '<div class="sub">Error: ' + esc(err.message) + '</div>';
+    }).getSeamerEnds(line, date);
+  }
+
+  function renderSeamer() {
+    state.view = 'seamer';
+    nextViewToken();
+    var view = document.getElementById('view');
+    if (!view) return;
+    var today = todayStr();
+    view.innerHTML =
+      '<div class="card">' +
+        '<h3 style="margin-top:0">Double Seamer — Ends Used</h3>' +
+        '<div class="sub" style="margin-bottom:12px">Each time a pallet of ends goes on the seamer, scan the label: the product code, then the date. A label with both on it is one scan.</div>' +
+        '<div class="row">' +
+          operatorFieldHtml('seamOperator') +
+          '<div class="field"><label>Line #</label><input type="number" inputmode="numeric" id="seamLine" min="1" placeholder="e.g. 6" value="' + esc(String(seam.line || '').replace(/^Line\s*/i, '')) + '"></div>' +
+        '</div>' +
+        '<div class="field"><label>Day seamed</label><input type="date" id="seamDate" value="' + esc(seam.date) + '" max="' + esc(today) + '"></div>' +
+        '<div id="seamStep"></div>' +
+        '<div class="field" style="margin-top:6px"><label id="seamScanLabel"></label>' +
+          '<input id="seamScan" autocomplete="off" autocapitalize="characters" style="font-size:20px;padding:14px"></div>' +
+        '<button class="btn success" id="seamScanBtn" style="width:100%">Enter</button>' +
+        '<div id="seamAsk"></div>' +
+      '</div>' +
+      '<div class="card"><h3 style="margin-top:0;font-size:15px" id="seamListHead"></h3><div id="seamList"><div class="loading">Loading&hellip;</div></div></div>';
+    var lineIn = document.getElementById('seamLine');
+    lineIn.onchange = function () {
+      var v = String(lineIn.value || '').trim();
+      seam.line = v ? 'Line ' + (+v) : '';
+      try { localStorage.setItem('cscSeamLine', seam.line); } catch (e) { /* no storage */ }
+      seam.loaded = false; renderSeamerList(); seamLoad();
+    };
+    var dIn = document.getElementById('seamDate');
+    dIn.onchange = function () {
+      if (!dIn.value || dIn.value > todayStr()) { dIn.value = seam.date; return; }
+      seam.date = dIn.value; seam.loaded = false; renderSeamerList(); seamLoad();
+    };
+    var scan = document.getElementById('seamScan');
+    scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); seamTake(scan.value); } };
+    document.getElementById('seamScanBtn').onclick = function () { seamTake(scan.value); };
+    renderSeamStep();
+    renderSeamAsk();
+    renderSeamerList();
+    if (seam.line) scan.focus();
+  }
+  // The scan box's prompt and the half-scanned label (code waiting for its date, or the other way).
+  function renderSeamStep() {
+    var lab = document.getElementById('seamScanLabel'), st = document.getElementById('seamStep'), inp = document.getElementById('seamScan');
+    if (!lab || !st) return;
+    if (seam.code && !seam.made) { lab.textContent = L('Now scan the date on the label (like 10/28/26 01)', 'Ahora escanee la fecha de la etiqueta (como 10/28/26 01)'); inp.placeholder = '10/28/26 01'; }
+    else if (seam.made && !seam.code) { lab.textContent = L('Now scan the product code on the label', 'Ahora escanee el código de producto de la etiqueta'); inp.placeholder = L('product code…', 'código de producto…'); }
+    else { lab.textContent = L('Scan the pallet label (product code first)', 'Escanee la etiqueta de la tarima (primero el código de producto)'); inp.placeholder = L('scan or type…', 'escanee o escriba…'); }
+    if (!seam.code && !seam.made) { st.innerHTML = ''; return; }
+    st.innerHTML = '<div class="card" style="background:var(--bg);margin:6px 0;padding:10px 12px">' +
+      '<div class="sub">' + esc(L('This pallet so far:', 'Esta tarima hasta ahora:')) + '</div>' +
+      '<div style="font-size:17px;margin-top:2px"><b>' + esc(seam.code || '—') + '</b>' + (seamSizeOf(seam.code) ? ' <span class="badge wip">' + esc(seamSizeOf(seam.code)) + ' ends</span>' : '') +
+        ' &middot; ' + esc(L('made', 'hecho')) + ' <b>' + esc(seam.made ? seamFmtDate(seam.made) : '—') + '</b>' + (seam.shift ? ' <span class="sub">' + esc(L('shift', 'turno')) + ' ' + esc(seam.shift) + '</span>' : '') + '</div>' +
+      '<button class="btn secondary" id="seamClear" style="margin-top:8px;padding:6px 12px;font-size:13px">✕ ' + esc(L('Start this label over', 'Empezar esta etiqueta de nuevo')) + '</button></div>';
+    document.getElementById('seamClear').onclick = function () { seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
+  }
+
+  // One scan (or typed text) into the box.
+  function seamTake(raw) {
+    var inp = document.getElementById('seamScan');
+    var v = String(raw || '').trim();
+    if (!v || seam.busy) return;
+    var p = seamParse(v);
+    if (p.badDate) { toast(L('That date doesn’t look right — scan it again', 'Esa fecha no se ve bien — escanéela otra vez')); if (inp) inp.select(); return; }
+    if (p.made) {
+      if (p.made > todayStr()) { toast(L('That date is after today — check the label', 'Esa fecha es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
+      seam.made = p.made; seam.shift = p.shift;
+    }
+    if (p.code) { seam.code = p.code; if (p.pallet) seam.pallet = p.pallet; }
+    seam.scan = seam.scan ? seam.scan + ' | ' + v : v;
+    if (inp) { inp.value = ''; inp.focus(); }
+    if (seam.code && seam.made) seamSave(); else renderSeamStep();
+  }
+
+  function seamSave() {
+    var op = (document.getElementById('seamOperator') || {}).value;
+    op = String(op || '').trim();
+    if (!op) { toast(L('Enter your name first', 'Primero escriba su nombre')); renderSeamStep(); return; }
+    if (!seam.line) { toast(L('Enter the line number first', 'Primero escriba el número de línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
+    var entry = { line: seam.line, code: seam.code, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
+    var same = seam.entries.filter(function (x) { return x.code.toUpperCase() === entry.code.toUpperCase() && x.made === entry.made && (!entry.pallet || x.pallet === entry.pallet); })[0];
+    var go = function () {
+      seam.busy = true;
+      var btn = document.getElementById('seamScanBtn'); if (btn) { btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…'); }
+      runMutation('logSeamerEnds', [entry, newOpId()], function (r) {
+        seam.busy = false; lastOperator = op;
+        seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = '';
+        if (state.view !== 'seamer') return;
+        var e = r && r.entry;
+        if (e && !r.duplicate && e.date === seam.date && e.line === seam.line) seam.entries.unshift(e);
+        toast(L('Saved ', 'Guardado ') + entry.code + ' — ' + L('made ', 'hecho ') + seamFmtDate(entry.made));
+        seam.askSize = r && r.needSize ? entry.code : null;
+        var b2 = document.getElementById('seamScanBtn'); if (b2) { b2.disabled = false; b2.textContent = L('Enter', 'Entrar'); }
+        renderSeamStep(); renderSeamAsk(); renderSeamerList();
+        var i = document.getElementById(seam.askSize ? 'seamAskSize' : 'seamScan'); if (i) i.focus();
+      }, function (err) {
+        seam.busy = false;
+        var b3 = document.getElementById('seamScanBtn'); if (b3) { b3.disabled = false; b3.textContent = L('Enter', 'Entrar'); }
+        toast('Error: ' + err.message);
+      });
+    };
+    if (same) {
+      showConfirm(L('Already scanned?', '¿Ya escaneada?'),
+        L(entry.code + ' made ' + seamFmtDate(entry.made) + ' is already on today’s list. Is this another pallet?', entry.code + ' hecho ' + seamFmtDate(entry.made) + ' ya está en la lista de hoy. ¿Es otra tarima?'),
+        go, L('Yes, another pallet', 'Sí, otra tarima'));
+      seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; renderSeamStep();
+      return;
+    }
+    go();
+  }
+
+  // A product code seen for the first time: what size end is it? (Remembered for everyone.)
+  function renderSeamAsk() {
+    var el = document.getElementById('seamAsk');
+    if (!el) return;
+    if (!seam.askSize) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card" style="border:2px solid var(--warn);margin:12px 0 0">' +
+      '<div style="font-size:16px;margin-bottom:6px">' + esc(L('First time for product code ', 'Primera vez para el código ')) + '<b>' + esc(seam.askSize) + '</b>. ' + esc(L('What size end is it?', '¿De qué tamaño es la tapa?')) + '</div>' +
+      '<div class="row" style="align-items:flex-end">' +
+        '<div class="field" style="flex:1;margin:0"><label>' + esc(L('End size', 'Tamaño de tapa')) + '</label><input id="seamAskSize" inputmode="numeric" placeholder="e.g. 401" maxlength="3"></div>' +
+        '<button class="btn success" id="seamAskSave" style="margin-left:8px">' + esc(L('Save', 'Guardar')) + '</button>' +
+        '<button class="btn secondary" id="seamAskSkip" style="margin-left:8px">' + esc(L('Not sure', 'No sé')) + '</button>' +
+      '</div></div>';
+    var code = seam.askSize, inp = document.getElementById('seamAskSize');
+    var save = function () {
+      var v = String(inp.value || '').trim();
+      if (!/^\d{3}$/.test(v)) { toast(L('Type the end size as 3 numbers, like 401', 'Escriba el tamaño con 3 números, como 401')); inp.focus(); return; }
+      var b = document.getElementById('seamAskSave'); b.disabled = true;
+      runMutation('setEndProductSize', [code, v, lastOperator], function () {
+        seam.products[code.toUpperCase()] = { code: code, size: v, description: '' };
+        seam.entries.forEach(function (x) { if (x.code.toUpperCase() === code.toUpperCase() && !x.size) x.size = v; });
+        seam.askSize = null; toast(L('Saved: ', 'Guardado: ') + code + ' = ' + v + ' ends');
+        renderSeamAsk(); renderSeamerList(); var i = document.getElementById('seamScan'); if (i) i.focus();
+      }, function (err) { b.disabled = false; toast('Error: ' + err.message); });
+    };
+    inp.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); save(); } };
+    document.getElementById('seamAskSave').onclick = save;
+    document.getElementById('seamAskSkip').onclick = function () { seam.askSize = null; renderSeamAsk(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
+  }
+
+  function renderSeamerList() {
+    var head = document.getElementById('seamListHead'), el = document.getElementById('seamList');
+    if (!el) return;
+    if (head) head.innerHTML = esc(seam.line ? L('On ', 'En ') + seam.line + ' — ' + seamFmtDate(seam.date) : L('Pallets logged — ', 'Tarimas registradas — ') + seamFmtDate(seam.date)) +
+      (seam.loaded && seam.line ? ' <span class="sub" style="font-weight:400">&middot; ' + seam.entries.length + ' ' + esc(seam.entries.length === 1 ? L('pallet', 'tarima') : L('pallets', 'tarimas')) + '</span>' : '');
+    if (!seam.line) { el.innerHTML = '<div class="sub">' + esc(L('Enter the line number above.', 'Escriba el número de línea arriba.')) + '</div>'; return; }
+    if (!seam.loaded) { el.innerHTML = '<div class="loading">Loading&hellip;</div>'; return; }
+    if (!seam.entries.length) { el.innerHTML = '<div class="sub">' + esc(L('Nothing scanned yet.', 'Nada escaneado todavía.')) + '</div>'; return; }
+    el.innerHTML = seam.entries.map(function (x) {
+      return '<div class="queue-item" style="padding:8px 0">' +
+        '<div style="min-width:0"><div class="ticket-id" style="font-size:16px">' + esc(x.code) +
+          (x.size ? ' <span class="badge wip">' + esc(x.size) + ' ends</span>' : ' <span class="badge inprogress">' + esc(L('size?', '¿tamaño?')) + '</span>') + '</div>' +
+          '<div class="sub">' + esc(L('Made ', 'Hecho ')) + esc(seamFmtDate(x.made)) + (x.shift ? ' &middot; ' + esc(L('shift ', 'turno ')) + esc(x.shift) : '') +
+            (x.pallet ? ' &middot; #' + esc(x.pallet) : '') + ' &middot; ' + esc(x.by) + ' &middot; ' + esc(String(x.at || '').slice(11, 16)) + '</div></div>' +
+        '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-seamdel="' + esc(x.id) + '">' + esc(L('Remove', 'Quitar')) + '</button>' +
+      '</div>';
+    }).join('');
+    Array.prototype.forEach.call(el.querySelectorAll('[data-seamdel]'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-seamdel'), x = seam.entries.filter(function (e) { return e.id === id; })[0];
+        if (!x) return;
+        showConfirm(L('Remove this pallet?', '¿Quitar esta tarima?'), L('Remove ' + x.code + ' made ' + seamFmtDate(x.made) + ' from the list? Use this for a wrong scan.', '¿Quitar ' + x.code + ' hecho ' + seamFmtDate(x.made) + ' de la lista? Úselo para un escaneo equivocado.'), function () {
+          b.disabled = true;
+          runMutation('removeSeamerEnds', [id], function () {
+            seam.entries = seam.entries.filter(function (e) { return e.id !== id; });
+            toast(L('Removed', 'Quitado')); renderSeamerList();
+          }, function (err) { b.disabled = false; toast('Error: ' + err.message); });
+        }, L('Remove', 'Quitar'), 'danger');
+      };
+    });
   }
 
   // ----- Used in Production (quick direct mark) -----
