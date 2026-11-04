@@ -2577,20 +2577,27 @@ const base = {
 { let saved = [], nid = 0;
   const { page, calls } = await boot(Object.assign({}, base, {
     getProductionRuns: () => R([]), createRun: (a) => R({ runId: "RUN-000009", machine: a[0], operator: a[1], status: "Open" }),
-    getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }] }),
+    getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }],
+      lookup: [{ code: 'E401A', desc: 'Odd', type: '0.20' }, { code: 'X999', desc: 'X', type: '' }, { code: '401 E ISE CL', desc: '401 E ISE CL', type: '0.20' },
+        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: 'Profile S-1', type: '' },
+        { code: '24711 HOLE', desc: 'HD HI VIS WHT "HOLE"', type: 'Lid' }, { code: '500 E PAINT', desc: '!!!ADD COLOR!!!', type: '' }], lookupError: '' }),
     logSeamerEnds: (a) => { const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', size: a[0].code.toUpperCase() === 'E401A' ? '401' : '', by: a[0].operator }, a[0]); saved.unshift(e); return R({ ok: true, entry: e, needSize: !e.size }); },
     setEndProductSize: () => R({ added: true }),
     removeSeamerEnds: (a) => { saved = saved.filter((e) => e.id !== a[0]); return R({ ok: true }); },
   }));
   const P = (x) => page.evaluate((v) => seamParse(v), x);
   const p1 = await P('10/28/26 01');
-  ok('label date: 10/28/26 01 -> date + shift, no code', p1.made === '2026-10-28' && p1.shift === '01' && p1.code === '', p1);
-  const p2 = await P('E401A');
-  ok('label code alone', p2.code === 'E401A' && p2.made === '', p2);
-  const p3 = await P('E401A 10/28/26 01 0007');
-  ok('one-scan label: code, date, shift, pallet #', p3.code === 'E401A' && p3.made === '2026-10-28' && p3.shift === '01' && p3.pallet === '0007', p3);
+  ok('lot 10/28/26 01 -> date + shift, no code', p1.made === '2026-10-28' && p1.shift === '01' && p1.lot === '10/28/26 01' && p1.rest === '', p1);
+  const p2 = await P('401 E ISE CL');
+  ok('a code with spaces stays whole', p2.rest === '401 E ISE CL' && p2.made === '', p2);
+  const p3 = await P('401 E ISE CL 10/28/26 01 0007');
+  ok('one-scan label: code, lot, shift, rest', p3.rest === '401 E ISE CL 0007' && p3.made === '2026-10-28' && p3.shift === '01' && p3.lot === '10/28/26 01', p3);
   const p4 = await P('E401A|2026-10-28');
-  ok('a label with an ISO date works too', p4.code === 'E401A' && p4.made === '2026-10-28', p4);
+  ok('a label with an ISO date works too', p4.rest === 'E401A' && p4.made === '2026-10-28', p4);
+  const cs = await page.evaluate(() => [parseCheckSpec('S-1 or S-3?, "1"(S-1), "3"(S-3)'), parseCheckSpec('Pick one: " A " (Red), "B"(Blue, "C"'), checkPrompt('!!!ADD COLOR!!!'), checkPrompt('INPUT'), checkPrompt('add color'), checkPrompt('75')]);
+  ok('check value spec: question + options', cs[0].question === 'S-1 or S-3?' && cs[0].options.map((o) => o.value + '=' + o.label).join() === '1=S-1,3=S-3', cs[0]);
+  ok('check value spec is forgiving (spaces, missing paren, no label)', cs[1].options.map((o) => o.value + '=' + o.label).join() === 'A=Red,B=Blue,C=C', cs[1]);
+  ok('markers: !!!x!!!, INPUT, ADD x', cs[2] === 'ADD COLOR' && cs[3] === 'Enter value' && cs[4] === 'Add color' && cs[5] === null, cs);
   ok('a date that can\'t be (2/30) is caught', (await P('2/30/26 01')).badDate === true);
 
   await page.click('#tileProduction'); await page.waitForSelector('#metalsPickLines');
@@ -2617,12 +2624,15 @@ const base = {
   ok('line picked: loads that day for Line 6', calls.some((c) => c.fn === 'getSeamerEnds' && c.args[0] === 'Line 6') && /Nothing scanned yet/.test(await page.textContent('#seamList')));
   // Old label: two scans
   await page.fill('#seamScan', 'E401A'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
-  ok('after the code it asks for the date', /Now scan the date/.test(await page.textContent('#seamScanLabel')) && /E401A/.test(await page.textContent('#seamStep')) && /401 ends/.test(await page.textContent('#seamStep')));
+  const m1 = await page.evaluate(() => [seamMatch('e401a'), seamMatch('401 e ise cl 0007'), seamMatch('401 E ISE'), appendCode('243807', '1'), appendCode('243807', '3'), appendCode('243807', '-X')]);
+  ok('matches the Ends list (any case), longest code first, rest is the pallet #', m1[0].row.code === 'E401A' && m1[1].row.code === '401 E ISE CL' && m1[1].pallet === '0007' && m1[2] === null, m1);
+  ok('appendCode: real row, else a space before a letter/number, else glued', m1[3] === '243807 1' && m1[4] === '243807 3' && m1[5] === '243807-X', m1);
+  ok('after the code it asks for the Lot #', /Now scan the Lot #/.test(await page.textContent('#seamScanLabel')) && /E401A/.test(await page.textContent('#seamStep')) && /401 ends/.test(await page.textContent('#seamStep')));
   ok('nothing saved yet', !calls.some((c) => c.fn === 'logSeamerEnds'));
   await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(200);
   const lg = calls.filter((c) => c.fn === 'logSeamerEnds')[0];
-  ok('code + date -> saved with line, made date, shift, who', lg && lg.args[0].line === 'Line 6' && lg.args[0].code === 'E401A' && lg.args[0].made === '2026-10-28' && lg.args[0].shift === '01' && lg.args[0].operator === 'Ana' && /^op-|./.test(lg.args[1]), lg && lg.args);
-  ok('on the list, and the box is ready for the next pallet', /E401A/.test(await page.textContent('#seamList')) && /Made 10\/28\/26/.test(await page.textContent('#seamList')) && (await page.$eval('#seamScan', (i) => i.value)) === '' && /product code first/.test(await page.textContent('#seamScanLabel')));
+  ok('code + lot -> saved with line, lot, made date, shift, who', lg && lg.args[0].line === 'Line 6' && lg.args[0].code === 'E401A' && lg.args[0].lot === '10/28/26 01' && lg.args[0].made === '2026-10-28' && lg.args[0].shift === '01' && lg.args[0].operator === 'Ana' && /^op-|./.test(lg.args[1]), lg && lg.args);
+  ok('on the list, and the box is ready for the next pallet', /E401A/.test(await page.textContent('#seamList')) && /Lot 10\/28\/26 01/.test(await page.textContent('#seamList')) && (await page.$eval('#seamScan', (i) => i.value)) === '' && /product code first/.test(await page.textContent('#seamScanLabel')));
   // The same pallet again: asks
   await page.fill('#seamScan', 'E401A 10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
   ok('the same code + date again asks if it\'s another pallet', /Already scanned/.test(await page.textContent('#modalRoot')));
@@ -2632,18 +2642,54 @@ const base = {
   await page.fill('#seamScan', 'E401A 12/31/99 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
   ok('a made date after today is refused', calls.filter((c) => c.fn === 'logSeamerEnds').length === 1 && (await page.$eval('#seamScan', (i) => i.value)) !== '');
   await page.fill('#seamScan', '');
+  // Not on the Ends list: an error, nothing kept
+  await page.fill('#seamScan', '401 E NOPE'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
+  ok('a code not on the Ends list is an error', /Not on the Ends list/.test(await page.textContent('#modalRoot')) && /401 E NOPE/.test(await page.textContent('#modalRoot')));
+  await page.click('#modalOk'); await page.waitForTimeout(60);
+  ok('…and nothing is kept', (await page.textContent('#seamStep')).trim() === '' && calls.filter((c) => c.fn === 'logSeamerEnds').length === 1);
+  await page.fill('#seamScan', '');
+  // A code with spaces, then its lot
+  await page.fill('#seamScan', '401 E ISE CL'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
+  await page.fill('#seamScan', '10/29/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('a code with spaces is one product', calls.filter((c) => c.fn === 'logSeamerEnds')[1].args[0].code === '401 E ISE CL');
+  // Check Value: buttons, the answer goes on the code
+  await page.fill('#seamScan', '243807'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('[data-seamopt]');
+  const opts = await page.$$eval('[data-seamopt]', (b) => b.map((x) => x.textContent));
+  ok('Check Value: asks its question with a button per option', /S-1 or S-3\?/.test(await page.textContent('#seamStep')) && opts.join() === 'S-1,S-3', opts);
+  await page.click('[data-seamopt="0"]'); await page.waitForTimeout(60);
+  ok('…the answer is added to the code, then it wants the lot', /243807 1/.test(await page.textContent('#seamStep')) && /Profile S-1/.test(await page.textContent('#seamStep')) && /Now scan the Lot #/.test(await page.textContent('#seamScanLabel')));
+  await page.fill('#seamScan', '10/29/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  const cvl = calls.filter((c) => c.fn === 'logSeamerEnds')[2];
+  ok('…saved as 243807 1 (and what was scanned)', cvl && cvl.args[0].code === '243807 1' && cvl.args[0].baseCode === '243807', cvl && cvl.args[0]);
+  // Lot first, then a Check Value code: saves right after the answer
+  await page.fill('#seamScan', '10/30/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(40);
+  await page.fill('#seamScan', '243807'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('[data-seamopt]');
+  await page.click('[data-seamopt="1"]'); await page.waitForTimeout(150);
+  ok('lot first, then the answer saves it', (calls.filter((c) => c.fn === 'logSeamerEnds')[3] || { args: [{}] }).args[0].code === '243807 3');
+  // Quotes in a normal description ask nothing
+  await page.fill('#seamScan', '24711 HOLE'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
+  ok('quotes in a normal description ask nothing', !(await page.$('[data-seamopt]')) && /24711 HOLE/.test(await page.textContent('#seamStep')));
+  await page.click('#seamClear');
+  // A !!!marker!!! description: a typed answer
+  await page.fill('#seamScan', '500 E PAINT'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#seamAnswer');
+  ok('a marker asks for typed text', /ADD COLOR/.test(await page.textContent('#seamStep')));
+  await page.fill('#seamAnswer', 'RED'); await page.press('#seamAnswer', 'Enter'); await page.waitForTimeout(60);
+  ok('…added to the code', /500 E PAINT RED/.test(await page.textContent('#seamStep')));
+  await page.click('#seamClear');
   // New code, one scan: asks the size
-  await page.fill('#seamScan', 'X999 10/27/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#seamAskSize');
-  ok('a new product code asks what size end it is', /First time for product code X999/.test(await page.textContent('#seamAsk')));
+  await page.fill('#seamScan', 'X999 10/27/26 01'); await page.press('#seamScan', 'Enter');
+  await page.waitForFunction(() => /product code X999/.test((document.getElementById('seamAsk') || {}).textContent || ''), null, { timeout: 3000 }).catch(() => {});
+  ok('a new product code asks what size end it is', /First time for product code X999/.test(await page.textContent('#seamAsk')), await page.textContent('#seamAsk'));
   await page.fill('#seamAskSize', '40'); await page.click('#seamAskSave'); await page.waitForTimeout(60);
   ok('size must be 3 numbers', !calls.some((c) => c.fn === 'setEndProductSize'));
   await page.fill('#seamAskSize', '603'); await page.click('#seamAskSave'); await page.waitForTimeout(150);
   const sz = calls.filter((c) => c.fn === 'setEndProductSize')[0];
   ok('size saved for the code', sz && sz.args[0] === 'X999' && sz.args[1] === '603' && !(await page.$('#seamAskSize')) && /603 ends/.test(await page.textContent('#seamList')), sz && sz.args);
   // Remove a wrong scan
-  await page.click('[data-seamdel="SE-00002"]'); await page.waitForSelector('#modalOk');
+  const xid = await page.evaluate(() => seam.entries.filter((e) => e.code === 'X999')[0].id);
+  await page.click('[data-seamdel="' + xid + '"]'); await page.waitForSelector('#modalOk');
   await page.click('#modalOk'); await page.waitForTimeout(150);
-  ok('remove a wrong scan', calls.some((c) => c.fn === 'removeSeamerEnds' && c.args[0] === 'SE-00002') && !/X999/.test(await page.textContent('#seamList')));
+  ok('remove a wrong scan', calls.some((c) => c.fn === 'removeSeamerEnds' && c.args[0] === xid) && !/X999/.test(await page.textContent('#seamList')));
   // The line is remembered on this device
   await page.click('#backBtn'); await page.waitForSelector('#linesPickSeamer');
   await page.click('#linesPickSeamer'); await page.waitForSelector('#seamScan'); await page.waitForTimeout(100);

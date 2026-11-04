@@ -1909,33 +1909,51 @@ await concurrency(envBase, 'in-worker lock');
     'Transactions': [TX_H], 'Litho Jobs': [JOBS_H],
     'Production Runs': [['Run ID', 'Created On', 'Operator', 'Machine', 'Status'], ['RUN-000001', '2026-10-28', 'P', 'Press 13', 'Finished'],
       ['RUN-000002', '2026-10-28', 'P', 'Press 14', 'Finished'], ['RUN-000003', '2026-10-27', 'P', 'Press 13', 'Finished'], ['RUN-000004', '2026-10-28', 'P', 'Line 6', 'Finished']],
+  }, '1GNw1gAnB1jI9L6PdUoUeQAlOKCHlPJ1f0-kxcQroI9U': {
+    'Ends_Lookup': [['Label Code', 'Description', 'Per Pallet', 'Boxes Per Pallet', 'Weight', 'Type', 'Linked to'],
+      ['E401A', 'Odd code', 1000, 24, 75, '0.20', ''], ['603 E FE CL', '603 E FE CL 75# .20', 480, '', 75, '0.20', ''],
+      ['243807', 'S-1 or S-3?, "1"(S-1), "3"(S-3)', '', '', '', 'Check Value', ''], ['243807 1', '401 E PROFILE S-1', '', '', '', '', ''],
+      ['24711 HOLE', 'HD HI VIS WHT "HOLE"', '', '', '', 'Lid', '']],
   } });
   globalThis.fetch = f.fetchImpl;
   const e0 = await call('getSeamerEnds', ['6', '2026-11-02']);
   ok('seamer: empty day before any tab exists', e0.ok && e0.result.entries.length === 0 && e0.result.line === 'Line 6' && e0.result.products.length === 0, e0);
   const bad = await call('logSeamerEnds', [{ line: '6', code: 'E401A', made: '2026-11-05', date: '2026-11-02', operator: 'Ana' }, 'op-s0']);
   ok('seamer: a made date after the day seamed is refused', !bad.ok && /after 2026-11-02/.test(bad.error), bad);
+  ok('seamer: the day comes with the Ends list', e0.result.lookup.length === 5 && e0.result.lookup[2].type === 'Check Value' && !e0.result.lookupError, e0.result.lookup);
+  const notOn = await call('logSeamerEnds', [{ line: '6', code: '401 E NOPE', made: '2026-10-28', date: '2026-11-02', operator: 'Ana' }, 'op-sx']);
+  ok('seamer: a code not on the Ends list is refused', !notOn.ok && /401 E NOPE is not a product on the Ends list/.test(notOn.error) && !f.rows(SID, 'Seamer Ends').length, notOn);
+  const bare = await call('logSeamerEnds', [{ line: '6', code: '243807', made: '2026-10-28', date: '2026-11-02', operator: 'Ana' }, 'op-sy']);
+  ok('seamer: a Check Value code needs its answer', !bare.ok && /needs one more answer/.test(bare.error), bare);
   const noName = await call('logSeamerEnds', [{ line: '6', code: 'E401A', made: '2026-10-28', date: '2026-11-02' }, 'op-s0']);
   ok('seamer: needs a name', !noName.ok && /name/.test(noName.error), noName);
-  const a = await call('logSeamerEnds', [{ line: '6', code: 'E401A', made: '2026-10-28', shift: '01', scan: 'E401A | 10/28/26 01', date: '2026-11-02', operator: 'Ana' }, 'op-s1']);
-  ok('seamer: logged, asks for the size of a new code', a.ok && a.result.entry.id === 'SE-00001' && a.result.entry.line === 'Line 6' && a.result.needSize === true, a);
+  const a = await call('logSeamerEnds', [{ line: '6', code: 'e401a', lot: '10/28/26 01', made: '2026-10-28', shift: '01', scan: 'E401A | 10/28/26 01', date: '2026-11-02', operator: 'Ana' }, 'op-s1']);
+  ok('seamer: logged (code as the Ends list writes it), asks for the size of a code without one', a.ok && a.result.entry.id === 'SE-00001' && a.result.entry.code === 'E401A' && a.result.entry.line === 'Line 6' && a.result.needSize === true, a);
   const a2 = await call('logSeamerEnds', [{ line: '6', code: 'E401A', made: '2026-10-28', date: '2026-11-02', operator: 'Ana' }, 'op-s1']);
   ok('seamer: a retry with the same op adds nothing', a2.ok && a2.result.duplicate && f.rows(SID, 'Seamer Ends').length === 1, f.rows(SID, 'Seamer Ends'));
   const row = f.rows(SID, 'Seamer Ends')[0];
-  ok('seamer: row has the label', row['Product Code'] === 'E401A' && row['Made Date'] === '2026-10-28' && row['Shift'] === '01' && row['Date'] === '2026-11-02' && row['Operator'] === 'Ana' && row['End Size'] === '', row);
+  ok('seamer: row has the label', row['Product Code'] === 'E401A' && row['Made Date'] === '2026-10-28' && row['Shift'] === '01' && row['Date'] === '2026-11-02' && row['Operator'] === 'Ana' && row['End Size'] === '' && row['Lot #'] === '10/28/26 01' && row['Description'] === 'Odd code', row);
   const sz = await call('setEndProductSize', ['E401A', '401', 'Ana']);
   ok('seamer: product code size saved on End Products', sz.ok && sz.result.added && f.rows(SID, 'End Products')[0]['End Size'] === '401', f.rows(SID, 'End Products'));
   const badSz = await call('setEndProductSize', ['E401A', '40', 'Ana']);
   ok('seamer: size must be 3 numbers', !badSz.ok, badSz);
   const b = await call('logSeamerEnds', [{ line: 'Line 6', code: 'e401a', made: '2026-10-27', date: '2026-11-02', operator: 'Ana', pallet: '0007' }, 'op-s2']);
   ok('seamer: a known code (any case) gets its size, no question', b.ok && b.result.entry.size === '401' && !b.result.needSize && f.rows(SID, 'Seamer Ends')[1]['End Size'] === '401', b);
-  const c = await call('logSeamerEnds', [{ line: '3', code: 'E603B', made: '2026-10-28', date: '2026-11-02', operator: 'Bo', size: '603' }, 'op-s3']);
-  ok('seamer: size given with the scan is saved too', c.ok && c.result.entry.size === '603' && f.rows(SID, 'End Products').length === 2, f.rows(SID, 'End Products'));
+  const c = await call('logSeamerEnds', [{ line: '3', code: '603 E FE CL', made: '2026-10-28', date: '2026-11-02', operator: 'Bo' }, 'op-s3']);
+  ok('seamer: 603 E … is 603 ends by its name, no question', c.ok && c.result.entry.size === '603' && !c.result.needSize && f.rows(SID, 'End Products').length === 1, c);
+  const cv = await call('logSeamerEnds', [{ line: '2', code: '243807 1', baseCode: '243807', made: '2026-10-28', date: '2026-11-02', operator: 'Bo' }, 'op-s5']);
+  ok('seamer: Check Value answer that lands on a real row', cv.ok && cv.result.entry.code === '243807 1' && cv.result.entry.size === '401' && cv.result.entry.description === '401 E PROFILE S-1', cv);
+  const cv2 = await call('logSeamerEnds', [{ line: '2', code: '243807 3', baseCode: '243807', made: '2026-10-28', date: '2026-11-02', operator: 'Bo' }, 'op-s6']);
+  ok('seamer: Check Value answer without its own row is still taken', cv2.ok && cv2.result.entry.code === '243807 3' && cv2.result.entry.description === '', cv2);
+  const fake = await call('logSeamerEnds', [{ line: '2', code: '603 E FE CL 9', baseCode: '603 E FE CL', made: '2026-10-28', date: '2026-11-02', operator: 'Bo' }, 'op-s7']);
+  ok('seamer: an answer only counts for a code that asks for one', !fake.ok && /not a product/.test(fake.error), fake);
+  const hole = await call('logSeamerEnds', [{ line: '2', code: '24711 HOLE', made: '2026-10-28', date: '2026-11-02', operator: 'Bo' }, 'op-s8']);
+  ok('seamer: quotes in a normal description ask nothing', hole.ok && hole.result.entry.code === '24711 HOLE', hole);
   const d = await call('getSeamerEnds', ['6', '2026-11-02']);
-  ok('seamer: the day on Line 6, newest first, old row gets its size from End Products', d.ok && d.result.entries.length === 2 && d.result.entries[0].id === 'SE-00002' && d.result.entries[1].size === '401' && d.result.products.length === 2, d.result);
+  ok('seamer: the day on Line 6, newest first, old row gets its size from End Products', d.ok && d.result.entries.length === 2 && d.result.entries[0].id === 'SE-00002' && d.result.entries[1].size === '401' && d.result.products.length === 1, d.result);
   const rep = await call('getDepartmentReport', ['2026-11-02', '2026-11-02', 'seamer']);
   const sec = rep.result.sections[0], byId = {}; sec.rows.forEach((r) => { byId[r.entryId] = r; });
-  ok('seamer report: one section, a row per pallet', rep.ok && sec.key === 'seamer' && sec.rows.length === 3, rep);
+  ok('seamer report: one section, a row per pallet', rep.ok && sec.key === 'seamer' && sec.rows.length === 6 && byId['SE-00001'].lot === '10/28/26 01', rep);
   const t1 = byId['SE-00001'].sources.map((t) => t.ticket + '@' + t.used).sort();
   ok('seamer report: 401 ends made 10/28 -> the 401 ENDS steel used 10/28, with its press', t1.join() === '102826-001@Press 13,102826-002@Press 13', t1);
   ok('seamer report: 10/27 -> that day\'s 401 ENDS only', byId['SE-00002'].sources.map((t) => t.ticket).join() === '102726-001' && byId['SE-00002'].pallet === '0007', byId['SE-00002']);
@@ -1944,11 +1962,11 @@ await concurrency(envBase, 'in-worker lock');
   const none = await call('getDepartmentReport', ['2026-11-03', '2026-11-03', 'seamer']);
   ok('seamer report: other days empty', none.ok && none.result.sections[0].rows.length === 0, none);
   const rm = await call('removeSeamerEnds', ['se-00002']);
-  ok('seamer: remove a wrong scan', rm.ok && f.rows(SID, 'Seamer Ends').length === 2 && !f.rows(SID, 'Seamer Ends').some((r) => r['Entry ID'] === 'SE-00002'), f.rows(SID, 'Seamer Ends'));
+  ok('seamer: remove a wrong scan', rm.ok && f.rows(SID, 'Seamer Ends').length === 5 && !f.rows(SID, 'Seamer Ends').some((r) => r['Entry ID'] === 'SE-00002'), f.rows(SID, 'Seamer Ends'));
   const rm2 = await call('removeSeamerEnds', ['SE-00002']);
   ok('seamer: removing again is fine', rm2.ok && rm2.result.alreadyGone, rm2);
   const e = await call('logSeamerEnds', [{ line: '6', code: 'E401A', made: '2026-10-28', date: '2026-11-02', operator: 'Ana' }, 'op-s4']);
-  ok('seamer: new ids keep counting up', e.ok && e.result.entry.id === 'SE-00004', e.result && e.result.entry);
+  ok('seamer: new ids keep counting up', e.ok && e.result.entry.id === 'SE-00007', e.result && e.result.entry);
 }
 
 console.log((fail ? '✗' : '✓') + ' worker_test: ' + pass + ' passed, ' + fail + ' failed');

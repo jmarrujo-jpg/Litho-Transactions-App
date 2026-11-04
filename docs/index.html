@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.109.0</span>
+      <span class="version" id="appVersion">v1.110.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -837,7 +837,7 @@
     "🏭 Body Maker": "🏭 Body Maker",
     "🥫 Double Seamer": "🥫 Engargoladora doble",
     "Double Seamer — Ends Used": "Engargoladora doble — Tapas usadas",
-    "Each time a pallet of ends goes on the seamer, scan the label: the product code, then the date. A label with both on it is one scan.": "Cada vez que ponga una tarima de tapas en la engargoladora, escanee la etiqueta: el código de producto y luego la fecha. Una etiqueta con los dos es un solo escaneo.",
+    "Each time a pallet of ends goes on the seamer, scan the label: the product code, then the Lot #. A label with both on it is one scan.": "Cada vez que ponga una tarima de tapas en la engargoladora, escanee la etiqueta: el código de producto y luego el Lote #. Una etiqueta con los dos es un solo escaneo.",
     "Line #": "Línea #",
     "Day seamed": "Día engargolado",
     "Enter": "Entrar",
@@ -6866,10 +6866,10 @@
       });
       html += '<div class="sub" style="margin-top:4px"><b>Totals:</b> ' + order.map(function (key) { var t = tot[key]; return esc(t.product + ' — ' + t.n + (t.container ? ' ' + t.container : '')); }).join(' &middot; ') + '</div>';
     } else if (sec.key === 'seamer') {
-      head = ['Date', 'Line', 'Product code', 'End size', 'Made', 'Steel (tickets)', 'By'];
+      head = ['Date', 'Line', 'Product code', 'End size', 'Lot #', 'Steel (tickets)', 'By'];
       cells = function (x) { var n = (x.sources || []).length;
         return [esc(x.date), '<b>' + dash(x.machine) + '</b>', '<b>' + esc(x.code) + '</b>' + (x.pallet ? ' <span class="sub">#' + esc(x.pallet) + '</span>' : ''), x.size ? esc(x.size) + ' ends' : '<span class="badge inprogress">size?</span>',
-          esc(x.made) + (x.shift ? ' <span class="sub">(' + esc(x.shift) + ')</span>' : ''), n ? n + ' ticket' + (n === 1 ? '' : 's') : '<span class="sub">none found</span>', dash(x.by)]; };
+          (x.lot ? esc(x.lot) : esc(x.made) + (x.shift ? ' <span class="sub">(' + esc(x.shift) + ')</span>' : '')) + (x.lot ? ' <span class="sub">made ' + esc(x.made) + '</span>' : ''), n ? n + ' ticket' + (n === 1 ? '' : 's') : '<span class="sub">none found</span>', dash(x.by)]; };
       detail = seamerDetailHtml;
     } else if (sec.key === 'count') {
       head = ['Date', 'Session', 'By', 'Current', 'Promoted', 'WIP', 'Missing'];
@@ -6909,7 +6909,7 @@
           coats.map(function (c) { return c.item + (c.date ? ' ' + c.date : '') + (c.by ? ' ' + c.by : ''); }).join('; '),
           coats.map(function (c) { return c.chemCode || ''; }).filter(Boolean).join('; '),
           x.coatedOn, x.coatedBy, x.litho, x.cost, x.status, x.usedOn, x.machine, x.by, x.loadNo, x.output != null ? x.output + ' ' + (x.unit || '') : '', x.from,
-          sec.key === 'materials' ? x.lot : '', sec.key === 'materials' ? x.product : '', sec.key === 'materials' ? x.type : '',
+          sec.key === 'materials' || sec.key === 'seamer' ? x.lot : '', sec.key === 'materials' ? x.product : '', sec.key === 'materials' ? x.type : '',
           sec.key === 'materials' ? x.containers + (x.container ? ' ' + x.container : '') : '',
           sec.key === 'seamer' ? x.code : '', sec.key === 'seamer' ? x.size : '', sec.key === 'seamer' ? x.made : ''
         ].map(q).join(','));
@@ -10295,15 +10295,17 @@
     document.getElementById('linesPickSeamer').onclick = openSeamer;
   }
 
-  var seam = { line: '', date: '', code: '', made: '', shift: '', pallet: '', scan: '', entries: [], products: {}, loaded: false, busy: false, askSize: null };
+  var seam = { line: '', date: '', code: '', baseCode: '', desc: '', lot: '', made: '', shift: '', pallet: '', scan: '', ask: null,
+    entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, askSize: null };
   try { seam.line = localStorage.getItem('cscSeamLine') || ''; } catch (e) { /* no storage */ }
+  function seamReset() { seam.code = ''; seam.baseCode = ''; seam.desc = ''; seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; seam.ask = null; }
 
-  // What a label scan says. Old labels are two scans: the product code, then the date ("10/28/26 01":
-  // date + shift). A new label is one scan with both (and maybe the pallet number), e.g.
-  // "40112345 10/28/26 01 0007". Returns { code, made (YYYY-MM-DD), shift, pallet, badDate }.
+  // What a label scan says. Old labels are two scans: the product code (an Ends_Lookup Label Code such
+  // as "401 E ISE CL"), then the Lot # ("10/28/26 01": the date made + shift). A new label is one scan
+  // with both. Returns { rest (the text that isn't the lot), lot, made (YYYY-MM-DD), shift, badDate }.
   function seamParse(s) {
     s = String(s || '').replace(/[\u0000-\u001f]+/g, ' ').trim();
-    var out = { code: '', made: '', shift: '', pallet: '', badDate: false }, rest = s;
+    var out = { rest: '', lot: '', made: '', shift: '', badDate: false }, rest = s;
     var m = /(^|[^\d])(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4}|\d{2})(?!\d)(?:\s+(\d{1,2})(?!\d))?/.exec(s);
     var iso = /(^|[^\d])(\d{4})-(\d\d)-(\d\d)(?!\d)/.exec(s);
     if (m) {
@@ -10312,18 +10314,66 @@
       if (mo >= 1 && mo <= 12 && d >= 1 && dt.getUTCDate() === d) {
         out.made = y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
         out.shift = m[5] ? ('0' + +m[5]).slice(-2) : '';
+        out.lot = m[0].slice(m[1].length).trim().replace(/\s+/g, ' ');
       } else out.badDate = true;
       rest = s.slice(0, m.index + m[1].length) + ' ' + s.slice(m.index + m[0].length);
     } else if (iso) {
       out.made = iso[2] + '-' + iso[3] + '-' + iso[4];
+      out.lot = iso[0].slice(iso[1].length);
       rest = s.slice(0, iso.index + iso[1].length) + ' ' + s.slice(iso.index + iso[0].length);
     }
-    var parts = rest.split(/[\s|;,]+/).filter(Boolean);
-    out.code = parts[0] || '';
-    out.pallet = parts.slice(1).join(' ');
+    out.rest = rest.replace(/[|;,]+/g, ' ').replace(/\s+/g, ' ').trim();
     return out;
   }
+  function seamNorm(v) { return String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toUpperCase(); }
+  function seamRow(code) { var k = seamNorm(code); return seam.lookup.filter(function (r) { return seamNorm(r.code) === k; })[0] || null; }
+  // The Ends_Lookup row a scan is: the exact Label Code, else the longest code it starts with (what
+  // follows is a pallet # on a one-scan label). null = not on the list.
+  function seamMatch(text) {
+    var t = seamNorm(text), exact = seamRow(t);
+    if (exact) return { row: exact, pallet: '' };
+    var best = null;
+    seam.lookup.forEach(function (r) { var c = seamNorm(r.code); if (t.indexOf(c + ' ') === 0 && (!best || c.length > seamNorm(best.code).length)) best = r; });
+    return best ? { row: best, pallet: t.slice(seamNorm(best.code).length).trim() } : null;
+  }
+  // ---- Check values (same rules as the counting app's Ends_Lookup) ----
+  // Type "Check Value": the Description is the question then "value"(Label) options, e.g.
+  // S-1 or S-3?, "1"(S-1), "3"(S-3). Forgiving: spaces in the quotes, a missing ) or no label.
+  function seamIsCheckValue(r) { return !!r && /check\s*-?\s*value/i.test(r.type || ''); }
+  function parseCheckSpec(desc) {
+    var s = String(desc || ''), q = s.indexOf('"');
+    var question = (q === -1 ? s : s.slice(0, q)).trim().replace(/[,;:\s]+$/, '');
+    var options = [], re = /"([^"]*)"\s*(?:\(([^)",]*)\)?)?/g, m;
+    while ((m = re.exec(s))) { var val = m[1].trim(); if (val) options.push({ value: val, label: (m[2] || '').trim() || val }); }
+    return { question: question, options: options };
+  }
+  // Legacy markers: !!!prompt!!!, INPUT, ADD word -> the prompt to show (else null).
+  function checkPrompt(v) {
+    var s = String(v == null ? '' : v).trim(), m;
+    if ((m = /^!!!\s*(.*?)\s*!!!$/.exec(s))) return m[1] || 'Enter value';
+    if (/^input$/i.test(s)) return 'Enter value';
+    if ((m = /^add\s+(.+)$/i.exec(s))) return 'Add ' + m[1];
+    return null;
+  }
+  // The code plus the answer: whichever of "code+answer" / "code answer" is a real row, else a guess.
+  function appendCode(base, ans) {
+    ans = String(ans || '').trim();
+    var a = seamRow(base + ans), b = seamRow(base + ' ' + ans);
+    if (a) return a.code; if (b) return b.code;
+    return /^[A-Za-z0-9]/.test(ans) ? base + ' ' + ans : base + ans;
+  }
+  // What to ask before this row's code is complete, or null.
+  function seamAskFor(r) {
+    if (seamIsCheckValue(r)) {
+      var spec = parseCheckSpec(r.desc);
+      return { base: r.code, question: spec.question || L('Enter value', 'Escriba el valor'), options: spec.options };
+    }
+    var p = checkPrompt(r.desc);
+    return p ? { base: r.code, question: p, options: [] } : null;
+  }
   function seamSizeOf(code) {
+    var m = /^\s*(\d{3})\s*E\b/i.exec(String(code || ''));
+    if (m) return m[1];
     var p = seam.products[String(code || '').trim().toUpperCase()];
     return p ? p.size : '';
   }
@@ -10333,7 +10383,7 @@
     state.view = 'seamer'; metalsTab = 'lines';
     showTabbar(false); showBack(true); setDept('Metals');
     seam.date = seam.date && seam.date <= todayStr() ? seam.date : todayStr();
-    seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; seam.askSize = null;
+    seamReset(); seam.askSize = null;
     seam.loaded = false; seam.entries = [];
     renderSeamer();
     seamLoad();
@@ -10346,7 +10396,10 @@
       seam.entries = (r && r.entries) || [];
       seam.products = {};
       ((r && r.products) || []).forEach(function (p) { seam.products[String(p.code).trim().toUpperCase()] = p; });
+      seam.lookup = (r && r.lookup) || [];
+      seam.lookupError = (r && r.lookupError) || '';
       seam.loaded = true;
+      renderSeamStep();
       renderSeamerList();
     }).withFailureHandler(function (err) {
       if (tok !== viewToken) return;
@@ -10363,7 +10416,7 @@
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Double Seamer — Ends Used</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Each time a pallet of ends goes on the seamer, scan the label: the product code, then the date. A label with both on it is one scan.</div>' +
+        '<div class="sub" style="margin-bottom:12px">Each time a pallet of ends goes on the seamer, scan the label: the product code, then the Lot #. A label with both on it is one scan.</div>' +
         '<div class="row">' +
           operatorFieldHtml('seamOperator') +
           selectField('seamLine', 'Line #', lineChoices(seam.line), seam.line) +
@@ -10395,20 +10448,56 @@
     renderSeamerList();
     if (seam.line) scan.focus();
   }
-  // The scan box's prompt and the half-scanned label (code waiting for its date, or the other way).
+  // The scan box's prompt, the half-scanned label, and a Check Value question when the code needs one.
   function renderSeamStep() {
     var lab = document.getElementById('seamScanLabel'), st = document.getElementById('seamStep'), inp = document.getElementById('seamScan');
     if (!lab || !st) return;
-    if (seam.code && !seam.made) { lab.textContent = L('Now scan the date on the label (like 10/28/26 01)', 'Ahora escanee la fecha de la etiqueta (como 10/28/26 01)'); inp.placeholder = '10/28/26 01'; }
+    if (seam.ask) { lab.textContent = L('Answer the question above first', 'Primero conteste la pregunta de arriba'); inp.placeholder = ''; }
+    else if (seam.code && !seam.made) { lab.textContent = L('Now scan the Lot # on the label (like 10/28/26 01)', 'Ahora escanee el Lote # de la etiqueta (como 10/28/26 01)'); inp.placeholder = '10/28/26 01'; }
     else if (seam.made && !seam.code) { lab.textContent = L('Now scan the product code on the label', 'Ahora escanee el código de producto de la etiqueta'); inp.placeholder = L('product code…', 'código de producto…'); }
     else { lab.textContent = L('Scan the pallet label (product code first)', 'Escanee la etiqueta de la tarima (primero el código de producto)'); inp.placeholder = L('scan or type…', 'escanee o escriba…'); }
-    if (!seam.code && !seam.made) { st.innerHTML = ''; return; }
-    st.innerHTML = '<div class="card" style="background:var(--bg);margin:6px 0;padding:10px 12px">' +
+    var warn = seam.lookupError ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;margin:6px 0;padding:10px 12px"><b>' + esc(L('Can’t check product codes right now.', 'No se pueden revisar los códigos ahora.')) + '</b> <span class="sub">' + esc(seam.lookupError) + '</span></div>' : '';
+    if (!seam.code && !seam.made && !seam.ask) { st.innerHTML = warn; return; }
+    var code = seam.code || (seam.ask ? seam.ask.base + ' …' : '');
+    var html = warn + '<div class="card" style="background:var(--bg);margin:6px 0;padding:10px 12px">' +
       '<div class="sub">' + esc(L('This pallet so far:', 'Esta tarima hasta ahora:')) + '</div>' +
-      '<div style="font-size:17px;margin-top:2px"><b>' + esc(seam.code || '—') + '</b>' + (seamSizeOf(seam.code) ? ' <span class="badge wip">' + esc(seamSizeOf(seam.code)) + ' ends</span>' : '') +
-        ' &middot; ' + esc(L('made', 'hecho')) + ' <b>' + esc(seam.made ? seamFmtDate(seam.made) : '—') + '</b>' + (seam.shift ? ' <span class="sub">' + esc(L('shift', 'turno')) + ' ' + esc(seam.shift) + '</span>' : '') + '</div>' +
-      '<button class="btn secondary" id="seamClear" style="margin-top:8px;padding:6px 12px;font-size:13px">✕ ' + esc(L('Start this label over', 'Empezar esta etiqueta de nuevo')) + '</button></div>';
-    document.getElementById('seamClear').onclick = function () { seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
+      '<div style="font-size:17px;margin-top:2px"><b>' + esc(code || '—') + '</b>' + (seamSizeOf(seam.code) ? ' <span class="badge wip">' + esc(seamSizeOf(seam.code)) + ' ends</span>' : '') +
+        ' &middot; ' + esc(L('Lot #', 'Lote #')) + ' <b>' + esc(seam.lot || '—') + '</b></div>' +
+      (seam.desc ? '<div class="sub">' + esc(seam.desc) + '</div>' : '');
+    if (seam.ask) {
+      html += '<div style="margin-top:10px;font-size:17px;font-weight:600">' + esc(seam.ask.question) + '</div>' +
+        (seam.ask.options.length
+          ? '<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">' + seam.ask.options.map(function (o, i) {
+              return '<button class="btn" data-seamopt="' + i + '" style="padding:16px 22px;font-size:18px">' + esc(o.label) + '</button>'; }).join('') + '</div>'
+          : '<div class="row" style="align-items:flex-end;margin-top:8px"><div class="field" style="flex:1;margin:0"><input id="seamAnswer" autocomplete="off" style="font-size:18px;padding:12px"></div>' +
+              '<button class="btn success" id="seamAnswerOk" style="margin-left:8px">OK</button></div>');
+    }
+    html += '<button class="btn secondary" id="seamClear" style="margin-top:8px;padding:6px 12px;font-size:13px">✕ ' + esc(L('Start this label over', 'Empezar esta etiqueta de nuevo')) + '</button></div>';
+    st.innerHTML = html;
+    document.getElementById('seamClear').onclick = function () { seamReset(); renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
+    Array.prototype.forEach.call(st.querySelectorAll('[data-seamopt]'), function (b) {
+      b.onclick = function () { seamAnswer(seam.ask.options[+b.getAttribute('data-seamopt')].value); };
+    });
+    var ans = document.getElementById('seamAnswer');
+    if (ans) {
+      var okAns = function () { if (String(ans.value || '').trim()) seamAnswer(ans.value); else ans.focus(); };
+      ans.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); okAns(); } };
+      document.getElementById('seamAnswerOk').onclick = okAns;
+      ans.focus();
+    }
+  }
+  // The Check Value answer: added to the code (the real row it lands on, when there is one).
+  function seamAnswer(v) {
+    if (!seam.ask) return;
+    var code = appendCode(seam.ask.base, v), r = seamRow(code);
+    seam.code = code; seam.desc = r ? r.desc : ''; seam.ask = null;
+    seam.scan = seam.scan + ' | ' + String(v).trim();
+    if (seam.made) seamSave(); else { renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); }
+  }
+  function seamNotOnList(text) {
+    showModal({ title: L('Not on the Ends list', 'No está en la lista de tapas'),
+      message: L('"' + text + '" is not a product on the Ends list (Ends_Lookup). Check the label and scan it again, or ask the office to add it.', '"' + text + '" no es un producto de la lista de tapas (Ends_Lookup). Revise la etiqueta y escanéela otra vez, o pida a la oficina que lo agregue.'),
+      confirmText: 'OK' });
   }
 
   // One scan (or typed text) into the box.
@@ -10416,16 +10505,27 @@
     var inp = document.getElementById('seamScan');
     var v = String(raw || '').trim();
     if (!v || seam.busy) return;
+    if (seam.ask) { toast(L('Answer the question first', 'Primero conteste la pregunta')); return; }
     var p = seamParse(v);
-    if (p.badDate) { toast(L('That date doesn’t look right — scan it again', 'Esa fecha no se ve bien — escanéela otra vez')); if (inp) inp.select(); return; }
-    if (p.made) {
-      if (p.made > todayStr()) { toast(L('That date is after today — check the label', 'Esa fecha es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
-      seam.made = p.made; seam.shift = p.shift;
+    if (p.badDate) { toast(L('That Lot # doesn’t look right — scan it again', 'Ese Lote # no se ve bien — escanéelo otra vez')); if (inp) inp.select(); return; }
+    if (p.made && p.made > todayStr()) { toast(L('That Lot # is after today — check the label', 'Ese Lote # es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
+    var match = null;
+    if (p.rest) {
+      if (!seam.loaded) { toast(L('Still loading the Ends list — try again in a moment', 'Todavía cargando la lista de tapas — intente en un momento')); return; }
+      if (seam.lookupError) { showModal({ title: L('Can’t check the product code', 'No se puede revisar el código'), message: seam.lookupError, confirmText: 'OK' }); return; }
+      match = seamMatch(p.rest);
+      if (!match) { if (inp) inp.select(); seamNotOnList(p.rest); return; }
     }
-    if (p.code) { seam.code = p.code; if (p.pallet) seam.pallet = p.pallet; }
+    if (p.made) { seam.made = p.made; seam.shift = p.shift; seam.lot = p.lot; }
+    if (match) {
+      seam.baseCode = match.row.code; seam.pallet = match.pallet;
+      seam.ask = seamAskFor(match.row);
+      if (seam.ask) { seam.code = ''; seam.desc = ''; }
+      else { seam.code = match.row.code; seam.desc = match.row.desc; }
+    }
     seam.scan = seam.scan ? seam.scan + ' | ' + v : v;
-    if (inp) { inp.value = ''; inp.focus(); }
-    if (seam.code && seam.made) seamSave(); else renderSeamStep();
+    if (inp) { inp.value = ''; if (!seam.ask) inp.focus(); }
+    if (seam.code && seam.made && !seam.ask) seamSave(); else renderSeamStep();
   }
 
   function seamSave() {
@@ -10433,18 +10533,18 @@
     op = String(op || '').trim();
     if (!op) { toast(L('Enter your name first', 'Primero escriba su nombre')); renderSeamStep(); return; }
     if (!seam.line) { toast(L('Pick the line first', 'Primero elija la línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
-    var entry = { line: seam.line, code: seam.code, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
+    var entry = { line: seam.line, code: seam.code, baseCode: seam.baseCode, lot: seam.lot, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
     var same = seam.entries.filter(function (x) { return x.code.toUpperCase() === entry.code.toUpperCase() && x.made === entry.made && (!entry.pallet || x.pallet === entry.pallet); })[0];
     var go = function () {
       seam.busy = true;
       var btn = document.getElementById('seamScanBtn'); if (btn) { btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…'); }
       runMutation('logSeamerEnds', [entry, newOpId()], function (r) {
         seam.busy = false; lastOperator = op;
-        seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = '';
+        seamReset();
         if (state.view !== 'seamer') return;
         var e = r && r.entry;
         if (e && !r.duplicate && e.date === seam.date && e.line === seam.line) seam.entries.unshift(e);
-        toast(L('Saved ', 'Guardado ') + entry.code + ' — ' + L('made ', 'hecho ') + seamFmtDate(entry.made));
+        toast(L('Saved ', 'Guardado ') + entry.code + ' — ' + L('Lot ', 'Lote ') + entry.lot);
         seam.askSize = r && r.needSize ? entry.code : null;
         var b2 = document.getElementById('seamScanBtn'); if (b2) { b2.disabled = false; b2.textContent = L('Enter', 'Entrar'); }
         renderSeamStep(); renderSeamAsk(); renderSeamerList();
@@ -10452,14 +10552,14 @@
       }, function (err) {
         seam.busy = false;
         var b3 = document.getElementById('seamScanBtn'); if (b3) { b3.disabled = false; b3.textContent = L('Enter', 'Entrar'); }
-        toast('Error: ' + err.message);
+        showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' });
       });
     };
     if (same) {
       showConfirm(L('Already scanned?', '¿Ya escaneada?'),
-        L(entry.code + ' made ' + seamFmtDate(entry.made) + ' is already on today’s list. Is this another pallet?', entry.code + ' hecho ' + seamFmtDate(entry.made) + ' ya está en la lista de hoy. ¿Es otra tarima?'),
+        L(entry.code + ' lot ' + entry.lot + ' is already on today’s list. Is this another pallet?', entry.code + ' lote ' + entry.lot + ' ya está en la lista de hoy. ¿Es otra tarima?'),
         go, L('Yes, another pallet', 'Sí, otra tarima'));
-      seam.code = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; renderSeamStep();
+      seamReset(); renderSeamStep();
       return;
     }
     go();
@@ -10506,7 +10606,8 @@
       return '<div class="queue-item" style="padding:8px 0">' +
         '<div style="min-width:0"><div class="ticket-id" style="font-size:16px">' + esc(x.code) +
           (x.size ? ' <span class="badge wip">' + esc(x.size) + ' ends</span>' : ' <span class="badge inprogress">' + esc(L('size?', '¿tamaño?')) + '</span>') + '</div>' +
-          '<div class="sub">' + esc(L('Made ', 'Hecho ')) + esc(seamFmtDate(x.made)) + (x.shift ? ' &middot; ' + esc(L('shift ', 'turno ')) + esc(x.shift) : '') +
+          (x.description ? '<div class="sub">' + esc(x.description) + '</div>' : '') +
+          '<div class="sub">' + esc(L('Lot ', 'Lote ')) + esc(x.lot || (seamFmtDate(x.made) + (x.shift ? ' ' + x.shift : ''))) +
             (x.pallet ? ' &middot; #' + esc(x.pallet) : '') + ' &middot; ' + esc(x.by) + ' &middot; ' + esc(String(x.at || '').slice(11, 16)) + '</div></div>' +
         '<button class="btn secondary" style="padding:6px 10px;font-size:13px" data-seamdel="' + esc(x.id) + '">' + esc(L('Remove', 'Quitar')) + '</button>' +
       '</div>';
@@ -10515,7 +10616,7 @@
       b.onclick = function () {
         var id = b.getAttribute('data-seamdel'), x = seam.entries.filter(function (e) { return e.id === id; })[0];
         if (!x) return;
-        showConfirm(L('Remove this pallet?', '¿Quitar esta tarima?'), L('Remove ' + x.code + ' made ' + seamFmtDate(x.made) + ' from the list? Use this for a wrong scan.', '¿Quitar ' + x.code + ' hecho ' + seamFmtDate(x.made) + ' de la lista? Úselo para un escaneo equivocado.'), function () {
+        showConfirm(L('Remove this pallet?', '¿Quitar esta tarima?'), L('Remove ' + x.code + ' lot ' + (x.lot || seamFmtDate(x.made)) + ' from the list? Use this for a wrong scan.', '¿Quitar ' + x.code + ' lote ' + (x.lot || seamFmtDate(x.made)) + ' de la lista? Úselo para un escaneo equivocado.'), function () {
           b.disabled = true;
           runMutation('removeSeamerEnds', [id], function () {
             seam.entries = seam.entries.filter(function (e) { return e.id !== id; });

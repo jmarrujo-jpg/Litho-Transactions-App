@@ -14,6 +14,9 @@
  *   SNAPSHOT_SHEET_ID   (var)     spreadsheet id of the "Steel Snapshot" archive
  *   SPEC_SHEET_ID       (var)     spreadsheet with the CanSpecs / EndSpecs tabs (optional; defaults
  *                                 to the known one). Share it with the service account (Viewer is enough).
+ *   ENDS_SHEET_ID       (var)     the "Inventory Scanner Data" spreadsheet whose Ends_Lookup tab lists the
+ *                                 end product codes the Double Seamer accepts (optional; defaults to
+ *                                 the known one). Share it with the service account (Viewer is enough).
  *   WRITE_LOCK          (Durable Object binding -> class WriteLock)  recommended: makes every
  *                       write run one at a time across all devices (see "write lock" below).
  *                       Optional — without it the app still works, with a weaker per-server lock.
@@ -497,9 +500,9 @@ async function handle(fn, args, env) {
       return getUseTrace(sheets, args[0], args[1], args[2]);
     // ---- double seamer ----
     case 'getSeamerEnds': // (line, dateYMD) the pallets of ends put on that line that day + the known product codes
-      return getSeamerEnds(sheets, args[0], args[1]);
+      return getSeamerEnds(sheets, args[0], args[1], env);
     case 'logSeamerEnds': // (entry, opId) one pallet of ends onto a line's seamer
-      return logSeamerEnds(sheets, args[0], args[1]);
+      return logSeamerEnds(sheets, args[0], args[1], env);
     case 'removeSeamerEnds': // (entryId) a wrong scan
       return removeSeamerEnds(sheets, args[0]);
     case 'setEndProductSize': // (productCode, size, operator) what size end a product code is
@@ -6047,7 +6050,52 @@ async function getUseTrace(sheets, date, diameter, days) {
 // first time a code is seen), so a report can find the steel: that size's ENDS tickets used on the
 // made date.
 const SEAMER = 'Seamer Ends';
-const SEAMER_HEADERS = ['Entry ID', 'Logged At', 'Date', 'Line', 'Product Code', 'End Size', 'Made Date', 'Shift', 'Pallet #', 'Scan', 'Operator', 'Notes', 'Op ID'];
+const SEAMER_HEADERS = ['Entry ID', 'Logged At', 'Date', 'Line', 'Product Code', 'Description', 'Lot #', 'End Size', 'Made Date', 'Shift', 'Pallet #', 'Scan', 'Operator', 'Notes', 'Op ID'];
+// The product codes the seamer accepts: the Ends_Lookup tab of the Inventory Scanner Data sheet (the
+// counting app's list). Only Label Code (A), Description (B) and Type (F) matter here: Type "Check
+// Value" means the code needs one more answer at scan time (the Description holds the question and
+// its "value"(Label) options), and the answer is added to the code.
+const DEFAULT_ENDS_SHEET_ID = '1GNw1gAnB1jI9L6PdUoUeQAlOKCHlPJ1f0-kxcQroI9U';
+const ENDS_LOOKUP_TAB = 'Ends_Lookup';
+const ENDS_LOOKUP_TTL_MS = 60000;
+let endsLookupCache = null;   // { id, at, rows }
+const normCode = (v) => String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toUpperCase();
+async function loadEndsLookup(sheets, env) {
+  const id = (env && env.ENDS_SHEET_ID) || DEFAULT_ENDS_SHEET_ID;
+  if (endsLookupCache && endsLookupCache.id === id && Date.now() - endsLookupCache.at < ENDS_LOOKUP_TTL_MS) return endsLookupCache.rows;
+  let v;
+  try { v = await sheets.readFrom(id, "'" + ENDS_LOOKUP_TAB + "'!A1:H3000"); }
+  catch (e) {
+    const who = (env && env.GCP_SA_EMAIL) ? ' (' + env.GCP_SA_EMAIL + ')' : '';
+    throw new Error('Could not read the Ends list (' + ENDS_LOOKUP_TAB + ' in the Inventory Scanner Data sheet). Share that sheet with the app\'s service account' + who + ' as Viewer. ' + String((e && e.message) || ''));
+  }
+  const hi = v.findIndex((r) => (r || []).some((x) => /^label\s*code$/i.test(String(x || '').trim())));
+  const h = (hi === -1 ? ['Label Code', 'Description', 'Per Pallet', 'Boxes Per Pallet', 'Weight', 'Type'] : v[hi]).map((x) => String(x || '').trim().toLowerCase());
+  const col = (name, dflt) => { const i = h.indexOf(name); return i === -1 ? dflt : i; };
+  const cCode = col('label code', 0), cDesc = col('description', 1), cType = col('type', 5);
+  const rows = [];
+  v.slice(hi === -1 ? 1 : hi + 1).forEach((r) => {
+    const code = String((r || [])[cCode] || '').trim().replace(/\s+/g, ' ');
+    if (code) rows.push({ code, desc: String(r[cDesc] || '').trim(), type: String(r[cType] || '').trim() });
+  });
+  endsLookupCache = { id, at: Date.now(), rows };
+  return rows;
+}
+// The row a code is on (any case / spacing), or null.
+function endsLookupRow(rows, code) { const k = normCode(code); return rows.filter((r) => normCode(r.code) === k)[0] || null; }
+// A row that asks for one more answer at scan time: Type "Check Value", or an INPUT / ADD x / !!!x!!!
+// marker in the Description. The code scanned is that row's code plus the answer.
+function endsAsksMore(r) {
+  if (!r) return false;
+  if (/check\s*-?\s*value/i.test(r.type)) return true;
+  const d = String(r.desc || '').trim();
+  return /^!!!.*!!!$/.test(d) || /^input$/i.test(d) || /^add\s+\S/i.test(d);
+}
+// The end size: 401 E …, 603 E … (in the code, else the description), else the End Products tab.
+function endSizeFromName(code, desc) {
+  const m = /^\s*(\d{3})\s*E\b/i.exec(String(code || '')) || /^\s*(\d{3})\s*E\b/i.exec(String(desc || ''));
+  return m ? m[1] : '';
+}
 const END_PRODUCTS = 'End Products';
 const END_PRODUCT_HEADERS = ['Product Code', 'End Size', 'Description', 'Added At', 'Added By'];
 const SEAMER_READ_MAX = 500;
@@ -6074,21 +6122,24 @@ function seamerOut(o, prods) {
   const code = String(o['Product Code'] || '').trim();
   const p = prods && prods[codeKey(code)];
   return { id: String(o['Entry ID'] || '').trim(), at: String(o['Logged At'] || ''), date: toYMD(o['Date']), line: String(o['Line'] || '').trim(),
-    code, size: endSizeOf(o['End Size']) || (p ? p.size : ''), description: p ? p.description : '', made: toYMD(o['Made Date']),
+    code, size: endSizeOf(o['End Size']) || (p ? p.size : '') || endSizeFromName(code, o['Description']), description: String(o['Description'] || '').trim() || (p ? p.description : ''),
+    lot: String(o['Lot #'] || '').trim(), made: toYMD(o['Made Date']),
     shift: String(o['Shift'] || '').trim(), pallet: String(o['Pallet #'] || '').trim(), scan: String(o['Scan'] || ''),
     by: String(o['Operator'] || '').trim(), notes: String(o['Notes'] || '').trim() };
 }
 // (line, date): that day's pallets on that line ('' line = every line), newest first, plus the
 // known product codes (so the screen knows when to ask for an end size).
-async function getSeamerEnds(sheets, line, date) {
+async function getSeamerEnds(sheets, line, date, env) {
   date = toYMD(date || '') || todayYMD();
   line = seamerLine(line);
+  let lookup = [], lookupError = '';
+  try { lookup = await loadEndsLookup(sheets, env); } catch (e) { lookupError = e.message; }
   const prods = await endProductMap(sheets);
   let rows = [];
   try { rows = (await readObjects(sheets, SEAMER)).rows; } catch (e) { rows = []; }
   const entries = rows.map((o) => seamerOut(o, prods)).filter((e) => e.id && e.date === date && (!line || e.line.toLowerCase() === line.toLowerCase()))
     .sort((a, b) => (b.at < a.at ? -1 : b.at > a.at ? 1 : b.id < a.id ? -1 : 1));
-  return { date, line, entries: entries.slice(0, SEAMER_READ_MAX),
+  return { date, line, entries: entries.slice(0, SEAMER_READ_MAX), lookup, lookupError,
     products: Object.keys(prods).map((k) => ({ code: prods[k].code, size: prods[k].size, description: prods[k].description })) };
 }
 // Save a product code's end size (and description) — new, or filling one that's blank / changed.
@@ -6117,9 +6168,10 @@ async function setEndProductSize(sheets, code, size, operator) {
 }
 // One pallet of ends onto a line's seamer. e: { line, code, made (date made), shift, pallet, scan,
 // size (only when the code is new), date (day seamed; default today), operator, notes }.
-async function logSeamerEnds(sheets, e, opId) {
+async function logSeamerEnds(sheets, e, opId, env) {
   e = e || {};
-  const line = seamerLine(e.line), code = String(e.code || '').trim(), operator = String(e.operator || '').trim();
+  const line = seamerLine(e.line), operator = String(e.operator || '').trim();
+  let code = String(e.code || '').trim().replace(/\s+/g, ' ');
   const date = toYMD(e.date || '') || todayYMD(), made = toYMD(e.made || '');
   if (!operator) throw new Error('Enter your name.');
   if (!line) throw new Error('Enter the line number.');
@@ -6127,8 +6179,25 @@ async function logSeamerEnds(sheets, e, opId) {
   if (!/^\d{4}-\d\d-\d\d$/.test(made)) throw new Error('Scan the date on the pallet label (like 10/28/26 01).');
   if (!/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Pick the day it was seamed.');
   if (made > date) throw new Error('The label says the ends were made ' + made + ', after ' + date + '. Check the label and scan it again.');
+  // Only codes on the Ends list. A Check Value code is its listed code plus the answer picked.
+  const lookup = await loadEndsLookup(sheets, env);
+  let row = endsLookupRow(lookup, code);
+  if (!row) {
+    const base = endsLookupRow(lookup, e.baseCode);
+    if (!base || !endsAsksMore(base) || normCode(code).indexOf(normCode(base.code)) !== 0) throw new Error(code + ' is not a product on the Ends list. Check the label and scan it again.');
+    row = { code, desc: '', type: '' };
+  } else {
+    if (endsAsksMore(row)) throw new Error(row.code + ' needs one more answer on the Ends list (' + (row.desc || row.type) + '). Scan it again and pick the answer.');
+    code = row.code;
+  }
+  const lot = String(e.lot || '').trim();
   await ensureTab(sheets, SEAMER, SEAMER_HEADERS);
-  const t = await readTab(sheets, SEAMER);
+  let t = await readTab(sheets, SEAMER);
+  if (SEAMER_HEADERS.some((h) => t.headers.indexOf(h) === -1)) {
+    let hdr = t.headers;
+    for (const h of SEAMER_HEADERS) hdr = (await ensureColumn(sheets, SEAMER, hdr, h)).headers;
+    t = await readTab(sheets, SEAMER);
+  }
   if (opId) {
     const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
     if (ex) return { ok: true, duplicate: true, entry: seamerOut(ex, await endProductMap(sheets)) };
@@ -6136,14 +6205,15 @@ async function logSeamerEnds(sheets, e, opId) {
   const prods = await endProductMap(sheets);
   let size = endSizeOf(e.size);
   if (size) await saveEndProduct(sheets, code, size, '', operator, prods);
-  else size = prods[codeKey(code)] ? prods[codeKey(code)].size : '';
+  else size = endSizeFromName(code, row.desc) || (prods[codeKey(code)] ? prods[codeKey(code)].size : '');
+  const desc = row.code === code ? row.desc : '';
   const id = 'SE-' + ('00000' + (maxIdNumber(t.rows, 'Entry ID', 'SE-') + 1)).slice(-5);
   const shift = String(e.shift || '').trim(), pallet = String(e.pallet || '').trim();
-  const obj = { 'Entry ID': id, 'Logged At': nowStamp(), 'Date': date, 'Line': line, 'Product Code': code, 'End Size': size, 'Made Date': made,
+  const obj = { 'Entry ID': id, 'Logged At': nowStamp(), 'Date': date, 'Line': line, 'Product Code': code, 'Description': desc, 'Lot #': lot, 'End Size': size, 'Made Date': made,
     'Shift': shift, 'Pallet #': pallet, 'Scan': String(e.scan || '').slice(0, 300), 'Operator': operator, 'Notes': String(e.notes || '').trim(), 'Op ID': opId || '' };
   await appendRowObj(sheets, SEAMER, t.headers, obj);
   const p = prods[codeKey(code)];
-  return { ok: true, entry: { id, at: obj['Logged At'], date, line, code, size, description: p ? p.description : '', made, shift, pallet, by: operator, notes: obj['Notes'] }, needSize: !size };
+  return { ok: true, entry: { id, at: obj['Logged At'], date, line, code, size, description: desc || (p ? p.description : ''), lot, made, shift, pallet, by: operator, notes: obj['Notes'] }, needSize: !size };
 }
 // A wrong scan: the row is deleted.
 async function removeSeamerEnds(sheets, entryId) {
@@ -6281,7 +6351,7 @@ async function getDepartmentReport(sheets, start, end, dept) {
         });
         rows = entries.map((e) => {
           const steel = (need[e.made + '|' + e.size] || []).map((o) => Object.assign(tr(o), { used: runMach[String(o['Run ID'] || '').trim()] || (o['Used Via'] ? 'via ' + o['Used Via'] : '') }));
-          return { date: e.date, at: e.at, entryId: e.id, machine: e.line, code: e.code, size: e.size, description: e.description, made: e.made, shift: e.shift, pallet: e.pallet,
+          return { date: e.date, at: e.at, entryId: e.id, machine: e.line, code: e.code, size: e.size, description: e.description, lot: e.lot, made: e.made, shift: e.shift, pallet: e.pallet,
             by: e.by, notes: e.notes, sources: steel, from: steel.map((t) => t.ticket + (t.mill ? ' [mill ' + t.mill + ']' : '') + (t.used ? ' (' + t.used + ')' : '')).join(' + ') };
         });
       }
