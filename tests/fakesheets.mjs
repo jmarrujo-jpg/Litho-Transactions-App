@@ -121,7 +121,12 @@ export function makeFake(seed) {
         } else if (rq.deleteDimension) {
           const g = rq.deleteDimension.range;
           const t = Object.values(book(bid).tabs).find((x) => x.id === g.sheetId);
+          // Like Sheets: a tab with frozen rows can't lose every row under them.
+          if (t.frozen != null && t.rowCount - (g.endIndex - g.startIndex) <= t.frozen) {
+            const e = new Error('Invalid requests[0].deleteDimension: Sorry, it is not possible to delete all non-frozen rows.'); e.status = 400; throw e;
+          }
           t.rows.splice(g.startIndex, g.endIndex - g.startIndex);
+          if (t.frozen != null) t.rowCount -= g.endIndex - g.startIndex;
         } else throw new Error('fake: unknown batch request ' + JSON.stringify(rq));
       }
       return { replies };
@@ -164,6 +169,7 @@ export function makeFake(seed) {
   }
 
   return { books, book, faults, log, fetchImpl, drive,
+    grid(bid, tab) { return book(bid).tabs[tab]; },
     rows(bid, tab) { const t = book(bid).tabs[tab]; if (!t) return []; const h = t.rows[0] || []; return t.rows.slice(1).filter((r) => r.some((v) => v !== '' && v != null)).map((r) => { const o = {}; h.forEach((k, i) => { o[k] = r[i] == null ? '' : r[i]; }); return o; }); },
   };
 }

@@ -704,8 +704,11 @@ await concurrency(envBase, 'in-worker lock');
   // Wipe & re-import: same tickets come back with new Skid IDs, one with a new ticket number.
   addTab('Current', [['Ticket', 'QTY/LOAD', 'Mill'], ['202', 10, ''], ['999', 5, 'MB1'], ['300', 5, 'MZ'], ['200', 10, 'MA1']]);
   addTab('WIP', [['Ticket', 'QTY/LOAD', 'Mill'], ['201', 10, 'MA2']]);
+  // The sheet's data reaches its very last row, under a frozen header (Sheets then refuses to delete every row).
+  { const g = f.grid(SID, 'Steel Tickets'); g.rowCount = g.rows.length; g.frozen = 1; }
   const imp = await call('importStaging', ['op-24-i']);
   ok('import ok', imp.ok && imp.result.total === 5, imp);
+  ok('import: a tab full to its last row still wipes', f.grid(SID, 'Steel Tickets').rowCount >= 6, f.grid(SID, 'Steel Tickets').rowCount);
   ok('import: every imported ticket is already in Access', f.rows(SID, 'Steel Tickets').every((r) => r['Sent to Access'] === 'Already in Access'));
   const byT = (t) => f.rows(SID, 'Steel Tickets').filter((r) => r['Ticket'] === t)[0];
   ok('import: back on by mill', byT('200')['Receiver'] === 'R-00001' && byT('201')['Receiver'] === 'R-00002' && byT('999')['Receiver'] === 'R-00002',

@@ -714,8 +714,16 @@ async function makeSheets(env) {
       return writing(null, () => call(base + ':batchUpdate', json({ requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: count } }] })));
     },
     // Never blindly re-sent: a repeated delete would remove whichever row moved up into the gap.
+    // Sheets won't delete every row under a frozen header ("not possible to delete all non-frozen
+    // rows") — which is what wiping a tab whose data reaches its last row asks for. That refusal
+    // changed nothing, so add one blank row at the bottom and delete again.
     async deleteRows(sheetId, startIndex, endIndex) {   // 0-based, half-open [startIndex, endIndex)
-      return writing(null, () => call(base + ':batchUpdate', json({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }), true));
+      const del = () => writing(null, () => call(base + ':batchUpdate', json({ requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex, endIndex } } }] }), true));
+      try { return await del(); } catch (e) {
+        if (!/delete all non-frozen row/i.test(String((e && e.message) || ''))) throw e;
+        await this.appendRows(sheetId, 1);
+        return del();
+      }
     },
     // ---- cross-spreadsheet helpers (write to a DIFFERENT spreadsheet the SA has been shared on;
     //      used for the snapshots archive). Only the `spreadsheets` scope is needed. ----
