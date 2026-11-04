@@ -2576,7 +2576,7 @@ const base = {
 // ---- Double Seamer: Metal Lines -> Body Maker / Double Seamer; scan code + date per pallet
 { let saved = [], nid = 0;
   const { page, calls } = await boot(Object.assign({}, base, {
-    getProductionRuns: () => R([]),
+    getProductionRuns: () => R([]), createRun: (a) => R({ runId: "RUN-000009", machine: a[0], operator: a[1], status: "Open" }),
     getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }] }),
     logSeamerEnds: (a) => { const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', size: a[0].code.toUpperCase() === 'E401A' ? '401' : '', by: a[0].operator }, a[0]); saved.unshift(e); return R({ ok: true, entry: e, needSize: !e.size }); },
     setEndProductSize: () => R({ added: true }),
@@ -2597,13 +2597,23 @@ const base = {
   await page.click('#metalsPickLines'); await page.waitForSelector('#linesPickSeamer');
   ok('Metal Lines asks: Body Maker or Double Seamer', !!(await page.$('#linesPickBody')) && /Which machine are you on/.test(await page.textContent('#view')));
   await page.click('#linesPickBody'); await page.waitForSelector('#startRunBtn');
-  ok('Body Maker is the run screen as before', /Metal Lines — Log Work/.test(await page.textContent('#view')) && !!(await page.$('#runMachineNum')));
+  ok('Body Maker is the run screen as before', /Metal Lines — Log Work/.test(await page.textContent('#view')) && !(await page.$('#runMachineNum')));
+  const bmLines = await page.$$eval('#runMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
+  ok('Body Maker: the line is a dropdown, Line 2 to Line 6', bmLines.join() === 'Line 2,Line 3,Line 4,Line 5,Line 6', bmLines);
+  await page.fill('#runOperator', 'Ana'); await page.click('#startRunBtn'); await page.waitForTimeout(100);
+  ok('Body Maker: must pick a line', !calls.some((c) => c.fn === 'createRun'));
+  await page.selectOption('#runMachineSel', 'Line 4'); await page.click('#startRunBtn'); await page.waitForTimeout(200);
+  ok('Body Maker: starts on Line 4', (calls.filter((c) => c.fn === 'createRun')[0] || { args: [] }).args[0] === 'Line 4', calls.filter((c) => c.fn === 'createRun'));
+  await page.evaluate(() => { currentRun = null; openLinesChooser(); }); await page.waitForSelector('#linesPickBody');
+  await page.click('#linesPickBody'); await page.waitForSelector('#startRunBtn');
   await page.click('#backBtn'); await page.waitForSelector('#linesPickSeamer');
   ok('Back from Body Maker returns to the two buttons', true);
   await page.click('#linesPickSeamer'); await page.waitForSelector('#seamScan');
-  ok('Double Seamer screen', /Double Seamer — Ends Used/.test(await page.textContent('#view')) && /Enter the line number above/.test(await page.textContent('#seamList')));
+  ok('Double Seamer screen', /Double Seamer — Ends Used/.test(await page.textContent('#view')) && /Pick the line above/.test(await page.textContent('#seamList')));
+  const smLines = await page.$$eval('#seamLine option', (os) => os.map((o) => o.value).filter(Boolean));
+  ok('Double Seamer: the line is a dropdown, Line 2 to Line 6', smLines.join() === 'Line 2,Line 3,Line 4,Line 5,Line 6', smLines);
   await page.fill('#seamOperator', 'Ana');
-  await page.fill('#seamLine', '6'); await page.dispatchEvent('#seamLine', 'change'); await page.waitForTimeout(150);
+  await page.selectOption('#seamLine', 'Line 6'); await page.waitForTimeout(150);
   ok('line picked: loads that day for Line 6', calls.some((c) => c.fn === 'getSeamerEnds' && c.args[0] === 'Line 6') && /Nothing scanned yet/.test(await page.textContent('#seamList')));
   // Old label: two scans
   await page.fill('#seamScan', 'E401A'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
@@ -2637,7 +2647,7 @@ const base = {
   // The line is remembered on this device
   await page.click('#backBtn'); await page.waitForSelector('#linesPickSeamer');
   await page.click('#linesPickSeamer'); await page.waitForSelector('#seamScan'); await page.waitForTimeout(100);
-  ok('the line is remembered next time', (await page.$eval('#seamLine', (i) => i.value)) === '6' && /E401A/.test(await page.textContent('#seamList')));
+  ok('the line is remembered next time', (await page.$eval('#seamLine', (i) => i.value)) === 'Line 6' && /E401A/.test(await page.textContent('#seamList')));
   await page.click('#backBtn'); await page.waitForSelector('#linesPickSeamer');
   await page.click('#backBtn'); await page.waitForSelector('#metalsPickLines');
   ok('Back from the two buttons returns to the Metals chooser', true);

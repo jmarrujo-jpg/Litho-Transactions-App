@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.108.0</span>
+      <span class="version" id="appVersion">v1.109.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10216,6 +10216,10 @@
   var runSwapSkid = null;    // when set, the next picked skid replaces this one on the run
   var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter' | 'coil' | 'used'
   // The machines on the floor, picked from a list (no typing). Stored as shown, e.g. 'Press 13'.
+  // The metal lines (Body Maker and Double Seamer pick from these). Stored as shown, e.g. 'Line 6'.
+  var LINE_MACHINES = ['Line 2', 'Line 3', 'Line 4', 'Line 5', 'Line 6'];
+  // The list, plus a line an older record used that isn't on it any more (so it still shows).
+  function lineChoices(cur) { return cur && LINE_MACHINES.indexOf(cur) === -1 ? LINE_MACHINES.concat([cur]) : LINE_MACHINES; }
   var PRESS_MACHINES = ['A Liner', 'Press 2', 'Press 3', 'Press 13', 'Press 14', 'Press 15', 'Press 16', 'Press 17', 'Press 18', 'Press 19', 'Press 20'];
   var SLITTER_MACHINES = ['1 H', '2 H', '7 A', '9 A'];
   var SCROLL_MACHINES = ['2 SS', '3 SS'];
@@ -10362,7 +10366,7 @@
         '<div class="sub" style="margin-bottom:12px">Each time a pallet of ends goes on the seamer, scan the label: the product code, then the date. A label with both on it is one scan.</div>' +
         '<div class="row">' +
           operatorFieldHtml('seamOperator') +
-          '<div class="field"><label>Line #</label><input type="number" inputmode="numeric" id="seamLine" min="1" placeholder="e.g. 6" value="' + esc(String(seam.line || '').replace(/^Line\s*/i, '')) + '"></div>' +
+          selectField('seamLine', 'Line #', lineChoices(seam.line), seam.line) +
         '</div>' +
         '<div class="field"><label>Day seamed</label><input type="date" id="seamDate" value="' + esc(seam.date) + '" max="' + esc(today) + '"></div>' +
         '<div id="seamStep"></div>' +
@@ -10374,8 +10378,7 @@
       '<div class="card"><h3 style="margin-top:0;font-size:15px" id="seamListHead"></h3><div id="seamList"><div class="loading">Loading&hellip;</div></div></div>';
     var lineIn = document.getElementById('seamLine');
     lineIn.onchange = function () {
-      var v = String(lineIn.value || '').trim();
-      seam.line = v ? 'Line ' + (+v) : '';
+      seam.line = String(lineIn.value || '').trim();
       try { localStorage.setItem('cscSeamLine', seam.line); } catch (e) { /* no storage */ }
       seam.loaded = false; renderSeamerList(); seamLoad();
     };
@@ -10429,7 +10432,7 @@
     var op = (document.getElementById('seamOperator') || {}).value;
     op = String(op || '').trim();
     if (!op) { toast(L('Enter your name first', 'Primero escriba su nombre')); renderSeamStep(); return; }
-    if (!seam.line) { toast(L('Enter the line number first', 'Primero escriba el número de línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
+    if (!seam.line) { toast(L('Pick the line first', 'Primero elija la línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
     var entry = { line: seam.line, code: seam.code, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
     var same = seam.entries.filter(function (x) { return x.code.toUpperCase() === entry.code.toUpperCase() && x.made === entry.made && (!entry.pallet || x.pallet === entry.pallet); })[0];
     var go = function () {
@@ -10496,7 +10499,7 @@
     if (!el) return;
     if (head) head.innerHTML = esc(seam.line ? L('On ', 'En ') + seam.line + ' — ' + seamFmtDate(seam.date) : L('Pallets logged — ', 'Tarimas registradas — ') + seamFmtDate(seam.date)) +
       (seam.loaded && seam.line ? ' <span class="sub" style="font-weight:400">&middot; ' + seam.entries.length + ' ' + esc(seam.entries.length === 1 ? L('pallet', 'tarima') : L('pallets', 'tarimas')) + '</span>' : '');
-    if (!seam.line) { el.innerHTML = '<div class="sub">' + esc(L('Enter the line number above.', 'Escriba el número de línea arriba.')) + '</div>'; return; }
+    if (!seam.line) { el.innerHTML = '<div class="sub">' + esc(L('Pick the line above.', 'Elija la línea arriba.')) + '</div>'; return; }
     if (!seam.loaded) { el.innerHTML = '<div class="loading">Loading&hellip;</div>'; return; }
     if (!seam.entries.length) { el.innerHTML = '<div class="sub">' + esc(L('Nothing scanned yet.', 'Nada escaneado todavía.')) + '</div>'; return; }
     el.innerHTML = seam.entries.map(function (x) {
@@ -11479,7 +11482,7 @@
         '<div class="row">' +
           operatorFieldHtml('runOperator') +
           (machineType === 'Press' ? selectField('runMachineSel', 'Press', PRESS_MACHINES, null)
-            : '<div class="field"><label>' + esc(machineType) + ' #</label><input type="number" inputmode="numeric" id="runMachineNum" min="1" placeholder="e.g. 4"></div>') +
+            : selectField('runMachineSel', 'Line #', LINE_MACHINES, null)) +
         '</div>' +
         '<div class="field"><label>Notes (optional)</label><input id="runNotes" placeholder="e.g. day shift"></div>' +
         '<button class="btn success" id="startRunBtn">+ Start Work</button>' +
@@ -11492,11 +11495,11 @@
     document.getElementById('startRunBtn').onclick = function () {
       var operator = document.getElementById('runOperator').value.trim();
       var isPress = machineType === 'Press';
-      var numv = (isPress ? document.getElementById('runMachineSel') : document.getElementById('runMachineNum')).value.trim();
+      var numv = document.getElementById('runMachineSel').value.trim();
       var notes = document.getElementById('runNotes').value;
       if (!operator) { toast('Enter an operator name'); return; }
-      if (!numv) { toast(isPress ? 'Pick the press' : 'Enter the ' + machineType.toLowerCase() + ' number'); return; }
-      var machine = isPress ? numv : machineType + ' ' + numv;
+      if (!numv) { toast(isPress ? 'Pick the press' : 'Pick the line'); return; }
+      var machine = numv;
       var btn = this; btn.disabled = true; btn.textContent = 'Starting…';
       runMutation('createRun', [machine, operator, notes, newOpId()],
         function (result) {
@@ -11987,7 +11990,7 @@
       if (!box) return;
       var isPress = editType.value === 'Press';
       box.innerHTML = isPress ? selectField('runEditNum', 'Press', PRESS_MACHINES, mp.type === 'Press' ? (mp.num === 'A Liner' ? 'A Liner' : 'Press ' + mp.num) : null)
-        : '<div class="field"><label>Number</label><input type="number" inputmode="numeric" id="runEditNum" min="1" value="' + esc(mp.type === 'Line' ? mp.num : '') + '"></div>';
+        : selectField('runEditNum', 'Line #', lineChoices(mp.type === 'Line' ? 'Line ' + mp.num : ''), mp.type === 'Line' ? 'Line ' + mp.num : null);
     }
     if (editType) { editType.onchange = renderRunEditNum; renderRunEditNum(); }
     var saveBtn = document.getElementById('saveRunBtn');
@@ -11995,8 +11998,8 @@
       var operator = currentRunOperator();
       var type = document.getElementById('runEditType').value;
       var numv = document.getElementById('runEditNum').value.trim();
-      if (!type || !numv) { toast(type === 'Press' ? 'Pick the press' : 'Pick Line/Press and a number'); return; }
-      var fields = { Machine: type === 'Press' ? numv : type + ' ' + numv };
+      if (!type || !numv) { toast(type === 'Press' ? 'Pick the press' : type === 'Line' ? 'Pick the line' : 'Pick Line/Press and a number'); return; }
+      var fields = { Machine: numv };
       if (operator) fields.Operator = operator;
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
       runMutation('updateRun', [state.runId, fields, operator, newOpId()],
