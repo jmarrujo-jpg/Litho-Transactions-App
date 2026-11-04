@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.111.0</span>
+      <span class="version" id="appVersion">v1.112.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10299,14 +10299,35 @@
     entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, askSize: null };
   try { seam.line = localStorage.getItem('cscSeamLine') || ''; } catch (e) { /* no storage */ }
   // Typing a Lot # puts the slashes in: 1028 -> 10/28, 10282601 -> 10/28/26 01.
+  // Typing a Lot # puts the slashes in: 1028 -> 10/28, 10282601 -> 10/28/26 01, 01012026 ->
+  // 01/01/2026. Only digits get them (a slash typed by hand is left alone), and only what can be a
+  // date (month 1-12, day 1-31) — anything else is a product code. null = leave it.
   function seamFormatLot(v) {
-    var d = String(v || '').replace(/\D/g, '').slice(0, 8);
-    // Only what can be a date (month 1-12, day 1-31): anything else is left as typed (a product code).
+    if (!/^[\d\s]*$/.test(String(v || ''))) return null;
+    var d = String(v || '').replace(/\D/g, '').slice(0, 10);
     if ((d.length >= 2 && !(+d.slice(0, 2) >= 1 && +d.slice(0, 2) <= 12)) || (d.length >= 4 && !(+d.slice(2, 4) >= 1 && +d.slice(2, 4) <= 31))) return null;
     if (d.length <= 2) return d;
     if (d.length <= 4) return d.slice(0, 2) + '/' + d.slice(2);
-    if (d.length <= 6) return d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4);
-    return d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4, 6) + ' ' + d.slice(6);
+    var y4 = d.length >= 7 && /^20[2-9]/.test(d.slice(4, 7)), ye = y4 ? 8 : 6;
+    var out = d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4, ye);
+    return d.length > ye ? out + ' ' + d.slice(ye, ye + 2) : out;
+  }
+  // A Lot # in any of the ways labels write it -> { made: 'YYYY-MM-DD', shift, lot: 'MM/DD/YY SS' },
+  // { bad: true } for a date that can't be, or null when it isn't a lot at all. Takes 1/1/26,
+  // 01/01/2026, 01/012026, 1-1-26, 010126, 01012026, each with or without the shift (01).
+  var SEAM_LOT_RE = /(\d{1,2})[\/.\-](\d{1,2})[\/.\-]?(20[2-9]\d|\d{2})(?!\d{3})(?:\s*(\d{1,2}))?(?!\d)/;
+  function seamLotOf(y, mo, d, sh) {
+    y = String(y).length === 2 ? 2000 + +y : +y; mo = +mo; d = +d;
+    var dt = new Date(Date.UTC(y, mo - 1, d));
+    if (!(mo >= 1 && mo <= 12 && d >= 1 && dt.getUTCDate() === d && dt.getUTCMonth() === mo - 1)) return { bad: true };
+    var p2 = function (n) { return ('0' + n).slice(-2); }, shift = sh != null && sh !== '' ? p2(+sh) : '';
+    return { made: y + '-' + p2(mo) + '-' + p2(d), shift: shift, lot: p2(mo) + '/' + p2(d) + '/' + String(y).slice(2) + (shift ? ' ' + shift : '') };
+  }
+  function seamLotParse(text) {
+    var t = String(text || '').trim().replace(/\s+/g, ' ');
+    var m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-]?(20[2-9]\d|\d{2})(?:\s*(\d{1,2}))?$/.exec(t)
+      || /^(\d{2})(\d{2})(20[2-9]\d|\d{2})(?:\s*(\d{1,2}))?$/.exec(t);
+    return m ? seamLotOf(m[3], m[1], m[2], m[4]) : null;
   }
   // After a pallet is saved the product stays, ready for the next lot.
   function seamNextLot() { seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = seam.code; }
@@ -10318,23 +10339,22 @@
   // lotOnly: the product is already scanned, so digits alone are a Lot # too (102826 01, 10282601).
   function seamParse(s, lotOnly) {
     s = String(s || '').replace(/[\u0000-\u001f]+/g, ' ').trim();
-    var c = lotOnly && /^(\d{2})\s*(\d{2})\s*(\d{2})(?:\s*(\d{1,2}))?$/.exec(s);
-    if (c) s = c[1] + '/' + c[2] + '/' + c[3] + (c[4] ? ' ' + c[4] : '');
     var out = { rest: '', lot: '', made: '', shift: '', badDate: false }, rest = s;
-    var m = /(^|[^\d])(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4}|\d{2})(?!\d)(?:\s+(\d{1,2})(?!\d))?/.exec(s);
+    // The whole scan is a lot (any format; digits alone only once a product is up).
+    var whole = (lotOnly || /[\/.\-]/.test(s)) && seamLotParse(s);
+    if (whole) {
+      if (whole.bad) out.badDate = true; else { out.made = whole.made; out.shift = whole.shift; out.lot = whole.lot; }
+      return out;
+    }
     var iso = /(^|[^\d])(\d{4})-(\d\d)-(\d\d)(?!\d)/.exec(s);
+    var m = iso ? null : new RegExp('(^|[^\\d])' + SEAM_LOT_RE.source).exec(s);
     if (m) {
-      var y = m[4].length === 2 ? 2000 + +m[4] : +m[4], mo = +m[2], d = +m[3];
-      var dt = new Date(Date.UTC(y, mo - 1, d));
-      if (mo >= 1 && mo <= 12 && d >= 1 && dt.getUTCDate() === d) {
-        out.made = y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
-        out.shift = m[5] ? ('0' + +m[5]).slice(-2) : '';
-        out.lot = m[0].slice(m[1].length).trim().replace(/\s+/g, ' ');
-      } else out.badDate = true;
+      var lo = seamLotOf(m[4], m[2], m[3], m[5]);
+      if (lo.bad) out.badDate = true; else { out.made = lo.made; out.shift = lo.shift; out.lot = lo.lot; }
       rest = s.slice(0, m.index + m[1].length) + ' ' + s.slice(m.index + m[0].length);
     } else if (iso) {
       out.made = iso[2] + '-' + iso[3] + '-' + iso[4];
-      out.lot = iso[0].slice(iso[1].length);
+      out.lot = iso[3] + '/' + iso[4] + '/' + iso[2].slice(2);
       rest = s.slice(0, iso.index + iso[1].length) + ' ' + s.slice(iso.index + iso[0].length);
     }
     out.rest = rest.replace(/[|;,]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -10456,11 +10476,13 @@
       seam.date = dIn.value; seam.loaded = false; renderSeamerList(); seamLoad();
     };
     var scan = document.getElementById('seamScan');
-    scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); seamTake(scan.value); } };
+    var slashByHand = false;   // a / typed (or scanned) by hand: leave the rest as it comes
+    scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); slashByHand = false; seamTake(scan.value); } };
     scan.oninput = function (e) {
-      if (!seam.code || seam.ask || (e && /^delete/.test(e.inputType || ''))) return;
-      if (!/^[\d\/\s]*$/.test(scan.value)) return;   // letters: a different product code being scanned
-      var f = seamFormatLot(scan.value);
+      if (!scan.value) slashByHand = false;
+      if (e && e.data && /[\/.\-]/.test(e.data)) slashByHand = true;
+      if (slashByHand || !seam.code || seam.ask || (e && /^delete/.test(e.inputType || ''))) return;
+      var f = seamFormatLot(scan.value.replace(/\//g, ''));
       if (f != null && f !== scan.value) scan.value = f;
     };
     document.getElementById('seamScanBtn').onclick = function () { seamTake(scan.value); };
@@ -10559,7 +10581,7 @@
     if (!op) { toast(L('Enter your name first', 'Primero escriba su nombre')); renderSeamStep(); return; }
     if (!seam.line) { toast(L('Pick the line first', 'Primero elija la línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
     var entry = { line: seam.line, code: seam.code, baseCode: seam.baseCode, lot: seam.lot, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
-    var same = seam.entries.filter(function (x) { return x.code.toUpperCase() === entry.code.toUpperCase() && x.made === entry.made && (!entry.pallet || x.pallet === entry.pallet); })[0];
+    // Several pallets can share one lot (the lot is the date made), so every scan is its own pallet.
     var go = function () {
       seam.busy = true;
       var btn = document.getElementById('seamScanBtn'); if (btn) { btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…'); }
@@ -10580,13 +10602,6 @@
         showModal({ title: L('Not saved', 'No se guardó'), message: err.message, confirmText: 'OK' });
       });
     };
-    if (same) {
-      showConfirm(L('Already scanned?', '¿Ya escaneada?'),
-        L(entry.code + ' lot ' + entry.lot + ' is already on today’s list. Is this another pallet?', entry.code + ' lote ' + entry.lot + ' ya está en la lista de hoy. ¿Es otra tarima?'),
-        go, L('Yes, another pallet', 'Sí, otra tarima'));
-      seamNextLot(); renderSeamStep();
-      return;
-    }
     go();
   }
 

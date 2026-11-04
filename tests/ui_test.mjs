@@ -2599,6 +2599,14 @@ const base = {
   ok('check value spec is forgiving (spaces, missing paren, no label)', cs[1].options.map((o) => o.value + '=' + o.label).join() === 'A=Red,B=Blue,C=C', cs[1]);
   ok('markers: !!!x!!!, INPUT, ADD x', cs[2] === 'ADD COLOR' && cs[3] === 'Enter value' && cs[4] === 'Add color' && cs[5] === null, cs);
   ok('a date that can\'t be (2/30) is caught', (await P('2/30/26 01')).badDate === true);
+  const fm = await page.evaluate(() => ['1/1/26', '01/012026', '01/01/2026', '1/1/2026 1', '1-1-26 01', '010126', '01012026', '0101202601', '01012601', '010126 01', '12/31/2601']
+    .map((x) => { const r = seamParse(x, true); return x + '=' + r.lot + '@' + r.made; }));
+  ok('lots in every format read the same way, saved as MM/DD/YY SS', fm.join('|') === ['1/1/26=01/01/26@2026-01-01', '01/012026=01/01/26@2026-01-01', '01/01/2026=01/01/26@2026-01-01', '1/1/2026 1=01/01/26 01@2026-01-01',
+    '1-1-26 01=01/01/26 01@2026-01-01', '010126=01/01/26@2026-01-01', '01012026=01/01/26@2026-01-01', '0101202601=01/01/26 01@2026-01-01', '01012601=01/01/26 01@2026-01-01',
+    '010126 01=01/01/26 01@2026-01-01', '12/31/2601=12/31/26 01@2026-12-31'].join('|'), fm);
+  ok('digits alone are not a lot before a product is scanned', (await P('010126')).made === '' && (await P('1/1/26')).made === '2026-01-01');
+  const one = await P('401 E ISE CL 1/1/2026 01 0007');
+  ok('one-scan label with a 4-digit year', one.rest === '401 E ISE CL 0007' && one.lot === '01/01/26 01', one);
 
   await page.click('#tileProduction'); await page.waitForSelector('#metalsPickLines');
   await page.click('#metalsPickLines'); await page.waitForSelector('#linesPickSeamer');
@@ -2646,34 +2654,41 @@ const base = {
   await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
   ok('…saved', nLog() === 3 && lastLog().lot === '10/30/26 01');
   ok('digits alone are a lot only once a product is up', await page.evaluate(() => seamParse('103026', true).made === '2026-10-30' && seamParse('103026', false).made === ''));
-  ok('slashes only go in what can be a date', await page.evaluate(() => seamFormatLot('243807') === null && seamFormatLot('1340') === null && seamFormatLot('1028') === '10/28' && seamFormatLot('10/28/2601') === '10/28/26 01'));
-  // The same lot again: asks
-  await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
-  ok('the same product + lot again asks if it\'s another pallet', /Already scanned/.test(await page.textContent('#modalRoot')));
-  await page.click('#modalCancel').catch(() => page.keyboard.press('Escape')); await page.waitForTimeout(100);
-  ok('…no means no save, the product stays', nLog() === 3 && /E401A/.test(await page.textContent('#seamStep')));
+  // Slashes typed by hand are kept as typed
+  await page.click('#seamScan'); await page.keyboard.type('1/1/26');
+  ok('typing 1/1/26 by hand is left alone', (await page.$eval('#seamScan', (i) => i.value)) === '1/1/26', await page.$eval('#seamScan', (i) => i.value));
+  await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('…and saved as 01/01/26', lastLog().lot === '01/01/26' && lastLog().made === '2026-01-01', lastLog());
+  await page.click('#seamScan'); await page.keyboard.type('01012026');
+  ok('typing 01012026 shows 01/01/2026', (await page.$eval('#seamScan', (i) => i.value)) === '01/01/2026', await page.$eval('#seamScan', (i) => i.value));
+  await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('…saved as the same lot 01/01/26', nLog() === 5 && lastLog().lot === '01/01/26', lastLog());
+  ok('slashes only go in what can be a date', await page.evaluate(() => seamFormatLot('243807') === null && seamFormatLot('1340') === null && seamFormatLot('1028') === '10/28' && seamFormatLot('10282601') === '10/28/26 01' && seamFormatLot('0101202601') === '01/01/2026 01' && seamFormatLot('1/1') === null));
+  // The same lot again: just another pallet (many pallets share a lot)
+  await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('the same product + lot again saves another pallet, no question', nLog() === 6 && !(await page.$('#modalOk')) && lastLog().lot === '10/28/26 01' && /E401A/.test(await page.textContent('#seamStep')));
   // A future lot is refused right away
   await page.fill('#seamScan', '12/31/99 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
-  ok('a lot after today is refused', nLog() === 3 && (await page.$eval('#seamScan', (i) => i.value)) !== '');
+  ok('a lot after today is refused', nLog() === 6 && (await page.$eval('#seamScan', (i) => i.value)) !== '');
   await page.fill('#seamScan', '');
   // Change product: then a lot alone isn't enough
   await page.click('#seamClear'); await page.waitForTimeout(40);
   await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
-  ok('after Change product, a lot alone asks for the product first', nLog() === 3 && /Scan the product code first/.test(await page.textContent('body')));
+  ok('after Change product, a lot alone asks for the product first', nLog() === 6 && /Scan the product code first/.test(await page.textContent('body')));
   await page.fill('#seamScan', '');
   // Not on the Ends list: an error, nothing kept
   await page.fill('#seamScan', '401 E NOPE'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
   ok('a code not on the Ends list is an error', /Not on the Ends list/.test(await page.textContent('#modalRoot')) && /401 E NOPE/.test(await page.textContent('#modalRoot')));
   await page.click('#modalOk'); await page.waitForTimeout(60);
-  ok('…and nothing is kept', (await page.textContent('#seamStep')).trim() === '' && nLog() === 3);
+  ok('…and nothing is kept', (await page.textContent('#seamStep')).trim() === '' && nLog() === 6);
   await page.fill('#seamScan', '');
   // A code with spaces, then its lot
   await page.fill('#seamScan', '401 E ISE CL'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
   await page.fill('#seamScan', '10/29/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
-  ok('a code with spaces is one product', nLog() === 4 && lastLog().code === '401 E ISE CL');
+  ok('a code with spaces is one product', nLog() === 7 && lastLog().code === '401 E ISE CL');
   // Scanning another product switches to it
   await page.fill('#seamScan', 'E401A'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
-  ok('scanning another product code switches to it', /E401A/.test(await page.textContent('#seamStep')) && !/401 E ISE CL/.test(await page.textContent('#seamStep')) && nLog() === 4);
+  ok('scanning another product code switches to it', /E401A/.test(await page.textContent('#seamStep')) && !/401 E ISE CL/.test(await page.textContent('#seamStep')) && nLog() === 7);
   // Check Value: an all-digits code while a product is up is still a product, and asks its question
   await page.fill('#seamScan', '243807'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('[data-seamopt]');
   const opts = await page.$$eval('[data-seamopt]', (b) => b.map((x) => x.textContent));
@@ -2681,9 +2696,9 @@ const base = {
   await page.click('[data-seamopt="0"]'); await page.waitForTimeout(60);
   ok('…the answer is added to the code, then it wants the lot', /243807 1/.test(await page.textContent('#seamStep')) && /Profile S-1/.test(await page.textContent('#seamStep')) && /Scan the Lot #/.test(await page.textContent('#seamScanLabel')));
   await page.fill('#seamScan', '10/29/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
-  ok('…saved as 243807 1 (and what was scanned)', nLog() === 5 && lastLog().code === '243807 1' && lastLog().baseCode === '243807', lastLog());
+  ok('…saved as 243807 1 (and what was scanned)', nLog() === 8 && lastLog().code === '243807 1' && lastLog().baseCode === '243807', lastLog());
   await page.fill('#seamScan', '10/31/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
-  ok('…the next lot keeps 243807 1 (no asking again)', nLog() === 6 && lastLog().code === '243807 1' && !(await page.$('[data-seamopt]')));
+  ok('…the next lot keeps 243807 1 (no asking again)', nLog() === 9 && lastLog().code === '243807 1' && !(await page.$('[data-seamopt]')));
   await page.click('#seamClear');
   // Quotes in a normal description ask nothing
   await page.fill('#seamScan', '24711 HOLE'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
