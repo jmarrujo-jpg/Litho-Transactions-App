@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.112.0</span>
+      <span class="version" id="appVersion">v1.113.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10298,19 +10298,43 @@
   var seam = { line: '', date: '', code: '', baseCode: '', desc: '', lot: '', made: '', shift: '', pallet: '', scan: '', ask: null,
     entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, askSize: null };
   try { seam.line = localStorage.getItem('cscSeamLine') || ''; } catch (e) { /* no storage */ }
-  // Typing a Lot # puts the slashes in: 1028 -> 10/28, 10282601 -> 10/28/26 01.
-  // Typing a Lot # puts the slashes in: 1028 -> 10/28, 10282601 -> 10/28/26 01, 01012026 ->
-  // 01/01/2026. Only digits get them (a slash typed by hand is left alone), and only what can be a
-  // date (month 1-12, day 1-31) — anything else is a product code. null = leave it.
+  // Digits of a Lot # read left to right: a 2-digit month when it can be one (01-12) else 1 digit,
+  // then a 2-digit day when it can be one (01-31) else 1 digit, then a 4-digit year when it starts
+  // 202x-209x else 2 digits, then the shift. 12262026 -> 12/26/2026, 1262026 -> 12/6/2026,
+  // 226 -> 2/26. Partial while typing is fine. null = can't be the start of a date.
+  function seamDigitsLot(d) {
+    d = String(d || '');
+    if (!d) return { mo: '', day: '', year: '', shift: '', rest: '' };
+    var i = 0, mo, day, year, n = function (x) { return +x; };
+    if (d.length >= 2 && n(d.slice(0, 2)) >= 1 && n(d.slice(0, 2)) <= 12) mo = d.slice(0, 2);
+    else if (d[0] >= '1' && d[0] <= '9') mo = d[0];
+    else if (d === '0') return { mo: '0', day: '', year: '', shift: '', rest: '' };
+    else return null;
+    i = mo.length;
+    var r = d.slice(i);
+    if (r.length >= 2 && n(r.slice(0, 2)) >= 1 && n(r.slice(0, 2)) <= 31) day = r.slice(0, 2);
+    else if (r.length === 1 && r[0] === '0' && mo.length === 1) return null;
+    else if (r.length === 1) day = r;
+    else if (r.length && r[0] >= '1' && r[0] <= '9') day = r[0];
+    else if (!r.length) day = '';
+    else return null;
+    r = r.slice(day.length);
+    year = r.length >= 3 && /^20[2-9]/.test(r) ? r.slice(0, 4) : r.slice(0, 2);
+    if (year && year[0] !== '2') return null;   // lots are 20xx: 2-digit years 20-29, 4-digit 2020-2099
+    r = r.slice(year.length);
+    return { mo: mo, day: day, year: year, shift: r.slice(0, 2), rest: r.slice(2) };
+  }
+  // Typing a Lot # puts the slashes in (digits only — a slash typed by hand is left alone).
+  // null = leave it as typed (not a date: a product code).
   function seamFormatLot(v) {
     if (!/^[\d\s]*$/.test(String(v || ''))) return null;
-    var d = String(v || '').replace(/\D/g, '').slice(0, 10);
-    if ((d.length >= 2 && !(+d.slice(0, 2) >= 1 && +d.slice(0, 2) <= 12)) || (d.length >= 4 && !(+d.slice(2, 4) >= 1 && +d.slice(2, 4) <= 31))) return null;
-    if (d.length <= 2) return d;
-    if (d.length <= 4) return d.slice(0, 2) + '/' + d.slice(2);
-    var y4 = d.length >= 7 && /^20[2-9]/.test(d.slice(4, 7)), ye = y4 ? 8 : 6;
-    var out = d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4, ye);
-    return d.length > ye ? out + ' ' + d.slice(ye, ye + 2) : out;
+    var x = seamDigitsLot(String(v || '').replace(/\D/g, ''));
+    if (!x || x.rest) return null;
+    var out = x.mo;
+    if (x.day || (x.mo.length === 2 && String(v).replace(/\D/g, '').length > 2)) out += '/' + x.day;
+    if (x.year) out += '/' + x.year;
+    if (x.shift) out += ' ' + x.shift;
+    return out;
   }
   // A Lot # in any of the ways labels write it -> { made: 'YYYY-MM-DD', shift, lot: 'MM/DD/YY SS' },
   // { bad: true } for a date that can't be, or null when it isn't a lot at all. Takes 1/1/26,
@@ -10325,9 +10349,11 @@
   }
   function seamLotParse(text) {
     var t = String(text || '').trim().replace(/\s+/g, ' ');
-    var m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-]?(20[2-9]\d|\d{2})(?:\s*(\d{1,2}))?$/.exec(t)
-      || /^(\d{2})(\d{2})(20[2-9]\d|\d{2})(?:\s*(\d{1,2}))?$/.exec(t);
-    return m ? seamLotOf(m[3], m[1], m[2], m[4]) : null;
+    var m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-]?(20[2-9]\d|\d{2})(?:\s*(\d{1,2}))?$/.exec(t);
+    if (m) return seamLotOf(m[3], m[1], m[2], m[4]);
+    if (!/^\d+(\s\d{1,2})?$/.test(t)) return null;
+    var x = seamDigitsLot(t.replace(/\D/g, ''));
+    return x && x.mo && x.day && x.year && !x.rest ? seamLotOf(x.year, x.mo, x.day, x.shift) : null;
   }
   // After a pallet is saved the product stays, ready for the next lot.
   function seamNextLot() { seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = seam.code; }
@@ -10412,6 +10438,21 @@
     var p = seam.products[String(code || '').trim().toUpperCase()];
     return p ? p.size : '';
   }
+  function seamNiceDate(ymd) {
+    var p = String(ymd || '').split('-'), mn = L(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']);
+    return p.length === 3 ? mn[+p[1] - 1] + ' ' + (+p[2]) + ', ' + p[0] : ymd;
+  }
+  // What the box will save, shown as it's typed: "Reads as Dec 6, 2026 · shift 01".
+  function seamPreview() {
+    var el = document.getElementById('seamPreview'), inp = document.getElementById('seamScan');
+    if (!el || !inp) return;
+    var v = String(inp.value || '').trim(), txt = '';
+    if (v && seam.code && !seam.ask && /^[\d\/.\-\s]+$/.test(v) && !seamRow(v)) {
+      var r = seamLotParse(v);
+      txt = r && !r.bad ? L('Reads as ', 'Se lee como ') + seamNiceDate(r.made) + (r.shift ? ' \u00b7 ' + L('shift ', 'turno ') + r.shift : '') + (r.made > todayStr() ? ' — ' + L('after today!', '¡después de hoy!') : '') : '';
+    }
+    el.textContent = txt;
+  }
   function seamFmtDate(ymd) { var p = String(ymd || '').split('-'); return p.length === 3 ? (+p[1]) + '/' + (+p[2]) + '/' + p[0].slice(2) : (ymd || ''); }
 
   function openSeamer() {
@@ -10459,7 +10500,8 @@
         '<div class="field"><label>Day seamed</label><input type="date" id="seamDate" value="' + esc(seam.date) + '" max="' + esc(today) + '"></div>' +
         '<div id="seamStep"></div>' +
         '<div class="field" style="margin-top:6px"><label id="seamScanLabel"></label>' +
-          '<input id="seamScan" autocomplete="off" autocapitalize="characters" style="font-size:20px;padding:14px"></div>' +
+          '<input id="seamScan" autocomplete="off" autocapitalize="characters" style="font-size:20px;padding:14px">' +
+          '<div id="seamPreview" class="sub" style="font-size:15px;min-height:20px;margin-top:4px;color:var(--good)"></div></div>' +
         '<button class="btn success" id="seamScanBtn" style="width:100%">Enter</button>' +
         '<div id="seamAsk"></div>' +
       '</div>' +
@@ -10477,13 +10519,20 @@
     };
     var scan = document.getElementById('seamScan');
     var slashByHand = false;   // a / typed (or scanned) by hand: leave the rest as it comes
-    scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); slashByHand = false; seamTake(scan.value); } };
+    scan.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); slashByHand = false; seamTake(scan.value); seamPreview(); } };
+    // Phones / tablets that type through a word bar: fix the slashes once a word is finished.
+    scan.addEventListener('compositionend', function () { if (scan.oninput) scan.oninput({ data: '', inputType: 'insertText' }); });
     scan.oninput = function (e) {
       if (!scan.value) slashByHand = false;
       if (e && e.data && /[\/.\-]/.test(e.data)) slashByHand = true;
-      if (slashByHand || !seam.code || seam.ask || (e && /^delete/.test(e.inputType || ''))) return;
-      var f = seamFormatLot(scan.value.replace(/\//g, ''));
-      if (f != null && f !== scan.value) scan.value = f;
+      var atEnd = scan.selectionStart == null || scan.selectionStart === scan.value.length;
+      if (!slashByHand && atEnd && seam.code && !seam.ask && !(e && (e.isComposing || /^delete/.test(e.inputType || '')))) {
+        var f = seamFormatLot(scan.value.replace(/\//g, ''));
+        // Not a date after all (an all-digits product code): take the slashes the box added back out.
+        if (f == null && /^[\d\/\s]+$/.test(scan.value) && scan.value.indexOf('/') !== -1) f = scan.value.replace(/\//g, '');
+        if (f != null && f !== scan.value) { scan.value = f; try { scan.setSelectionRange(f.length, f.length); } catch (er) { /* not a text box */ } }
+      }
+      seamPreview();
     };
     document.getElementById('seamScanBtn').onclick = function () { seamTake(scan.value); };
     renderSeamStep();
@@ -10551,8 +10600,11 @@
     if (seam.ask) { toast(L('Answer the question first', 'Primero conteste la pregunta')); return; }
     // With a product already scanned, digits are a Lot # — unless they're a product code on the list.
     var p = seamParse(v, !!seam.code && !seamRow(v));
-    if (p.badDate) { toast(L('That Lot # doesn’t look right — scan it again', 'Ese Lote # no se ve bien — escanéelo otra vez')); if (inp) inp.select(); return; }
-    if (p.made && p.made > todayStr()) { toast(L('That Lot # is after today — check the label', 'Ese Lote # es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
+    if (p.badDate || (seam.code && !p.made && /^[\d\/.\-\s]+$/.test(v) && !seamRow(v))) {
+      toast(L(v + ' doesn\u2019t look like a Lot # (like 10/28/26 01) — check it and try again', v + ' no parece un Lote # (como 10/28/26 01) — revíselo e intente otra vez'));
+      if (inp) inp.select(); return;
+    }
+    if (p.made && p.made > todayStr()) { toast(L('That Lot # reads as ' + seamNiceDate(p.made) + ', which is after today — check the label', 'Ese Lote # dice ' + seamNiceDate(p.made) + ', que es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
     var match = null;
     if (p.rest) {
       if (!seam.loaded) { toast(L('Still loading the Ends list — try again in a moment', 'Todavía cargando la lista de tapas — intente en un momento')); return; }

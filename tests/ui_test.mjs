@@ -2663,6 +2663,20 @@ const base = {
   ok('typing 01012026 shows 01/01/2026', (await page.$eval('#seamScan', (i) => i.value)) === '01/01/2026', await page.$eval('#seamScan', (i) => i.value));
   await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
   ok('…saved as the same lot 01/01/26', nLog() === 5 && lastLog().lot === '01/01/26', lastLog());
+  ok('1-digit days and months get their slashes right', await page.evaluate(() => seamFormatLot('1262026') === '12/6/2026' && seamFormatLot('226') === '2/26' && seamFormatLot('1312026 01') === '1/31/2026 01' && seamFormatLot('12262026') === '12/26/2026'));
+  ok('…and read right at Enter', await page.evaluate(() => seamLotParse('1262026 01').lot === '12/06/26 01' && seamLotParse('1312026').lot === '01/31/26' && seamLotParse('12/6262026 01') === null));
+  // What the box will save shows as it's typed
+  await page.click('#seamScan'); await page.keyboard.type('10012601');
+  ok('preview: reads as the date + shift', (await page.$eval('#seamScan', (i) => i.value)) === '10/01/26 01' && /Reads as Oct 1, 2026 · shift 01/.test(await page.textContent('#seamPreview')), await page.textContent('#seamPreview'));
+  await page.fill('#seamScan', '');
+  // Not a lot at all: says so (not "not on the Ends list")
+  await page.click('#seamScan'); await page.keyboard.type('12/6262026 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
+  ok('12/6262026 01 is called a bad Lot #, nothing saved, kept in the box to fix', !(await page.$('#modalOk')) && /doesn.t look like a Lot #/.test(await page.textContent('body')) && (await page.$eval('#seamScan', (i) => i.value)) === '12/6262026 01');
+  await page.fill('#seamScan', '');
+  // An all-digits product code typed while a product is up: the box doesn't turn it into a date
+  await page.click('#seamScan'); await page.keyboard.type('243807');
+  ok('typing 243807 stays 243807', (await page.$eval('#seamScan', (i) => i.value)) === '243807', await page.$eval('#seamScan', (i) => i.value));
+  await page.fill('#seamScan', '');
   ok('slashes only go in what can be a date', await page.evaluate(() => seamFormatLot('243807') === null && seamFormatLot('1340') === null && seamFormatLot('1028') === '10/28' && seamFormatLot('10282601') === '10/28/26 01' && seamFormatLot('0101202601') === '01/01/2026 01' && seamFormatLot('1/1') === null));
   // The same lot again: just another pallet (many pallets share a lot)
   await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
