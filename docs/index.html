@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.115.0</span>
+      <span class="version" id="appVersion">v1.116.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10626,15 +10626,29 @@
     var inp = document.getElementById('seamScan');
     var v = String(raw || '').trim();
     if (!v || seam.busy) return;
-    // A product code made of digits that the box put slashes in (102826 -> 10/28/26): still the product.
-    if (/^[\d\/\s]+$/.test(v) && !seamRow(v) && seamRow(v.replace(/\D/g, ''))) v = v.replace(/\D/g, '');
     if (seam.ask) { toast(L('Answer the question first', 'Primero conteste la pregunta')); return; }
-    if (seam.code && !seamCurLine() && !seamRow(v)) { toast(L('Pick the end size first', 'Primero elija el tamaño de tapa')); return; }
-    // With a product already scanned, digits are a Lot # — unless they're a product code on the list.
-    var p = seamParse(v, !!seam.code && !seamRow(v));
-    if (p.badDate || (seam.code && !p.made && /^[\d\/.\-\s]+$/.test(v) && !seamRow(v))) {
-      toast(L(v + ' doesn\u2019t look like a Lot # (like 10/28/26 01) — check it and try again', v + ' no parece un Lote # (como 10/28/26 01) — revíselo e intente otra vez'));
-      if (inp) inp.select(); return;
+    var badLot = function (t) {
+      toast(L(t + ' doesn\u2019t look like a Lot # (like 10/28/26 01) — check it and try again', t + ' no parece un Lote # (como 10/28/26 01) — revíselo e intente otra vez'));
+      if (inp) inp.select();
+    };
+    // New one-barcode labels: PRODUCT|LOT (also ~ or |~|), split at the first one. Old labels (no
+    // delimiter) are two scans, read as before.
+    var cut = /\|~\||\||~/.exec(v), p;
+    if (cut) {
+      var left = v.slice(0, cut.index).trim(), right = v.slice(cut.index + cut[0].length).trim();
+      p = { rest: left, lot: '', made: '', shift: '', badDate: false };
+      if (right) {
+        var lo = seamLotParse(right);
+        if (!lo || lo.bad) { badLot(right); return; }
+        p.made = lo.made; p.shift = lo.shift; p.lot = lo.lot;
+      }
+    } else {
+      // A product code made of digits that the box put slashes in (102826 -> 10/28/26): still the product.
+      if (/^[\d\/\s]+$/.test(v) && !seamRow(v) && seamRow(v.replace(/\D/g, ''))) v = v.replace(/\D/g, '');
+      if (seam.code && !seamCurLine() && !seamRow(v)) { toast(L('Pick the end size first', 'Primero elija el tamaño de tapa')); return; }
+      // With a product already scanned, digits are a Lot # — unless they're a product code on the list.
+      p = seamParse(v, !!seam.code && !seamRow(v));
+      if (p.badDate || (seam.code && !p.made && /^[\d\/.\-\s]+$/.test(v) && !seamRow(v))) { badLot(v); return; }
     }
     if (p.made && p.made > todayStr()) { toast(L('That Lot # reads as ' + seamNiceDate(p.made) + ', which is after today — check the label', 'Ese Lote # dice ' + seamNiceDate(p.made) + ', que es después de hoy — revise la etiqueta')); if (inp) inp.select(); return; }
     var match = null;

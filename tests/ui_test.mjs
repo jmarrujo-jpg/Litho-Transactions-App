@@ -2579,7 +2579,7 @@ const base = {
     getProductionRuns: () => R([]), createRun: (a) => R({ runId: "RUN-000009", machine: a[0], operator: a[1], status: "Open" }),
     getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }],
       lookup: [{ code: 'E401A', desc: 'Odd', type: '0.20' }, { code: 'X999', desc: 'X', type: '' }, { code: '401 E ISE CL', desc: '401 E ISE CL', type: '0.20' },
-        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' }, { code: '603 R ISE CL', desc: '', type: '' }, { code: '6375AATFS', desc: '', type: '' }, { code: '401 SNAPCVR WHT', desc: '', type: '' },
+        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' }, { code: '603 R ISE CL', desc: '', type: '' }, { code: '6375AATFS', desc: '', type: '' }, { code: '401 SNAPCVR WHT', desc: '', type: '' }, { code: '603 E FE TFS 85', desc: '', type: '' },
         { code: '24711 HOLE', desc: 'HD HI VIS WHT "HOLE"', type: 'Lid' }, { code: '500 E PAINT', desc: '!!!ADD COLOR!!!', type: '' }], lookupError: '' }),
     logSeamerEnds: (a) => { const LN = { '211': 'Line 2', '307': 'Line 5', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
       const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', by: a[0].operator }, a[0], { line: /^603 R/.test(a[0].code) ? 'Hand-Line' : LN[a[0].size] || '' }); saved.unshift(e); return R({ ok: true, entry: e }); },
@@ -2762,6 +2762,24 @@ const base = {
   ok('a snap cover is not used on the seamer', /Not used on the seamer/.test(await page.textContent('#modalRoot')) && nLog() === nSnap);
   await page.click('#modalOk'); await page.waitForTimeout(60); await page.fill('#seamScan', '');
   ok('…and nothing is kept', !/Product:/.test(await page.textContent('#seamStep')));
+  // New one-barcode labels: PRODUCT|LOT (or ~, |~|)
+  const n0 = nLog();
+  await scanProd('603 E FE TFS 85|05/02/26 01'); await page.waitForTimeout(120);
+  ok('combined label PRODUCT|LOT: one scan saves', nLog() === n0 + 1 && lastLog().code === '603 E FE TFS 85' && lastLog().lot === '05/02/26 01' && lastLog().made === '2026-05-02' && lastLog().shift === '01' && /Saved to Line 6/.test(await page.textContent('#seamLast')), lastLog());
+  await scanProd('603 E FE TFS 85~050226'); await page.waitForTimeout(120);
+  ok('~ works too, a lot with no shift', nLog() === n0 + 2 && lastLog().lot === '05/02/26' && lastLog().shift === '' && lastLog().made === '2026-05-02', lastLog());
+  await scanProd('603 E FE TFS 85 |~| 5/2/2026 01'); await page.waitForTimeout(120);
+  ok('|~| works too (spaces trimmed)', nLog() === n0 + 3 && lastLog().code === '603 E FE TFS 85' && lastLog().lot === '05/02/26 01', lastLog());
+  await page.fill('#seamScan', '603 E NOPE|05/02/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
+  const nf = await page.textContent('#modalRoot');
+  ok('combined label, unknown product: "not found" names the code only', /Not on the Ends list/.test(nf) && /"603 E NOPE"/.test(nf) && !/05\/02/.test(nf) && nLog() === n0 + 3, nf);
+  await page.click('#modalOk'); await page.waitForTimeout(60); await page.fill('#seamScan', '');
+  await page.fill('#seamScan', '603 E FE TFS 85|13/45/26'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
+  ok('combined label, bad lot: says the lot is wrong, nothing saved', /13\/45\/26 doesn.t look like a Lot #/.test(await page.textContent('body')) && nLog() === n0 + 3);
+  await page.fill('#seamScan', '');
+  await scanProd('401 E ISE CL|');
+  ok('combined label with an empty lot: the product is up, waiting for the lot', /401 E ISE CL/.test(await page.textContent('#seamStep')) && /Scan the Lot #/.test(await page.textContent('#seamScanLabel')) && nLog() === n0 + 3);
+  await page.click('#seamClear');
   // Remove a wrong scan
   const xid = await page.evaluate(() => seam.entries.filter((e) => e.code === 'X999')[0].id);
   await page.click('[data-seamdel="' + xid + '"]'); await page.waitForSelector('#modalOk');
