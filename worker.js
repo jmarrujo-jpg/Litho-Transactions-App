@@ -6085,24 +6085,39 @@ async function loadEndsLookup(sheets, env) {
 function endsLookupRow(rows, code) { const k = normCode(code); return rows.filter((r) => normCode(r.code) === k)[0] || null; }
 // A row that asks for one more answer at scan time: Type "Check Value", or an INPUT / ADD x / !!!x!!!
 // marker in the Description. The code scanned is that row's code plus the answer.
+// Each line runs its sizes of end, so the end size says which line's seamer it went on.
+const SEAMER_SIZE_LINES = { '211': 'Line 2', '307': 'Line 5', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
 function endsAsksMore(r) {
   if (!r) return false;
   if (/check\s*-?\s*value/i.test(r.type)) return true;
   const d = String(r.desc || '').trim();
   return /^!!!.*!!!$/.test(d) || /^input$/i.test(d) || /^add\s+\S/i.test(d);
 }
-// The end size: 401 E …, 603 E … (in the code, else the description), else the End Products tab.
-function endSizeFromName(code, desc) {
-  const m = /^\s*(\d{3})\s*E\b/i.exec(String(code || '')) || /^\s*(\d{3})\s*E\b/i.exec(String(desc || ''));
-  return m ? m[1] : '';
+// The end size from a code (else its description), else '' (then the End Products tab / a question):
+//   '401 E CL', '404E THIRAM', '401 SNAPCVR' -> the first 3 digits;
+//   '6375AATFS', '4185N0Z12020', '3775AZTFS' -> the 1st and 2nd digits (6-3 -> 603, 4-1 -> 401, 3-7 -> 307).
+// Only sizes a line runs count, so other numbers ('243807', '24711 HOLE') aren't taken for a size.
+function endSizeOne(v) {
+  const t = String(v || '').trim();
+  let m = /^(\d{3})(?:\s|E\b)/i.exec(t);
+  if (m && SEAMER_SIZE_LINES[m[1]]) return m[1];
+  m = /^(\d)(\d)\d\d/.exec(t);
+  if (m && SEAMER_SIZE_LINES[m[1] + '0' + m[2]]) return m[1] + '0' + m[2];
+  return '';
+}
+function endSizeFromName(code, desc) { return endSizeOne(code) || endSizeOne(desc); }
+// Things on the Ends list that never go on a seamer here: snap covers, and 507 P SF (shipped; the customer puts it on).
+function notSeamed(code) { return /SNAP\s*CVR/i.test(String(code || '')) || /^\s*507\s*P\b/i.test(String(code || '')); }
+// The line a pallet went on: by its size; 603 rings (603 R …, 603 SF …) go on the Hand-Line.
+function seamerLineFor(code, size) {
+  if (size === '603' && /^\s*603\s*(R|SF)\b/i.test(String(code || ''))) return 'Hand-Line';
+  return SEAMER_SIZE_LINES[size] || '';
 }
 const END_PRODUCTS = 'End Products';
 const END_PRODUCT_HEADERS = ['Product Code', 'End Size', 'Description', 'Added At', 'Added By'];
 const SEAMER_READ_MAX = 500;
 // '401', '401 ENDS', '401E' -> '401'; anything else ''.
 function endSizeOf(v) { const m = /^\s*(\d{3})(?!\d)/.exec(String(v == null ? '' : v)); return m ? m[1] : ''; }
-// Each line runs one size of end, so the end size says which line's seamer it went on.
-const SEAMER_SIZE_LINES = { '211': 'Line 2', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
 function seamerLine(v) {
   const t = String(v == null ? '' : v).trim();
   if (/^\d+$/.test(t)) return 'Line ' + parseInt(t, 10);
@@ -6192,12 +6207,13 @@ async function logSeamerEnds(sheets, e, opId, env) {
     code = row.code;
   }
   const lot = String(e.lot || '').trim();
-  // The line comes from the end size (each line runs one size).
+  if (notSeamed(code)) throw new Error(code + ' doesn\u2019t go on a seamer here, so it isn\u2019t logged.');
+  // The line comes from the end size (each line runs its own sizes).
   let prods = await endProductMap(sheets);
   const sizeIn = endSizeOf(e.size);
   const size = sizeIn || endSizeFromName(code, row.desc) || (prods[codeKey(code)] ? prods[codeKey(code)].size : '');
   if (!size) throw new Error('Pick the end size for ' + code + ' first.');
-  const line = SEAMER_SIZE_LINES[size];
+  const line = seamerLineFor(code, size);
   if (!line) throw new Error('No line runs ' + size + ' ends (' + Object.keys(SEAMER_SIZE_LINES).join(', ') + '). Check the end size for ' + code + '.');
   await ensureTab(sheets, SEAMER, SEAMER_HEADERS);
   let t = await readTab(sheets, SEAMER);

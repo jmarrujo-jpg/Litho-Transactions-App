@@ -2579,10 +2579,10 @@ const base = {
     getProductionRuns: () => R([]), createRun: (a) => R({ runId: "RUN-000009", machine: a[0], operator: a[1], status: "Open" }),
     getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }],
       lookup: [{ code: 'E401A', desc: 'Odd', type: '0.20' }, { code: 'X999', desc: 'X', type: '' }, { code: '401 E ISE CL', desc: '401 E ISE CL', type: '0.20' },
-        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' },
+        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' }, { code: '603 R ISE CL', desc: '', type: '' }, { code: '6375AATFS', desc: '', type: '' }, { code: '401 SNAPCVR WHT', desc: '', type: '' },
         { code: '24711 HOLE', desc: 'HD HI VIS WHT "HOLE"', type: 'Lid' }, { code: '500 E PAINT', desc: '!!!ADD COLOR!!!', type: '' }], lookupError: '' }),
-    logSeamerEnds: (a) => { const LN = { '211': 'Line 2', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
-      const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', by: a[0].operator }, a[0], { line: LN[a[0].size] || '' }); saved.unshift(e); return R({ ok: true, entry: e }); },
+    logSeamerEnds: (a) => { const LN = { '211': 'Line 2', '307': 'Line 5', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
+      const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', by: a[0].operator }, a[0], { line: /^603 R/.test(a[0].code) ? 'Hand-Line' : LN[a[0].size] || '' }); saved.unshift(e); return R({ ok: true, entry: e }); },
     setEndProductSize: () => R({ added: true }),
     removeSeamerEnds: (a) => { saved = saved.filter((e) => e.id !== a[0]); return R({ ok: true }); },
   }));
@@ -2615,7 +2615,7 @@ const base = {
   await page.click('#linesPickBody'); await page.waitForSelector('#startRunBtn');
   ok('Body Maker is the run screen as before', /Metal Lines — Log Work/.test(await page.textContent('#view')) && !(await page.$('#runMachineNum')));
   const bmLines = await page.$$eval('#runMachineSel option', (os) => os.map((o) => o.value).filter(Boolean));
-  ok('Body Maker: the line is a dropdown, Line 2 to Line 6', bmLines.join() === 'Line 2,Line 3,Line 4,Line 5,Line 6', bmLines);
+  ok('Body Maker: the line is a dropdown, Line 2 to Line 6 and the Hand-Line', bmLines.join() === 'Line 2,Line 3,Line 4,Line 5,Line 6,Hand-Line', bmLines);
   await page.fill('#runOperator', 'Ana'); await page.click('#startRunBtn'); await page.waitForTimeout(100);
   ok('Body Maker: must pick a line', !calls.some((c) => c.fn === 'createRun'));
   await page.selectOption('#runMachineSel', 'Line 4'); await page.click('#startRunBtn'); await page.waitForTimeout(200);
@@ -2736,7 +2736,7 @@ const base = {
   await page.fill('#seamScan', 'X999 10/27/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(80);
   const sizes = await page.$$eval('[data-seamsize]', (b) => b.map((x) => x.textContent));
   ok('a code with no known size asks the size, each button shows its line; nothing saved yet', nLog() === 8 && /What size end is it\?/.test(await page.textContent('#seamStep'))
-    && sizes.join() === '211Line 2,401Line 4,404Line 5,502Line 3,603Line 6,610Line 3' && /Pick the end size above first/.test(await page.textContent('#seamScanLabel')), sizes);
+    && sizes.join() === '211Line 2,307Line 5,401Line 4,404Line 5,502Line 3,603Line 6,610Line 3' && /Pick the end size above first/.test(await page.textContent('#seamScanLabel')), sizes);
   await page.fill('#seamScan', '10/27/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(60);
   ok('a lot before the size is picked is not taken', nLog() === 8 && /Pick the end size first/.test(await page.textContent('body')));
   await page.fill('#seamScan', '');
@@ -2746,10 +2746,22 @@ const base = {
   await scanProd('X999');
   ok('…and X999 knows its size next time', !(await page.$('[data-seamsize]')) && (await page.textContent('#seamLineShow')) === 'LINE 6');
   await page.click('#seamClear');
-  // A size no line runs
+  // 307 -> Line 5; 603 rings -> Hand-Line; 6375… -> 603 by its digits; snap covers never go on a seamer
   await scanProd('307 E ODD');
-  ok('a size no line runs says so and asks the size', /No line runs 307 ends/.test(await page.textContent('#seamStep')) && (await page.$$('[data-seamsize]')).length === 6 && !(await page.$('#seamLineShow')));
+  ok('307 ends are Line 5', (await page.textContent('#seamLineShow')) === 'LINE 5' && !(await page.$('[data-seamsize]')));
   await page.click('#seamClear');
+  await scanProd('603 R ISE CL');
+  ok('603 rings are the Hand-Line', (await page.textContent('#seamLineShow')) === 'HAND-LINE');
+  await page.fill('#seamScan', '10/28/26 01'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('…saved to the Hand-Line', lastLog().code === '603 R ISE CL' && lastLog().size === '603' && /Saved to Hand-Line/.test(await page.textContent('#seamLast')), lastLog());
+  await scanProd('6375AATFS');
+  ok('6375AATFS reads as 603 ends, Line 6, no question', (await page.textContent('#seamLineShow')) === 'LINE 6' && /603 ends/.test(await page.textContent('#seamStep')) && !(await page.$('[data-seamsize]')));
+  await page.click('#seamClear');
+  const nSnap = nLog();
+  await page.fill('#seamScan', '401 SNAPCVR WHT'); await page.press('#seamScan', 'Enter'); await page.waitForSelector('#modalOk');
+  ok('a snap cover is not used on the seamer', /Not used on the seamer/.test(await page.textContent('#modalRoot')) && nLog() === nSnap);
+  await page.click('#modalOk'); await page.waitForTimeout(60); await page.fill('#seamScan', '');
+  ok('…and nothing is kept', !/Product:/.test(await page.textContent('#seamStep')));
   // Remove a wrong scan
   const xid = await page.evaluate(() => seam.entries.filter((e) => e.code === 'X999')[0].id);
   await page.click('[data-seamdel="' + xid + '"]'); await page.waitForSelector('#modalOk');

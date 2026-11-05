@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.114.0</span>
+      <span class="version" id="appVersion">v1.115.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10217,7 +10217,7 @@
   var metalsTab = 'lines';   // Metals sub-nav: 'lines' | 'press' | 'slitter' | 'coil' | 'used'
   // The machines on the floor, picked from a list (no typing). Stored as shown, e.g. 'Press 13'.
   // The metal lines (Body Maker and Double Seamer pick from these). Stored as shown, e.g. 'Line 6'.
-  var LINE_MACHINES = ['Line 2', 'Line 3', 'Line 4', 'Line 5', 'Line 6'];
+  var LINE_MACHINES = ['Line 2', 'Line 3', 'Line 4', 'Line 5', 'Line 6', 'Hand-Line'];
   // The list, plus a line an older record used that isn't on it any more (so it still shows).
   function lineChoices(cur) { return cur && LINE_MACHINES.indexOf(cur) === -1 ? LINE_MACHINES.concat([cur]) : LINE_MACHINES; }
   var PRESS_MACHINES = ['A Liner', 'Press 2', 'Press 3', 'Press 13', 'Press 14', 'Press 15', 'Press 16', 'Press 17', 'Press 18', 'Press 19', 'Press 20'];
@@ -10298,8 +10298,15 @@
   var seam = { line: '', date: '', code: '', baseCode: '', desc: '', lot: '', made: '', shift: '', pallet: '', scan: '', ask: null,
     entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, size: '', last: null };
   // Each line runs one size of end, so the end size says which line's seamer the pallet went on.
-  var SEAM_SIZE_LINE = { '211': 'Line 2', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
-  var SEAM_SIZES = ['211', '401', '404', '502', '603', '610'];
+  var SEAM_SIZE_LINE = { '211': 'Line 2', '307': 'Line 5', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
+  var SEAM_SIZES = ['211', '307', '401', '404', '502', '603', '610'];
+  // 603 rings (603 R …, 603 SF …) go on the Hand-Line; everything else by its size.
+  function seamLineFor(code, size) {
+    if (size === '603' && /^\s*603\s*(R|SF)\b/i.test(String(code || ''))) return 'Hand-Line';
+    return SEAM_SIZE_LINE[size] || '';
+  }
+  // On the Ends list but never on a seamer here: snap covers, and 507 P SF (the customer puts it on).
+  function seamNotSeamed(code) { return /SNAP\s*CVR/i.test(String(code || '')) || /^\s*507\s*P\b/i.test(String(code || '')); }
   // Digits of a Lot # read left to right: a 2-digit month when it can be one (01-12) else 1 digit,
   // then a 2-digit day when it can be one (01-31) else 1 digit, then a 4-digit year when it starts
   // 202x-209x else 2 digits, then the shift. 12262026 -> 12/26/2026, 1262026 -> 12/6/2026,
@@ -10433,16 +10440,24 @@
     var p = checkPrompt(r.desc);
     return p ? { base: r.code, question: p, options: [] } : null;
   }
-  // The end size: 401 E … in the code (else its description), else one picked / saved before.
+  // The end size from a code: '401 E CL', '404E THIRAM' -> the first 3 digits; '6375AATFS', '4185N0Z12020'
+  // -> the 1st and 2nd digits (6-3 -> 603, 4-1 -> 401). Only sizes a line runs count ('243807' isn't one).
+  function seamSizeOne(v) {
+    var t = String(v || '').trim(), m = /^(\d{3})(?:\s|E\b)/i.exec(t);
+    if (m && SEAM_SIZE_LINE[m[1]]) return m[1];
+    m = /^(\d)(\d)\d\d/.exec(t);
+    return m && SEAM_SIZE_LINE[m[1] + '0' + m[2]] ? m[1] + '0' + m[2] : '';
+  }
+  // The end size: from the code (else its description), else one picked / saved before.
   function seamSizeOf(code, desc) {
-    var m = /^\s*(\d{3})\s*E\b/i.exec(String(code || '')) || /^\s*(\d{3})\s*E\b/i.exec(String(desc || ''));
-    if (m) return m[1];
+    var n = seamSizeOne(code) || seamSizeOne(desc);
+    if (n) return n;
     var p = seam.products[String(code || '').trim().toUpperCase()];
     return p ? p.size : '';
   }
   // The product up now: its size and the line that runs it ('' when not known yet).
   function seamCurSize() { return seam.code ? (seam.size || seamSizeOf(seam.code, seam.desc)) : ''; }
-  function seamCurLine() { return SEAM_SIZE_LINE[seamCurSize()] || ''; }
+  function seamCurLine() { return seamLineFor(seam.code, seamCurSize()); }
   function seamNiceDate(ymd) {
     var p = String(ymd || '').split('-'), mn = L(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']);
     return p.length === 3 ? mn[+p[1] - 1] + ' ' + (+p[2]) + ', ' + p[0] : ymd;
@@ -10562,7 +10577,7 @@
       html += '<div style="margin-top:10px;font-size:17px;font-weight:600">' +
         esc(size ? L('No line runs ' + size + ' ends. What size end is it?', 'Ninguna línea corre tapas ' + size + '. ¿De qué tamaño es la tapa?') : L('What size end is it?', '¿De qué tamaño es la tapa?')) + '</div>' +
         '<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">' + SEAM_SIZES.map(function (z) {
-          return '<button class="btn" data-seamsize="' + z + '" style="padding:12px 16px;font-size:18px;line-height:1.2">' + esc(z) + '<br><span style="font-size:12px;font-weight:400">' + esc(SEAM_SIZE_LINE[z].replace(/^Line/, L('Line', 'Línea'))) + '</span></button>'; }).join('') + '</div>';
+          return '<button class="btn" data-seamsize="' + z + '" style="padding:12px 16px;font-size:18px;line-height:1.2">' + esc(z) + '<br><span style="font-size:12px;font-weight:400">' + esc(seamLineFor(seam.code, z).replace(/^Line/, L('Line', 'Línea'))) + '</span></button>'; }).join('') + '</div>';
     }
     if (seam.ask) {
       html += '<div style="margin-top:10px;font-size:17px;font-weight:600">' + esc(seam.ask.question) + '</div>' +
@@ -10628,6 +10643,11 @@
       if (seam.lookupError) { showModal({ title: L('Can’t check the product code', 'No se puede revisar el código'), message: seam.lookupError, confirmText: 'OK' }); return; }
       match = seamMatch(p.rest);
       if (!match) { if (inp) inp.select(); seamNotOnList(p.rest); return; }
+      if (seamNotSeamed(match.row.code)) {
+        if (inp) inp.select();
+        showModal({ title: L('Not used on the seamer', 'No se usa en el seamer'), message: L(match.row.code + ' doesn\u2019t go on a seamer here, so there\u2019s nothing to log.', match.row.code + ' no va en un seamer aquí, así que no hay nada que registrar.'), confirmText: 'OK' });
+        return;
+      }
     }
     if (!match && !seam.code) { toast(L('Scan the product code first', 'Primero escanee el código de producto')); if (inp) inp.select(); return; }
     if (p.made) { seam.made = p.made; seam.shift = p.shift; seam.lot = p.lot; }
