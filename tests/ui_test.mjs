@@ -2579,7 +2579,7 @@ const base = {
     getProductionRuns: () => R([]), createRun: (a) => R({ runId: "RUN-000009", machine: a[0], operator: a[1], status: "Open" }),
     getSeamerEnds: (a) => R({ date: a[1], line: 'Line ' + String(a[0]).replace(/\D/g, ''), entries: saved.filter((e) => e.date === a[1]), products: [{ code: 'E401A', size: '401', description: '' }],
       lookup: [{ code: 'E401A', desc: 'Odd', type: '0.20' }, { code: 'X999', desc: 'X', type: '' }, { code: '401 E ISE CL', desc: '401 E ISE CL', type: '0.20' },
-        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' }, { code: '603 R ISE CL', desc: '', type: '' }, { code: '6375AATFS', desc: '', type: '' }, { code: '401 SNAPCVR WHT', desc: '', type: '' }, { code: '603 E FE TFS 85', desc: '', type: '' },
+        { code: '243807', desc: 'S-1 or S-3?, "1"(S-1), "3"(S-3)', type: 'Check Value' }, { code: '243807 1', desc: '401 E PROFILE S-1', type: '' }, { code: '307 E ODD', desc: '', type: '' }, { code: '603 R ISE CL', desc: '', type: '' }, { code: '6375AATFS', desc: '', type: '' }, { code: '401 SNAPCVR WHT', desc: '', type: '' }, { code: '603 E FE TFS 85', desc: '', type: '' }, { code: '603 E FE TFS', desc: '', type: '' },
         { code: '24711 HOLE', desc: 'HD HI VIS WHT "HOLE"', type: 'Lid' }, { code: '500 E PAINT', desc: '!!!ADD COLOR!!!', type: '' }], lookupError: '' }),
     logSeamerEnds: (a) => { const LN = { '211': 'Line 2', '307': 'Line 5', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
       const e = Object.assign({ id: 'SE-0000' + (++nid), at: '2026-11-02 08:15:00', by: a[0].operator }, a[0], { line: /^603 R/.test(a[0].code) ? 'Hand-Line' : LN[a[0].size] || '' }); saved.unshift(e); return R({ ok: true, entry: e }); },
@@ -2779,6 +2779,27 @@ const base = {
   await page.fill('#seamScan', '');
   await scanProd('401 E ISE CL|');
   ok('combined label with an empty lot: the product is up, waiting for the lot', /401 E ISE CL/.test(await page.textContent('#seamStep')) && /Scan the Lot #/.test(await page.textContent('#seamScanLabel')) && nLog() === n0 + 3);
+  await page.click('#seamClear');
+  // No Enter needed for a product code
+  const n1 = nLog();
+  await page.click('#seamScan'); await page.keyboard.type('401 E ISE');
+  await page.waitForTimeout(500);
+  ok('auto-enter: half a code is not taken', !/Product:/.test(await page.textContent('#seamStep')) && (await page.$eval('#seamScan', (i) => i.value)) === '401 E ISE');
+  await page.keyboard.type(' CL'); await page.waitForTimeout(500);
+  ok('auto-enter: a whole code is taken without Enter', /401 E ISE CL/.test(await page.textContent('#seamStep')) && (await page.$eval('#seamScan', (i) => i.value)) === '' && /Scan the Lot #/.test(await page.textContent('#seamScanLabel')));
+  await page.keyboard.type('10/28/26 01'); await page.waitForTimeout(500);
+  ok('auto-enter: the old-label lot scan still waits for Enter', nLog() === n1);
+  await page.press('#seamScan', 'Enter'); await page.waitForTimeout(150);
+  ok('…then saves', nLog() === n1 + 1 && lastLog().code === '401 E ISE CL', lastLog());
+  await page.click('#seamScan'); await page.keyboard.type('603 E FE TFS'); await page.waitForTimeout(600);
+  ok('auto-enter: a code that starts a longer one waits longer', !/Product:/.test(await page.textContent('#seamStep')));
+  await page.waitForTimeout(1200);
+  ok('…then is taken', /603 E FE TFS/.test(await page.textContent('#seamStep')) && (await page.$eval('#seamScan', (i) => i.value)) === '');
+  await page.click('#seamClear');
+  await page.click('#seamScan'); await page.keyboard.type('603 E FE TFS 85|05/02/26 01'); await page.waitForTimeout(800);
+  ok('auto-enter: a whole PRODUCT|LOT label saves without Enter', nLog() === n1 + 2 && lastLog().code === '603 E FE TFS 85' && lastLog().lot === '05/02/26 01', lastLog());
+  await page.click('#seamScan'); await page.keyboard.type('E401A'); await page.press('#seamScan', 'Enter'); await page.waitForTimeout(500);
+  ok('auto-enter: Enter right away still works, taken once', /E401A/.test(await page.textContent('#seamStep')) && nLog() === n1 + 2 && !(await page.$('#modalOk')));
   await page.click('#seamClear');
   // Remove a wrong scan
   const xid = await page.evaluate(() => seam.entries.filter((e) => e.code === 'X999')[0].id);

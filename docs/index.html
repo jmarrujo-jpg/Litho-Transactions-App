@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.116.0</span>
+      <span class="version" id="appVersion">v1.117.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10544,6 +10544,7 @@
         if (f != null && f !== scan.value) { scan.value = f; try { scan.setSelectionRange(f.length, f.length); } catch (er) { /* not a text box */ } }
       }
       seamPreview();
+      seamAutoTake(scan);
     };
     document.getElementById('seamScanBtn').onclick = function () { seamTake(scan.value); };
     renderSeamStep();
@@ -10621,8 +10622,36 @@
       confirmText: 'OK' });
   }
 
+  // No Enter needed for a product code: once the box holds exactly a code on the Ends list (or a whole
+  // PRODUCT|LOT label) and nothing more comes in for a moment, it's taken. A code that's the start of a
+  // longer one (603 E FE TFS / 603 E FE TFS 85) waits longer, in case the rest is still coming.
+  var seamAutoTimer = null;
+  function seamAutoTake(inp) {
+    clearTimeout(seamAutoTimer); seamAutoTimer = null;
+    var v = String(inp.value || '');
+    if (!v.trim() || seam.busy || seam.ask || !seam.loaded) return;
+    var wait;
+    var cut = /\|~\||\||~/.exec(v);
+    if (cut) {
+      var lo = seamLotParse(v.slice(cut.index + cut[0].length).trim());
+      if (!seamRow(v.slice(0, cut.index)) || !lo || lo.bad) return;
+      wait = 500;
+    } else {
+      var t = /^[\d\/\s]+$/.test(v) && !seamRow(v) ? v.replace(/\D/g, '') : v;
+      if (!seamRow(t)) return;
+      var k = seamNorm(t);
+      wait = seam.lookup.some(function (r) { var c = seamNorm(r.code); return c.length > k.length && c.indexOf(k) === 0; }) ? 1500 : 300;
+    }
+    seamAutoTimer = setTimeout(function () {
+      seamAutoTimer = null;
+      if (state.view !== 'seamer' || document.getElementById('seamScan') !== inp || inp.value !== v) return;
+      seamTake(v); seamPreview();
+    }, wait);
+  }
+
   // One scan (or typed text) into the box.
   function seamTake(raw) {
+    clearTimeout(seamAutoTimer); seamAutoTimer = null;
     var inp = document.getElementById('seamScan');
     var v = String(raw || '').trim();
     if (!v || seam.busy) return;
