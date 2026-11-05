@@ -6101,6 +6101,8 @@ const END_PRODUCT_HEADERS = ['Product Code', 'End Size', 'Description', 'Added A
 const SEAMER_READ_MAX = 500;
 // '401', '401 ENDS', '401E' -> '401'; anything else ''.
 function endSizeOf(v) { const m = /^\s*(\d{3})(?!\d)/.exec(String(v == null ? '' : v)); return m ? m[1] : ''; }
+// Each line runs one size of end, so the end size says which line's seamer it went on.
+const SEAMER_SIZE_LINES = { '211': 'Line 2', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
 function seamerLine(v) {
   const t = String(v == null ? '' : v).trim();
   if (/^\d+$/.test(t)) return 'Line ' + parseInt(t, 10);
@@ -6166,15 +6168,14 @@ async function saveEndProduct(sheets, code, size, description, operator, prods) 
 async function setEndProductSize(sheets, code, size, operator) {
   return saveEndProduct(sheets, code, size, '', String(operator || '').trim());
 }
-// One pallet of ends onto a line's seamer. e: { line, code, made (date made), shift, pallet, scan,
-// size (only when the code is new), date (day seamed; default today), operator, notes }.
+// One pallet of ends onto a line's seamer. e: { code, made (date made), shift, pallet, scan,
+// size (only when the code doesn't say it), date (day seamed; default today), operator, notes }.
 async function logSeamerEnds(sheets, e, opId, env) {
   e = e || {};
-  const line = seamerLine(e.line), operator = String(e.operator || '').trim();
+  const operator = String(e.operator || '').trim();
   let code = String(e.code || '').trim().replace(/\s+/g, ' ');
   const date = toYMD(e.date || '') || todayYMD(), made = toYMD(e.made || '');
   if (!operator) throw new Error('Enter your name.');
-  if (!line) throw new Error('Enter the line number.');
   if (!code) throw new Error('Scan the product code on the pallet label.');
   if (!/^\d{4}-\d\d-\d\d$/.test(made)) throw new Error('Scan the date on the pallet label (like 10/28/26 01).');
   if (!/^\d{4}-\d\d-\d\d$/.test(date)) throw new Error('Pick the day it was seamed.');
@@ -6191,6 +6192,13 @@ async function logSeamerEnds(sheets, e, opId, env) {
     code = row.code;
   }
   const lot = String(e.lot || '').trim();
+  // The line comes from the end size (each line runs one size).
+  let prods = await endProductMap(sheets);
+  const sizeIn = endSizeOf(e.size);
+  const size = sizeIn || endSizeFromName(code, row.desc) || (prods[codeKey(code)] ? prods[codeKey(code)].size : '');
+  if (!size) throw new Error('Pick the end size for ' + code + ' first.');
+  const line = SEAMER_SIZE_LINES[size];
+  if (!line) throw new Error('No line runs ' + size + ' ends (' + Object.keys(SEAMER_SIZE_LINES).join(', ') + '). Check the end size for ' + code + '.');
   await ensureTab(sheets, SEAMER, SEAMER_HEADERS);
   let t = await readTab(sheets, SEAMER);
   if (SEAMER_HEADERS.some((h) => t.headers.indexOf(h) === -1)) {
@@ -6202,10 +6210,7 @@ async function logSeamerEnds(sheets, e, opId, env) {
     const ex = t.rows.filter((r) => String(r['Op ID'] || '').trim() === String(opId).trim())[0];
     if (ex) return { ok: true, duplicate: true, entry: seamerOut(ex, await endProductMap(sheets)) };
   }
-  const prods = await endProductMap(sheets);
-  let size = endSizeOf(e.size);
-  if (size) await saveEndProduct(sheets, code, size, '', operator, prods);
-  else size = endSizeFromName(code, row.desc) || (prods[codeKey(code)] ? prods[codeKey(code)].size : '');
+  if (sizeIn && sizeIn !== endSizeFromName(code, row.desc)) await saveEndProduct(sheets, code, size, '', operator, prods);
   const desc = row.code === code ? row.desc : '';
   const id = 'SE-' + ('00000' + (maxIdNumber(t.rows, 'Entry ID', 'SE-') + 1)).slice(-5);
   const shift = String(e.shift || '').trim(), pallet = String(e.pallet || '').trim();
@@ -6213,7 +6218,7 @@ async function logSeamerEnds(sheets, e, opId, env) {
     'Shift': shift, 'Pallet #': pallet, 'Scan': String(e.scan || '').slice(0, 300), 'Operator': operator, 'Notes': String(e.notes || '').trim(), 'Op ID': opId || '' };
   await appendRowObj(sheets, SEAMER, t.headers, obj);
   const p = prods[codeKey(code)];
-  return { ok: true, entry: { id, at: obj['Logged At'], date, line, code, size, description: desc || (p ? p.description : ''), lot, made, shift, pallet, by: operator, notes: obj['Notes'] }, needSize: !size };
+  return { ok: true, entry: { id, at: obj['Logged At'], date, line, code, size, description: desc || (p ? p.description : ''), lot, made, shift, pallet, by: operator, notes: obj['Notes'] } };
 }
 // A wrong scan: the row is deleted.
 async function removeSeamerEnds(sheets, entryId) {

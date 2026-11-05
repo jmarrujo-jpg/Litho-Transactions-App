@@ -238,7 +238,7 @@
     <div class="dept" id="deptLabel"></div>
     <div class="header-right">
       <button id="backBtn" style="display:none">&larr; Back</button>
-      <span class="version" id="appVersion">v1.113.0</span>
+      <span class="version" id="appVersion">v1.114.0</span>
     </div>
   </header>
   <div class="tabbar" id="tabbar">
@@ -10296,8 +10296,10 @@
   }
 
   var seam = { line: '', date: '', code: '', baseCode: '', desc: '', lot: '', made: '', shift: '', pallet: '', scan: '', ask: null,
-    entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, askSize: null };
-  try { seam.line = localStorage.getItem('cscSeamLine') || ''; } catch (e) { /* no storage */ }
+    entries: [], products: {}, lookup: [], lookupError: '', loaded: false, busy: false, size: '', last: null };
+  // Each line runs one size of end, so the end size says which line's seamer the pallet went on.
+  var SEAM_SIZE_LINE = { '211': 'Line 2', '401': 'Line 4', '404': 'Line 5', '502': 'Line 3', '603': 'Line 6', '610': 'Line 3' };
+  var SEAM_SIZES = ['211', '401', '404', '502', '603', '610'];
   // Digits of a Lot # read left to right: a 2-digit month when it can be one (01-12) else 1 digit,
   // then a 2-digit day when it can be one (01-31) else 1 digit, then a 4-digit year when it starts
   // 202x-209x else 2 digits, then the shift. 12262026 -> 12/26/2026, 1262026 -> 12/6/2026,
@@ -10355,9 +10357,8 @@
     var x = seamDigitsLot(t.replace(/\D/g, ''));
     return x && x.mo && x.day && x.year && !x.rest ? seamLotOf(x.year, x.mo, x.day, x.shift) : null;
   }
-  // After a pallet is saved the product stays, ready for the next lot.
-  function seamNextLot() { seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = seam.code; }
-  function seamReset() { seam.code = ''; seam.baseCode = ''; seam.desc = ''; seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; seam.ask = null; }
+  // Every pallet is two scans (product, then Lot #); after a save the screen starts over.
+  function seamReset() { seam.code = ''; seam.baseCode = ''; seam.desc = ''; seam.lot = ''; seam.made = ''; seam.shift = ''; seam.pallet = ''; seam.scan = ''; seam.ask = null; seam.size = ''; }
 
   // What a label scan says. Old labels are two scans: the product code (an Ends_Lookup Label Code such
   // as "401 E ISE CL"), then the Lot # ("10/28/26 01": the date made + shift). A new label is one scan
@@ -10432,12 +10433,16 @@
     var p = checkPrompt(r.desc);
     return p ? { base: r.code, question: p, options: [] } : null;
   }
-  function seamSizeOf(code) {
-    var m = /^\s*(\d{3})\s*E\b/i.exec(String(code || ''));
+  // The end size: 401 E … in the code (else its description), else one picked / saved before.
+  function seamSizeOf(code, desc) {
+    var m = /^\s*(\d{3})\s*E\b/i.exec(String(code || '')) || /^\s*(\d{3})\s*E\b/i.exec(String(desc || ''));
     if (m) return m[1];
     var p = seam.products[String(code || '').trim().toUpperCase()];
     return p ? p.size : '';
   }
+  // The product up now: its size and the line that runs it ('' when not known yet).
+  function seamCurSize() { return seam.code ? (seam.size || seamSizeOf(seam.code, seam.desc)) : ''; }
+  function seamCurLine() { return SEAM_SIZE_LINE[seamCurSize()] || ''; }
   function seamNiceDate(ymd) {
     var p = String(ymd || '').split('-'), mn = L(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']);
     return p.length === 3 ? mn[+p[1] - 1] + ' ' + (+p[2]) + ', ' + p[0] : ymd;
@@ -10459,16 +10464,15 @@
     state.view = 'seamer'; metalsTab = 'lines';
     showTabbar(false); showBack(true); setDept('Metals');
     seam.date = seam.date && seam.date <= todayStr() ? seam.date : todayStr();
-    seamReset(); seam.askSize = null;
+    seamReset(); seam.last = null;
     seam.loaded = false; seam.entries = [];
     renderSeamer();
     seamLoad();
   }
   function seamLoad() {
-    var tok = viewToken, line = seam.line, date = seam.date;
-    if (!line) return;
+    var tok = viewToken, date = seam.date;
     google.script.run.withSuccessHandler(function (r) {
-      if (tok !== viewToken || state.view !== 'seamer' || line !== seam.line || date !== seam.date) return;
+      if (tok !== viewToken || state.view !== 'seamer' || date !== seam.date) return;
       seam.entries = (r && r.entries) || [];
       seam.products = {};
       ((r && r.products) || []).forEach(function (p) { seam.products[String(p.code).trim().toUpperCase()] = p; });
@@ -10480,7 +10484,7 @@
     }).withFailureHandler(function (err) {
       if (tok !== viewToken) return;
       var el = document.getElementById('seamList'); if (el) el.innerHTML = '<div class="sub">Error: ' + esc(err.message) + '</div>';
-    }).getSeamerEnds(line, date);
+    }).getSeamerEnds('', date);
   }
 
   function renderSeamer() {
@@ -10492,10 +10496,9 @@
     view.innerHTML =
       '<div class="card">' +
         '<h3 style="margin-top:0">Double Seamer — Ends Used</h3>' +
-        '<div class="sub" style="margin-bottom:12px">Scan the product code once, then the Lot # of each pallet as it goes on the seamer. Scan a different product code to switch.</div>' +
+        '<div class="sub" style="margin-bottom:12px">For every pallet that goes on a seamer: scan the product code, then the Lot #. The line comes from the end size.</div>' +
         '<div class="row">' +
           operatorFieldHtml('seamOperator') +
-          selectField('seamLine', 'Line #', lineChoices(seam.line), seam.line) +
         '</div>' +
         '<div class="field"><label>Day seamed</label><input type="date" id="seamDate" value="' + esc(seam.date) + '" max="' + esc(today) + '"></div>' +
         '<div id="seamStep"></div>' +
@@ -10503,15 +10506,8 @@
           '<input id="seamScan" autocomplete="off" autocapitalize="characters" style="font-size:20px;padding:14px">' +
           '<div id="seamPreview" class="sub" style="font-size:15px;min-height:20px;margin-top:4px;color:var(--good)"></div></div>' +
         '<button class="btn success" id="seamScanBtn" style="width:100%">Enter</button>' +
-        '<div id="seamAsk"></div>' +
       '</div>' +
       '<div class="card"><h3 style="margin-top:0;font-size:15px" id="seamListHead"></h3><div id="seamList"><div class="loading">Loading&hellip;</div></div></div>';
-    var lineIn = document.getElementById('seamLine');
-    lineIn.onchange = function () {
-      seam.line = String(lineIn.value || '').trim();
-      try { localStorage.setItem('cscSeamLine', seam.line); } catch (e) { /* no storage */ }
-      seam.loaded = false; renderSeamerList(); seamLoad();
-    };
     var dIn = document.getElementById('seamDate');
     dIn.onchange = function () {
       if (!dIn.value || dIn.value > todayStr()) { dIn.value = seam.date; return; }
@@ -10536,24 +10532,38 @@
     };
     document.getElementById('seamScanBtn').onclick = function () { seamTake(scan.value); };
     renderSeamStep();
-    renderSeamAsk();
     renderSeamerList();
-    if (seam.line) scan.focus();
+    scan.focus();
   }
   // The scan box's prompt, the half-scanned label, and a Check Value question when the code needs one.
   function renderSeamStep() {
     var lab = document.getElementById('seamScanLabel'), st = document.getElementById('seamStep'), inp = document.getElementById('seamScan');
     if (!lab || !st) return;
+    var size = seamCurSize(), line = seamCurLine();
     if (seam.ask) { lab.textContent = L('Answer the question above first', 'Primero conteste la pregunta de arriba'); inp.placeholder = ''; }
+    else if (seam.code && !line) { lab.textContent = L('Pick the end size above first', 'Primero elija el tamaño de tapa arriba'); inp.placeholder = ''; }
     else if (seam.code) { lab.textContent = L('Scan the Lot # of each pallet (like 10/28/26 01)', 'Escanee el Lote # de cada tarima (como 10/28/26 01)'); inp.placeholder = '10/28/26 01'; }
     else { lab.textContent = L('Scan the pallet label (product code first)', 'Escanee la etiqueta de la tarima (primero el código de producto)'); inp.placeholder = L('scan or type…', 'escanee o escriba…'); }
     var warn = seam.lookupError ? '<div class="card" style="border-left:4px solid var(--warn);background:#fff7ed;margin:6px 0;padding:10px 12px"><b>' + esc(L('Can’t check product codes right now.', 'No se pueden revisar los códigos ahora.')) + '</b> <span class="sub">' + esc(seam.lookupError) + '</span></div>' : '';
-    if (!seam.code && !seam.ask) { st.innerHTML = warn; return; }
+    if (!seam.code && !seam.ask) {
+      var la = seam.last;
+      st.innerHTML = warn + (la ? '<div class="card" id="seamLast" style="border-left:4px solid var(--good);margin:6px 0;padding:10px 12px">' +
+        '<div style="font-size:17px">\u2713 ' + esc(L('Saved to ', 'Guardado en ')) + '<b>' + esc(la.line) + '</b></div>' +
+        '<div class="sub">' + esc(la.code) + ' \u00b7 ' + esc(L('Lot ', 'Lote ')) + esc(la.lot) + '</div></div>' : '');
+      return;
+    }
     var code = seam.code || (seam.ask ? seam.ask.base + ' …' : '');
     var html = warn + '<div class="card" style="background:var(--bg);margin:6px 0;padding:10px 12px">' +
       '<div class="sub">' + esc(L('Product:', 'Producto:')) + '</div>' +
-      '<div style="font-size:19px;margin-top:2px"><b>' + esc(code || '—') + '</b>' + (seamSizeOf(seam.code) ? ' <span class="badge wip">' + esc(seamSizeOf(seam.code)) + ' ends</span>' : '') + '</div>' +
-      (seam.desc ? '<div class="sub">' + esc(seam.desc) + '</div>' : '');
+      '<div style="font-size:19px;margin-top:2px"><b>' + esc(code || '—') + '</b>' + (size ? ' <span class="badge wip">' + esc(size) + ' ends</span>' : '') + '</div>' +
+      (seam.desc ? '<div class="sub">' + esc(seam.desc) + '</div>' : '') +
+      (line ? '<div id="seamLineShow" style="font-size:24px;font-weight:700;margin-top:6px">' + esc(line.replace(/^Line/, L('Line', 'Línea')).toUpperCase()) + '</div>' : '');
+    if (seam.code && !seam.ask && !line) {
+      html += '<div style="margin-top:10px;font-size:17px;font-weight:600">' +
+        esc(size ? L('No line runs ' + size + ' ends. What size end is it?', 'Ninguna línea corre tapas ' + size + '. ¿De qué tamaño es la tapa?') : L('What size end is it?', '¿De qué tamaño es la tapa?')) + '</div>' +
+        '<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">' + SEAM_SIZES.map(function (z) {
+          return '<button class="btn" data-seamsize="' + z + '" style="padding:12px 16px;font-size:18px;line-height:1.2">' + esc(z) + '<br><span style="font-size:12px;font-weight:400">' + esc(SEAM_SIZE_LINE[z].replace(/^Line/, L('Line', 'Línea'))) + '</span></button>'; }).join('') + '</div>';
+    }
     if (seam.ask) {
       html += '<div style="margin-top:10px;font-size:17px;font-weight:600">' + esc(seam.ask.question) + '</div>' +
         (seam.ask.options.length
@@ -10565,6 +10575,12 @@
     html += '<button class="btn secondary" id="seamClear" style="margin-top:8px;padding:6px 12px;font-size:13px">✕ ' + esc(L('Change product', 'Cambiar producto')) + '</button></div>';
     st.innerHTML = html;
     document.getElementById('seamClear').onclick = function () { seamReset(); renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
+    Array.prototype.forEach.call(st.querySelectorAll('[data-seamsize]'), function (b) {
+      b.onclick = function () {
+        seam.size = b.getAttribute('data-seamsize');
+        if (seam.made) seamSave(); else { renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); }
+      };
+    });
     Array.prototype.forEach.call(st.querySelectorAll('[data-seamopt]'), function (b) {
       b.onclick = function () { seamAnswer(seam.ask.options[+b.getAttribute('data-seamopt')].value); };
     });
@@ -10582,7 +10598,7 @@
     var code = appendCode(seam.ask.base, v), r = seamRow(code);
     seam.code = code; seam.desc = r ? r.desc : ''; seam.ask = null;
     seam.scan = seam.scan + ' | ' + String(v).trim();
-    if (seam.made) seamSave(); else { renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); }
+    if (seam.made && seamCurLine()) seamSave(); else { renderSeamStep(); var i = document.getElementById('seamScan'); if (i) i.focus(); }
   }
   function seamNotOnList(text) {
     showModal({ title: L('Not on the Ends list', 'No está en la lista de tapas'),
@@ -10598,6 +10614,7 @@
     // A product code made of digits that the box put slashes in (102826 -> 10/28/26): still the product.
     if (/^[\d\/\s]+$/.test(v) && !seamRow(v) && seamRow(v.replace(/\D/g, ''))) v = v.replace(/\D/g, '');
     if (seam.ask) { toast(L('Answer the question first', 'Primero conteste la pregunta')); return; }
+    if (seam.code && !seamCurLine() && !seamRow(v)) { toast(L('Pick the end size first', 'Primero elija el tamaño de tapa')); return; }
     // With a product already scanned, digits are a Lot # — unless they're a product code on the list.
     var p = seamParse(v, !!seam.code && !seamRow(v));
     if (p.badDate || (seam.code && !p.made && /^[\d\/.\-\s]+$/.test(v) && !seamRow(v))) {
@@ -10616,7 +10633,7 @@
     if (p.made) { seam.made = p.made; seam.shift = p.shift; seam.lot = p.lot; }
     if (match) {
       if (!p.made) { seam.lot = ''; seam.made = ''; seam.shift = ''; }
-      seam.scan = '';
+      seam.scan = ''; seam.size = '';
       seam.baseCode = match.row.code; seam.pallet = match.pallet;
       seam.ask = seamAskFor(match.row);
       if (seam.ask) { seam.code = ''; seam.desc = ''; }
@@ -10624,30 +10641,33 @@
     }
     seam.scan = seam.scan ? seam.scan + ' | ' + v : v;
     if (inp) { inp.value = ''; if (!seam.ask) inp.focus(); }
-    if (seam.code && seam.made && !seam.ask) seamSave(); else renderSeamStep();
+    if (seam.code && seam.made && !seam.ask && seamCurLine()) seamSave(); else renderSeamStep();
   }
 
   function seamSave() {
     var op = (document.getElementById('seamOperator') || {}).value;
     op = String(op || '').trim();
     if (!op) { toast(L('Enter your name first', 'Primero escriba su nombre')); renderSeamStep(); return; }
-    if (!seam.line) { toast(L('Pick the line first', 'Primero elija la línea')); renderSeamStep(); var li = document.getElementById('seamLine'); if (li) li.focus(); return; }
-    var entry = { line: seam.line, code: seam.code, baseCode: seam.baseCode, lot: seam.lot, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
+    var line = seamCurLine();
+    if (!line) { toast(L('Pick the end size first', 'Primero elija el tamaño de tapa')); renderSeamStep(); return; }
+    var entry = { size: seamCurSize(), code: seam.code, baseCode: seam.baseCode, lot: seam.lot, made: seam.made, shift: seam.shift, pallet: seam.pallet, scan: seam.scan, date: seam.date, operator: op };
     // Several pallets can share one lot (the lot is the date made), so every scan is its own pallet.
     var go = function () {
       seam.busy = true;
       var btn = document.getElementById('seamScanBtn'); if (btn) { btn.disabled = true; btn.textContent = L('Saving…', 'Guardando…'); }
       runMutation('logSeamerEnds', [entry, newOpId()], function (r) {
         seam.busy = false; lastOperator = op;
-        seamNextLot();
+        var e = (r && r.entry) || {};
+        var sz = e.size || entry.size;
+        if (sz && !seamSizeOf(entry.code, seam.desc)) seam.products[entry.code.toUpperCase()] = { code: entry.code, size: sz, description: '' };
+        seamReset();
+        seam.last = { line: e.line || line, code: entry.code, lot: entry.lot };
         if (state.view !== 'seamer') return;
-        var e = r && r.entry;
-        if (e && !r.duplicate && e.date === seam.date && e.line === seam.line) seam.entries.unshift(e);
-        toast(L('Saved ', 'Guardado ') + entry.code + ' — ' + L('Lot ', 'Lote ') + entry.lot);
-        seam.askSize = r && r.needSize ? entry.code : null;
+        if (e.id && !r.duplicate && e.date === seam.date) seam.entries.unshift(e);
+        toast(L('Saved to ', 'Guardado en ') + seam.last.line + ' — ' + entry.code + ' — ' + L('Lot ', 'Lote ') + entry.lot);
         var b2 = document.getElementById('seamScanBtn'); if (b2) { b2.disabled = false; b2.textContent = L('Enter', 'Entrar'); }
-        renderSeamStep(); renderSeamAsk(); renderSeamerList();
-        var i = document.getElementById(seam.askSize ? 'seamAskSize' : 'seamScan'); if (i) i.focus();
+        renderSeamStep(); renderSeamerList();
+        var i = document.getElementById('seamScan'); if (i) i.focus();
       }, function (err) {
         seam.busy = false;
         var b3 = document.getElementById('seamScanBtn'); if (b3) { b3.disabled = false; b3.textContent = L('Enter', 'Entrar'); }
@@ -10657,46 +10677,16 @@
     go();
   }
 
-  // A product code seen for the first time: what size end is it? (Remembered for everyone.)
-  function renderSeamAsk() {
-    var el = document.getElementById('seamAsk');
-    if (!el) return;
-    if (!seam.askSize) { el.innerHTML = ''; return; }
-    el.innerHTML = '<div class="card" style="border:2px solid var(--warn);margin:12px 0 0">' +
-      '<div style="font-size:16px;margin-bottom:6px">' + esc(L('First time for product code ', 'Primera vez para el código ')) + '<b>' + esc(seam.askSize) + '</b>. ' + esc(L('What size end is it?', '¿De qué tamaño es la tapa?')) + '</div>' +
-      '<div class="row" style="align-items:flex-end">' +
-        '<div class="field" style="flex:1;margin:0"><label>' + esc(L('End size', 'Tamaño de tapa')) + '</label><input id="seamAskSize" inputmode="numeric" placeholder="e.g. 401" maxlength="3"></div>' +
-        '<button class="btn success" id="seamAskSave" style="margin-left:8px">' + esc(L('Save', 'Guardar')) + '</button>' +
-        '<button class="btn secondary" id="seamAskSkip" style="margin-left:8px">' + esc(L('Not sure', 'No sé')) + '</button>' +
-      '</div></div>';
-    var code = seam.askSize, inp = document.getElementById('seamAskSize');
-    var save = function () {
-      var v = String(inp.value || '').trim();
-      if (!/^\d{3}$/.test(v)) { toast(L('Type the end size as 3 numbers, like 401', 'Escriba el tamaño con 3 números, como 401')); inp.focus(); return; }
-      var b = document.getElementById('seamAskSave'); b.disabled = true;
-      runMutation('setEndProductSize', [code, v, lastOperator], function () {
-        seam.products[code.toUpperCase()] = { code: code, size: v, description: '' };
-        seam.entries.forEach(function (x) { if (x.code.toUpperCase() === code.toUpperCase() && !x.size) x.size = v; });
-        seam.askSize = null; toast(L('Saved: ', 'Guardado: ') + code + ' = ' + v + ' ends');
-        renderSeamAsk(); renderSeamerList(); var i = document.getElementById('seamScan'); if (i) i.focus();
-      }, function (err) { b.disabled = false; toast('Error: ' + err.message); });
-    };
-    inp.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); save(); } };
-    document.getElementById('seamAskSave').onclick = save;
-    document.getElementById('seamAskSkip').onclick = function () { seam.askSize = null; renderSeamAsk(); var i = document.getElementById('seamScan'); if (i) i.focus(); };
-  }
-
   function renderSeamerList() {
     var head = document.getElementById('seamListHead'), el = document.getElementById('seamList');
     if (!el) return;
-    if (head) head.innerHTML = esc(seam.line ? L('On ', 'En ') + seam.line + ' — ' + seamFmtDate(seam.date) : L('Pallets logged — ', 'Tarimas registradas — ') + seamFmtDate(seam.date)) +
-      (seam.loaded && seam.line ? ' <span class="sub" style="font-weight:400">&middot; ' + seam.entries.length + ' ' + esc(seam.entries.length === 1 ? L('pallet', 'tarima') : L('pallets', 'tarimas')) + '</span>' : '');
-    if (!seam.line) { el.innerHTML = '<div class="sub">' + esc(L('Pick the line above.', 'Elija la línea arriba.')) + '</div>'; return; }
+    if (head) head.innerHTML = esc(L('Pallets seamed — ', 'Tarimas en seamer — ') + seamFmtDate(seam.date)) +
+      (seam.loaded ? ' <span class="sub" style="font-weight:400">&middot; ' + seam.entries.length + ' ' + esc(seam.entries.length === 1 ? L('pallet', 'tarima') : L('pallets', 'tarimas')) + '</span>' : '');
     if (!seam.loaded) { el.innerHTML = '<div class="loading">Loading&hellip;</div>'; return; }
     if (!seam.entries.length) { el.innerHTML = '<div class="sub">' + esc(L('Nothing scanned yet.', 'Nada escaneado todavía.')) + '</div>'; return; }
     el.innerHTML = seam.entries.map(function (x) {
       return '<div class="queue-item" style="padding:8px 0">' +
-        '<div style="min-width:0"><div class="ticket-id" style="font-size:16px">' + esc(x.code) +
+        '<div style="min-width:0"><div class="ticket-id" style="font-size:16px">' + (x.line ? '<span class="badge done" style="margin-right:6px">' + esc(x.line.replace(/^Line/, L('Line', 'Línea'))) + '</span>' : '') + esc(x.code) +
           (x.size ? ' <span class="badge wip">' + esc(x.size) + ' ends</span>' : ' <span class="badge inprogress">' + esc(L('size?', '¿tamaño?')) + '</span>') + '</div>' +
           (x.description ? '<div class="sub">' + esc(x.description) + '</div>' : '') +
           '<div class="sub">' + esc(L('Lot ', 'Lote ')) + esc(x.lot || (seamFmtDate(x.made) + (x.shift ? ' ' + x.shift : ''))) +
