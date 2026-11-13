@@ -10,3 +10,9 @@ double-apply or skip work), the write lock (simultaneous saves get distinct Skid
 retry rules. `ui_test` covers escaping, the app's retry/timeout rules, Create Job, resumed-job
 operator, the WIP litho cost check, the count refresh, what tablets vs computers show, and the
 work-session Back question (Save / Delete / Keep working) with the scan-first skid finder.
+
+## app.py (the ticket printer page)
+
+`PYTHON=python3 node tests/app_test.mjs` — runs app.py's page with a fake printer and a fake sheet
+(`tests/app_fake_server.py`; that Python needs `pip install flask`). Covers the ticket format,
+Copy numbering, arrow keys, Print + save / Print only / Save to sheet only, and the duplicate check.

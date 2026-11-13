@@ -396,7 +396,7 @@ def BASE_BOXES_FORMULA(v):
 def format_weight_for_print(w):
     """Add a thousands-separator comma for the PRINTED ticket only.
     Called from build_form_text() on its own local copy of `values` — never
-    on the ticket dict itself, so the value sent to send_to_sheet()/Google
+    on the ticket dict itself, so the value sent to save_to_sheet()/Google
     Sheets stays plain digits (numeric), not a comma-containing string.
     '19435' -> '19,435'. Values under 1000, blanks, or anything that isn't a
     plain number are returned unchanged."""
@@ -754,23 +754,69 @@ def _get_worksheet():
     return ws, headers
 
 
-def send_to_sheet(tickets):
-    """Best-effort: append printed tickets to the Google Sheet via a service
-    account. Assigns each new row a Skid ID + Status='Current' so it shows up as
-    inventory in the tracker. Runs in a background thread so it never delays or
-    blocks printing."""
-    if not SHEET_ID or not tickets:
-        return
+# -------- TICKET NUMBERS ----------------------------------------------------
+# A ticket number is MMDDYY-NNN: the date (a real date) then 001-999, e.g. 111326-001.
+TICKET_RE = re.compile(r"^(\d\d)(\d\d)(\d\d)-(\d{3})$")
 
-    def _post():
+def ticket_problem(t):
+    """'' when t is a good ticket number, else what's wrong with it."""
+    t = str(t or "").strip()
+    if not t:
+        return "is missing a ticket number"
+    m = TICKET_RE.match(t)
+    if not m:
+        return f'ticket "{t}" isn\'t in the format MMDDYY-NNN (like 111326-001)'
+    mm, dd, yy, nnn = (int(g) for g in m.groups())
+    days = [31, 29 if yy % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if not (1 <= mm <= 12) or not (1 <= dd <= days[mm - 1]):
+        return f'ticket "{t}" starts with {t[:6]}, which isn\'t a real date (MMDDYY)'
+    if nnn == 0:
+        return f'ticket "{t}" ends in 000; numbers start at 001'
+    return ""
+
+def ticket_errors(tickets):
+    """Every problem with a batch: bad formats, and the same number twice in it."""
+    errs, seen = [], {}
+    for i, t in enumerate(tickets):
+        num = str(t.get("ticket", "")).strip().upper()
+        where = f"Row {t.get('row')}".strip() if str(t.get("row", "")).strip() else f"Ticket #{i + 1}"
+        p = ticket_problem(num)
+        if p:
+            errs.append(f"{where} {p}.")
+        elif num in seen:
+            errs.append(f"{where}: ticket {num} is in this batch twice.")
+        seen[num] = True
+    return errs
+
+def _reset_sheet():
+    global _sheet_ws, _sheet_headers
+    _sheet_ws, _sheet_headers = None, None
+
+def sheet_existing(numbers):
+    """The ticket numbers (of `numbers`) already on the sheet. Raises if the sheet can't be read."""
+    ws, headers = _get_worksheet()
+    if "Ticket" not in headers:
+        return []
+    on_sheet = {str(v).strip().upper() for v in ws.col_values(headers.index("Ticket") + 1)[1:]}
+    return [n for n in numbers if str(n).strip().upper() in on_sheet]
+
+def save_to_sheet(tickets, tries=3):
+    """Add the tickets to the Google Sheet (Skid ID + Status='Current' so they show up as stock).
+    Tickets already on the sheet are skipped, never added twice. Retries a failed save.
+    Returns (added_numbers, skipped_numbers, skid_ids, error_text_or_empty)."""
+    if not SHEET_ID:
+        return [], [], [], "Saving to the sheet is turned off (SHEET_ID is blank in app.py)."
+    import time
+    last = ""
+    for attempt in range(tries):
         try:
             with _sheet_lock:                         # one batch numbers at a time
                 ws, headers = _get_worksheet()
-                skids = _next_skid_ids(ws, headers, len(tickets))
-                # Build one row per ticket, ordered to match the sheet's headers.
+                skip = set(sheet_existing([t.get("ticket", "") for t in tickets]))
+                todo = [t for t in tickets if str(t.get("ticket", "")).strip().upper() not in skip]
+                skids = _next_skid_ids(ws, headers, len(todo)) if todo else []
                 rows = []
-                for t, skid in zip(tickets, skids):
-                    # value-by-header: place each mapped field under its column
+                for t, skid in zip(todo, skids):
                     by_header = {}
                     for key, header in SHEET_HEADER_MAP.items():
                         by_header[header] = t.get(key, "")
@@ -779,13 +825,18 @@ def send_to_sheet(tickets):
                     if "Status" in headers:
                         by_header["Status"] = "Current"  # new stock enters as Current
                     rows.append([by_header.get(h, "") for h in headers])
-                ws.append_rows(rows, value_input_option="USER_ENTERED")
-            tag = f" ({skids[0]}..{skids[-1]})" if skids and skids[0] else ""
-            print(f"Sheet logging succeeded: appended {len(rows)} row(s){tag}.", flush=True)
+                if rows:
+                    ws.append_rows(rows, value_input_option="USER_ENTERED")
+            added = [t.get("ticket", "") for t in todo]
+            print(f"Sheet: added {len(added)} row(s), skipped {len(skip)} already there.", flush=True)
+            return added, sorted(skip), skids, ""
         except Exception as exc:
-            print("Sheet logging failed (printing was unaffected):", exc, flush=True)
-
-    threading.Thread(target=_post, daemon=True).start()
+            last = str(exc) or exc.__class__.__name__
+            print(f"Sheet save failed (try {attempt + 1} of {tries}):", last, flush=True)
+            _reset_sheet()                            # sign in again next try
+            if attempt + 1 < tries:
+                time.sleep(2 * (attempt + 1))
+    return [], [], [], last
 
 app_flask = Flask(__name__)
 
@@ -812,6 +863,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   td.sheetonly{background:#fff9f0;}
   td.qtycol input{background:#eef0ff;border-color:#9aa6e0;}
   th{}
+  td input.bad{outline:2px solid #c5221f;border-color:#c5221f;background:#fdecea;}
   td.bb{background:#e9f5e9;font-size:13px;padding:5px 7px;white-space:nowrap;
         color:#1a6b1a;font-weight:600;min-width:80px;text-align:right;}
   td.act-col{width:66px;text-align:center;white-space:nowrap;}
@@ -853,21 +905,25 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   <tbody id="tbody"></tbody>
 </table></div>
 <div class="bar">
-  <button class="act primary" onclick="printAll()">&#x1F5A8; Print all tickets</button>
+  <button class="act primary" id="btnBoth" onclick="printAll('both')">&#x1F5A8; Print + save to sheet</button>
+  <button class="act ghost" id="btnPrint" onclick="printAll('print')">Print only</button>
+  <button class="act ghost" id="btnSheet" onclick="printAll('sheet')">Save to sheet only</button>
   <button class="act ghost" onclick="addRow()">+ Add row</button>
   <button class="act ghost" onclick="calibrate()">Calibration sheet</button>
   <span id="status"></span>
 </div>
-<div class="note">Base Boxes (green) = Weight ÷ Basis Weight, auto-calculated. Copy duplicates a row for small edits.</div>
+<div class="note">Base Boxes (green) = Weight ÷ Basis Weight, auto-calculated. Ticket numbers are MMDDYY-NNN (type the digits, the dash goes in by itself).
+Copy duplicates a row with the next ticket number (111326-001 &rarr; 111326-002). Arrow keys move between cells.
+<b>Print only</b> = a reprint, nothing added to the sheet. <b>Save to sheet only</b> = add without printing (e.g. if a save failed).</div>
 
 <div id="reviewOverlay">
   <div id="reviewModal">
-    <h2>Review before printing &amp; adding to inventory</h2>
+    <h2 id="reviewTitle">Review before printing &amp; adding to inventory</h2>
     <div id="reviewBody"></div>
     <div id="reviewFooter">
       <span class="hint">Edits here apply only to what's printed/saved — not the table behind this window.</span>
       <button class="act ghost" onclick="closeReviewModal()">Cancel</button>
-      <button class="act primary" onclick="confirmPrint()">Print and Add to Inventory</button>
+      <button class="act primary" id="reviewGo" onclick="confirmPrint()">Print and Add to Inventory</button>
     </div>
   </div>
 </div>
@@ -912,6 +968,87 @@ function coilSheetQtyErrors(rows){
   });
   return errs;
 }
+/* ---- Ticket numbers: MMDDYY-NNN, e.g. 111326-001 ---- */
+function fmtTicket(v){
+  const d=String(v||'').replace(/\D/g,'').slice(0,9);
+  return d.length>6 ? d.slice(0,6)+'-'+d.slice(6) : d;
+}
+function ticketProblem(t){
+  t=String(t||'').trim();
+  if(!t) return 'is missing a ticket number';
+  const m=/^(\d\d)(\d\d)(\d\d)-(\d{3})$/.exec(t);
+  if(!m) return `ticket "${t}" isn't in the format MMDDYY-NNN (like 111326-001)`;
+  const mm=+m[1], dd=+m[2], yy=+m[3], n=+m[4];
+  const days=[31,yy%4===0?29:28,31,30,31,30,31,31,30,31,30,31];
+  if(mm<1||mm>12||dd<1||dd>days[mm-1]) return `ticket "${t}" starts with ${t.slice(0,6)}, which isn't a real date (MMDDYY)`;
+  if(n===0) return `ticket "${t}" ends in 000; numbers start at 001`;
+  return '';
+}
+function ticketErrors(rows){
+  const errs=[], seen={};
+  rows.forEach((r,i)=>{
+    const t=String(r.ticket||'').trim().toUpperCase();
+    const where=(r.row||'').trim() ? `Row ${r.row}` : `Ticket #${i+1}`;
+    const p=ticketProblem(t);
+    if(p) errs.push(`${where} ${p}.`);
+    else if(seen[t]) errs.push(`${where}: ticket ${t} is in this batch twice.`);
+    seen[t]=true;
+  });
+  return errs;
+}
+/* The next number after a ticket (111326-001 -> 111326-002), '' when there isn't one. */
+function nextTicket(t){
+  const m=/^(\d{6})-(\d{3})$/.exec(String(t||'').trim());
+  if(!m || +m[2]>=999) return '';
+  return m[1]+'-'+String(+m[2]+1).padStart(3,'0');
+}
+function tableTickets(){
+  const out={};
+  document.querySelectorAll('#tbody input[data-key="ticket"]').forEach(i=>{ if(i.value.trim()) out[i.value.trim().toUpperCase()]=true; });
+  return out;
+}
+/* Ticket box: digits only, the dash put in after the 6th; red when it isn't a good number. */
+function ticketInput(inp){
+  const before=inp.value, caret=inp.selectionStart==null?before.length:inp.selectionStart;
+  const digitsBefore=before.slice(0,caret).replace(/\D/g,'').length;
+  const v=fmtTicket(before);
+  if(v!==before){
+    inp.value=v;
+    let pos=0, seen=0;
+    while(pos<v.length && seen<digitsBefore){ if(/\d/.test(v[pos])) seen++; pos++; }
+    try{ inp.setSelectionRange(pos,pos); }catch(e){}
+  }
+  markTicket(inp);
+}
+function markTicket(inp){
+  const v=inp.value.trim();
+  inp.classList.toggle('bad', !!v && (v.length>=10 || document.activeElement!==inp) && !!ticketProblem(v));
+  inp.title = v && ticketProblem(v) ? ticketProblem(v) : '';
+}
+/* Arrow keys move between cells: up/down always, left/right once the caret is at the edge
+   of the text. The cell moved to is selected, ready to type over (like a spreadsheet). */
+function arrowNav(e, rowsOf){
+  const k=e.key;
+  if(!/^Arrow(Up|Down|Left|Right)$/.test(k) || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const inp=e.target;
+  if(!inp || inp.tagName!=='INPUT') return;
+  const rows=rowsOf().map(tr=>Array.from(tr.querySelectorAll('input')));
+  let r=-1, c=-1;
+  rows.forEach((cells,ri)=>{ const ci=cells.indexOf(inp); if(ci!==-1){ r=ri; c=ci; } });
+  if(r<0) return;
+  const len=inp.value.length, s0=inp.selectionStart, s1=inp.selectionEnd;
+  let to=null;
+  if(k==='ArrowUp' && r>0) to=rows[r-1][Math.min(c,rows[r-1].length-1)];
+  else if(k==='ArrowDown' && r<rows.length-1) to=rows[r+1][Math.min(c,rows[r+1].length-1)];
+  else if(k==='ArrowLeft' && s0===0 && (s1===0 || s1===len)){
+    to = c>0 ? rows[r][c-1] : (r>0 ? rows[r-1][rows[r-1].length-1] : null);
+  } else if(k==='ArrowRight' && s1===len && (s0===len || s0===0)){
+    to = c<rows[r].length-1 ? rows[r][c+1] : (r<rows.length-1 ? rows[r+1][0] : null);
+  }
+  if(!to) return;
+  e.preventDefault();
+  to.focus(); try{ to.select(); }catch(er){}
+}
 function getRowValues(tr){
   const o={};
   tr.querySelectorAll('input[data-key]').forEach(i=>o[i.dataset.key]=i.value);
@@ -930,6 +1067,12 @@ function addRow(values,insertAfter){
     else{
       const inp=document.createElement('input');
       inp.dataset.key=k; inp.autocomplete='off'; inp.value=(values[k]||'').toUpperCase();
+      if(k==='ticket'){
+        inp.value=fmtTicket(inp.value); inp.inputMode='numeric'; inp.maxLength=10; inp.placeholder='MMDDYY-NNN';
+        inp.addEventListener('input',()=>ticketInput(inp));
+        inp.addEventListener('blur',()=>markTicket(inp));
+        markTicket(inp);
+      } else
       inp.addEventListener('input',()=>{ uppercaseInput(inp); updateBB(tr); });
       const col=COLORS[k];
       if(col==='sheetonly') td.className='sheetonly';
@@ -941,7 +1084,14 @@ function addRow(values,insertAfter){
   const td=document.createElement('td'); td.className='act-col';
   const cp=document.createElement('button'); cp.className='cp-btn'; cp.textContent='Copy';
   cp.title='Duplicate this row below';
-  cp.onclick=()=>addRow(getRowValues(tr),tr);
+  cp.onclick=()=>{
+    const vals=getRowValues(tr), taken=tableTickets();
+    let t=nextTicket(vals.ticket);
+    while(t && taken[t]) t=nextTicket(t);
+    vals.ticket=t;
+    const nr=addRow(vals,tr);
+    const ti=nr.querySelector('input[data-key="ticket"]'); if(ti){ ti.focus(); try{ ti.select(); }catch(e){} }
+  };
   const x=document.createElement('button'); x.className='x'; x.textContent='\u00d7';
   x.title='Delete'; x.onclick=()=>tr.remove();
   td.appendChild(cp); td.appendChild(x); tr.appendChild(td);
@@ -964,12 +1114,18 @@ async function post(url,body){
   status('Sending\u2026');
   try{
     const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
-    const j=await r.json(); status(j.message,j.ok?'ok':'err');
-  }catch(e){status('Error: '+e,'err');}
+    const j=await r.json(); status(j.message,j.ok?'ok':'err'); return j;
+  }catch(e){status('Error: '+e,'err'); return null;}
 }
 
 /* ---- Review modal: shows the whole batch, editable, before commit ---- */
 let reviewRows = [];   // working copy of tickets currently being reviewed
+let reviewMode = 'both';
+const MODE_TEXT = {
+  both:  ['Review before printing & adding to inventory', 'Print and Add to Inventory'],
+  print: ['Review before printing (Print only — nothing added to the sheet)', 'Print only'],
+  sheet: ['Review before saving to the sheet (nothing printed)', 'Save to sheet only'],
+};
 
 function reviewKeys(){
   // Same fields as the main table, minus the computed base_boxes column.
@@ -981,24 +1137,42 @@ function renderReviewTable(){
     keys.map(k=>`<th>${LABELS[k]||k}</th>`).join('') + '</tr></thead><tbody>';
   reviewRows.forEach((row,ri)=>{
     html += '<tr>' + keys.map(k=>
-      `<td><input data-ri="${ri}" data-key="${k}" value="${(row[k]||'').toUpperCase().replace(/"/g,'&quot;')}"></td>`
+      `<td><input data-ri="${ri}" data-key="${k}" autocomplete="off" value="${(row[k]||'').toUpperCase().replace(/"/g,'&quot;')}"${k==='ticket'?' inputmode="numeric" maxlength="10" placeholder="MMDDYY-NNN"':''}></td>`
     ).join('') + '</tr>';
   });
   html += '</tbody></table>';
   document.getElementById('reviewBody').innerHTML = html;
   document.getElementById('reviewBody').querySelectorAll('input').forEach(inp=>{
+    if(inp.dataset.key==='ticket') markTicket(inp);
     inp.addEventListener('input', e=>{
-      uppercaseInput(e.target);
+      if(e.target.dataset.key==='ticket') ticketInput(e.target); else uppercaseInput(e.target);
       const ri = +e.target.dataset.ri, key = e.target.dataset.key;
       reviewRows[ri][key] = e.target.value;
     });
+    if(inp.dataset.key==='ticket') inp.addEventListener('blur', ()=>markTicket(inp));
   });
 }
-function openReviewModal(rows){
+function openReviewModal(rows, mode){
   reviewRows = rows.map(r=>({...r}));   // copy so edits don't touch the main table
+  reviewMode = mode || 'both';
+  document.getElementById('reviewTitle').textContent = MODE_TEXT[reviewMode][0];
+  document.getElementById('reviewGo').textContent = MODE_TEXT[reviewMode][1];
   renderReviewTable();
   const b=document.getElementById('reviewErr'); if(b) b.remove();
   document.getElementById('reviewOverlay').classList.add('open');
+  if(reviewMode!=='print') checkExisting();
+}
+/* Saving: say up front which numbers are already on the sheet (printed earlier today?). */
+async function checkExisting(){
+  try{
+    const r=await fetch('/check_tickets',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tickets:reviewRows.map(x=>x.ticket)})});
+    const j=await r.json();
+    if(!document.getElementById('reviewOverlay').classList.contains('open')) return;
+    if(j.existing && j.existing.length)
+      showReviewError('Already on the sheet: '+j.existing.join(', ')+'. Change those numbers here, or Cancel and use Print only to reprint them.');
+    else if(!j.ok && j.message) showReviewError(j.message);
+  }catch(e){}
 }
 function closeReviewModal(){
   document.getElementById('reviewOverlay').classList.remove('open');
@@ -1014,21 +1188,28 @@ function showReviewError(msg){
   banner.textContent = msg;
 }
 async function confirmPrint(){
-  const errs = coilSheetQtyErrors(reviewRows);
+  const errs = ticketErrors(reviewRows).concat(coilSheetQtyErrors(reviewRows));
   if(errs.length){ showReviewError(errs.join('  |  ')); return; }
-  const rows = reviewRows;
+  const rows = reviewRows, mode = reviewMode;
+  const go=document.getElementById('reviewGo'); go.disabled=true;
+  const j = await post('/print_batch',{tickets:rows, mode:mode});
+  go.disabled=false;
+  // Already on the sheet: keep the window open so the numbers can be fixed.
+  if(j && j.existing && j.existing.length){ showReviewError(j.message); return; }
   closeReviewModal();
-  await post('/print_batch',{tickets:rows});
 }
 
-function printAll(){
+function printAll(mode){
   const rows=collect();
-  if(!rows.length){status('Nothing to print — fill in at least one row.','err');return;}
-  const errs = coilSheetQtyErrors(rows);
+  if(!rows.length){status('Nothing to do — fill in at least one row.','err');return;}
+  rows.forEach(r=>{ r.ticket=fmtTicket(r.ticket); });
+  const errs = ticketErrors(rows).concat(coilSheetQtyErrors(rows));
   if(errs.length){ status(errs.join('  |  '),'err'); return; }
-  openReviewModal(rows);
+  openReviewModal(rows, mode);
 }
 function calibrate(){post('/calibrate');}
+document.getElementById('tbody').addEventListener('keydown', e=>arrowNav(e, ()=>Array.from(document.querySelectorAll('#tbody tr'))));
+document.getElementById('reviewBody').addEventListener('keydown', e=>arrowNav(e, ()=>Array.from(document.querySelectorAll('#reviewBody tbody tr'))));
 const DUMMY = __DUMMY__;
 // First row prefilled with dummy data (if enabled) for quick testing
 addRow(DUMMY);
@@ -1064,19 +1245,72 @@ def index():
     return Response(render_page(), mimetype="text/html")
 
 
+@app_flask.route("/check_tickets", methods=["POST"])
+def do_check():
+    """Which of these ticket numbers are already on the sheet (printed earlier)."""
+    data = request.get_json(force=True, silent=True) or {}
+    nums = [str(n).strip().upper() for n in data.get("tickets", []) if str(n).strip()]
+    if not SHEET_ID:
+        return jsonify(ok=True, existing=[])
+    try:
+        with _sheet_lock:
+            return jsonify(ok=True, existing=sheet_existing(nums))
+    except Exception as e:
+        _reset_sheet()
+        return jsonify(ok=False, existing=[], message=f"Couldn't check the sheet: {e}")
+
+
 @app_flask.route("/print_batch", methods=["POST"])
 def do_batch():
+    """mode: 'both' (print + save to the sheet, the default), 'print' (print only, e.g. a
+    reprint), or 'sheet' (save to the sheet only, e.g. after a save that failed)."""
     data = request.get_json(force=True, silent=True) or {}
+    mode = data.get("mode") or "both"
+    if mode not in ("both", "print", "sheet"):
+        return jsonify(ok=False, message=f"Unknown mode {mode}.")
     tickets = [t for t in data.get("tickets", [])
                if any(str(v).strip() for v in t.values())]
-    try:
-        blob = b"".join(build_form_text(t) for t in tickets)
-        if blob:
-            print_raw(blob)
-            send_to_sheet(tickets)          # log to Google Sheet (best-effort)
-        return jsonify(ok=True, message=f"Printed {len(tickets)} ticket(s).")
-    except Exception as e:
-        return jsonify(ok=False, message=f"Print failed: {e}")
+    for t in tickets:
+        t["ticket"] = str(t.get("ticket", "")).strip().upper()
+    if not tickets:
+        return jsonify(ok=False, message="Nothing to do — fill in at least one row.")
+    errs = ticket_errors(tickets)
+    if errs:
+        return jsonify(ok=False, message="  |  ".join(errs))
+    saving = mode in ("both", "sheet")
+    if saving and SHEET_ID:
+        # Stop before printing if any number is already on the sheet (printed earlier today?).
+        try:
+            with _sheet_lock:
+                dup = sheet_existing([t["ticket"] for t in tickets])
+        except Exception as e:
+            _reset_sheet()
+            return jsonify(ok=False, message=f"Couldn't reach the sheet to check the ticket numbers, so nothing was printed: {e}. "
+                                             "Try again, or use Print only.")
+        if dup:
+            return jsonify(ok=False, existing=dup,
+                           message="Already on the sheet: " + ", ".join(dup) + ". Nothing was printed. "
+                                   "Change those numbers, or use Print only to reprint them.")
+    printed = 0
+    if mode in ("both", "print"):
+        try:
+            blob = b"".join(build_form_text(t) for t in tickets)
+            if blob:
+                print_raw(blob)
+                printed = len(tickets)
+        except Exception as e:
+            return jsonify(ok=False, message=f"Print failed, nothing was saved to the sheet: {e}")
+    if not saving:
+        return jsonify(ok=True, printed=printed, message=f"Printed {printed} ticket(s). Not saved to the sheet (Print only).")
+    added, skipped, skids, err = save_to_sheet(tickets)
+    head = f"Printed {printed} ticket(s). " if printed else ""
+    if err:
+        return jsonify(ok=False, printed=printed, sheetFailed=True,
+                       message=head + "NOT saved to the sheet: " + err + " — fix it, then use Save to sheet only for these tickets.")
+    msg = head + f"Saved {len(added)} to the sheet" + (f" ({skids[0]}..{skids[-1]})" if skids and skids[0] else "") + "."
+    if skipped:
+        msg += " Already there, skipped: " + ", ".join(skipped) + "."
+    return jsonify(ok=True, printed=printed, added=added, skipped=skipped, message=msg)
 
 
 @app_flask.route("/calibrate", methods=["POST"])
