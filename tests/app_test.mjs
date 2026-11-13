@@ -33,7 +33,7 @@ try {
   ok('server: a number already on the sheet stops the batch, nothing printed or saved', !r.ok && r.existing.join() === '111326-001' && s.printed === 0 && s.sheet.length === 1, [r, s]);
   r = await api('/print_batch', { tickets: [row('111326-001')], mode: 'print' });
   s = await state();
-  ok('server: Print only reprints it, nothing added', r.ok && s.printed === 1 && s.sheet.length === 1 && /Not saved to the sheet/.test(r.message), [r, s]);
+  ok('server: Print only reprints it, nothing added (on the 2580 found by name)', r.ok && s.printed === 1 && s.printer === 'Lexmark Forms Printer 2580 (Copy 1)' && s.sheet.length === 1 && /Not saved to the sheet/.test(r.message), [r, s]);
   r = await api('/print_batch', { tickets: [row('111326-002')], mode: 'sheet' });
   s = await state();
   ok('server: Save to sheet only adds it, nothing printed', r.ok && s.printed === 1 && s.sheet.join() === '111326-001,111326-002' && s.skids[1] === 'SKD-000008', [r, s]);
@@ -136,6 +136,16 @@ try {
   await page.locator('#reviewBody input').first().click(); await page.keyboard.press('ArrowRight');
   ok('page: arrow keys work in the review window', await page.evaluate(() => document.activeElement.closest('#reviewBody') && document.activeElement.dataset.key === 'ticket'));
   await page.click('#reviewOverlay .ghost');
+  // Setup checks: the printer is found by name, a missing printer / key file is shown in red
+  await page.goto(base + '/');
+  ok('page: a printer with 2580 in its name is found automatically', /Lexmark Forms Printer 2580 \(Copy 1\) \(found automatically\)/.test(await page.textContent('.printer')) && !/Setup problem/.test(await page.textContent('body')));
+  await api('/__setup', { printers: ['Microsoft Print to PDF'], key: '/nope/service_account.json' });
+  await page.goto(base + '/');
+  const body = await page.textContent('body');
+  ok('page: no 2580 and no key file -> a red Setup problem box naming both', /Printer: NOT FOUND/.test(body) && /Setup problem/.test(body) && /No Lexmark 2580 printer found/.test(body) && /key file is missing.*\/nope\/service_account\.json/.test(body), body.slice(0, 600));
+  r = await api('/print_batch', { tickets: [row('111326-040')], mode: 'print' });
+  ok('server: printing with no 2580 says so plainly', !r.ok && /No Lexmark 2580 found/.test(r.message), r);
+  await api('/__setup', { printers: ['Lexmark Forms Printer 2580'], key: '' });
   ok('page: no errors', !errs.length, errs);
   await b.close();
 } catch (e) { fail++; console.log('  ✗ crashed: ' + (e.stack || e)); }

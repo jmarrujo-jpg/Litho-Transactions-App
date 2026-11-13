@@ -8,9 +8,10 @@ DARKNESS APPROACH (this version):
   ESC I is NOT used here (its bit definitions differ between Proprinter
   variants and caused layout corruption in earlier versions).
 
-Setup:
-  1. pip install flask pywin32
-  2. python app.py  (lists printers — paste exact name into PRINTER_NAME)
+Setup (full step-by-step for a new PC: SETUP-SHOP-PC.md):
+  1. py -m pip install flask waitress pywin32 gspread google-auth
+  2. start-ticket-printer.bat  (or: py app.py). Any printer with "2580" in its
+     name is found automatically; PRINTER_NAME is only the first choice.
   3. http://localhost:5000  or  http://192.168.1.162:5000 on the LAN
 
 Alignment knobs:
@@ -670,9 +671,27 @@ def build_calibration_text():
     return bytes(out)
 
 
+def find_printer():
+    """The Windows printer to use: PRINTER_NAME when Windows has it, else the first printer whose
+    name has "2580" or "Lexmark Forms" in it (so a new PC, or "... (Copy 1)", still works).
+    '' when there's none."""
+    names = [n for n in list_printers() if not n.startswith("(could not")]
+    if PRINTER_NAME in names:
+        return PRINTER_NAME
+    for want in ("2580", "lexmark forms"):
+        for n in names:
+            if want in n.lower():
+                return n
+    return ""
+
+
 def print_raw(data_bytes):
     import win32print
-    h = win32print.OpenPrinter(PRINTER_NAME)
+    name = find_printer()
+    if not name:
+        raise RuntimeError(f'No Lexmark 2580 found in Windows (looked for "{PRINTER_NAME}", or any printer with '
+                           '"2580" in its name). Check it is plugged in and shows under Settings > Printers.')
+    h = win32print.OpenPrinter(name)
     try:
         win32print.StartDocPrinter(h, 1, ("Tickets", None, "RAW"))
         win32print.StartPagePrinter(h)
@@ -737,6 +756,22 @@ def _resolve_creds_path():
     if not os.path.isabs(p):
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), p)
     return p
+
+def key_file_problem():
+    """'' when the service account key file is there and looks right, else what's wrong with it."""
+    if not SHEET_ID:
+        return ""
+    path = _resolve_creds_path()
+    if not os.path.isfile(path):
+        return f"The service account key file is missing. Put it here, named exactly {os.path.basename(path)}: {path}"
+    try:
+        with open(path, encoding="utf-8") as f:
+            key = json.load(f)
+    except Exception:
+        return f"The service account key file isn't a valid key (it should be the .json file from Google): {path}"
+    if not key.get("client_email") or not key.get("private_key"):
+        return f"The service account key file is missing its client_email / private_key, so it's the wrong file: {path}"
+    return ""
 
 def _get_worksheet():
     """Open (and cache) the target worksheet via the service account."""
@@ -900,6 +935,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 </style></head><body>
 <h1>Metal Identification Tickets — Container Supply Co.</h1>
 <div class="printer">Printer: __PRINTER__</div>
+__SETUP_PROBLEMS__
 <div class="scroll"><table>
   <thead><tr>__HEAD__</tr></thead>
   <tbody id="tbody"></tbody>
@@ -1237,7 +1273,37 @@ def render_page():
             .replace("__COLORS__", json.dumps(color_map))
             .replace("__LABELS__", json.dumps(labels))
             .replace("__DUMMY__", json.dumps(dummy))
-            .replace("__PRINTER__", PRINTER_NAME))
+            .replace("__PRINTER__", html_escape(printer_label()))
+            .replace("__SETUP_PROBLEMS__", setup_banner()))
+
+
+def html_escape(t):
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
+
+def printer_label():
+    found = find_printer()
+    if not found:
+        return "NOT FOUND"
+    return found if found == PRINTER_NAME else f"{found} (found automatically)"
+
+def setup_problems():
+    """What's wrong with this PC's setup, in plain words (empty = ready)."""
+    out = []
+    if not find_printer():
+        out.append("No Lexmark 2580 printer found in Windows. Plug it in, check it shows under Settings > "
+                   "Bluetooth & devices > Printers & scanners, then refresh this page.")
+    k = key_file_problem()
+    if k:
+        out.append(k + " — tickets will print but NOT be saved to the sheet until this is fixed. Then restart the program.")
+    return out
+
+def setup_banner():
+    probs = setup_problems()
+    if not probs:
+        return ""
+    return ('<div style="background:#fdecea;border:2px solid #c5221f;color:#8a1410;border-radius:8px;'
+            'padding:10px 14px;margin:0 0 14px;font-size:14px"><b>Setup problem:</b><ul style="margin:6px 0 0 18px;padding:0">'
+            + "".join(f"<li>{html_escape(p)}</li>" for p in probs) + "</ul></div>")
 
 
 @app_flask.route("/")
@@ -1329,7 +1395,10 @@ if __name__ == "__main__":
     print("\nInstalled printers:")
     for name in list_printers():
         print("   -", name)
-    print(f"\nCurrently set to: {PRINTER_NAME}")
+    print(f"\nSet to: {PRINTER_NAME}")
+    print(f"Using:  {find_printer() or 'NO LEXMARK 2580 FOUND'}")
+    for p in setup_problems():
+        print("SETUP PROBLEM:", p)
     print(f"Open http://localhost:{SERVER_PORT}  or  http://<this-pc-ip>:{SERVER_PORT}\n")
     # Use the production-grade 'waitress' server (stable for always-on, multi-user
     # office use). Falls back to Flask's dev server if waitress isn't installed.
